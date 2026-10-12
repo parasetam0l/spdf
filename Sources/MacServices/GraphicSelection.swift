@@ -145,6 +145,7 @@ public enum GraphicSelectionModel {
     }
     guard scaleX.isFinite, scaleY.isFinite, scaleX > 0, scaleY > 0 else { return nil }
     return (
-      dx: minX - start.minX, dy: minY - start.minY, scaleX: scaleX, scaleY: scaleY)
+      dx: Double(minX - start.minX), dy: Double(minY - start.minY),
+      scaleX: Double(scaleX), scaleY: Double(scaleY))
   }
 }
