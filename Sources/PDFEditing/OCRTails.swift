@@ -316,8 +316,11 @@ public enum OCRBenchmark {
       // Use a fresh image-only page per iteration when possible; otherwise
       // replace the layer so deltas stay comparable.
       let lines = (0..<linesPerPage).map { line in
-        SearchableTextLine(
-          text: "benchmark line \(index)-\(line)", rect: [10, Double(30 + line * 20), 300, Double(48 + line * 20)],
+        let bottom = Double(30 + line * 20)
+        let top = Double(48 + line * 20)
+        let rect: [Double] = [10, bottom, 300, top]
+        return SearchableTextLine(
+          text: "benchmark line \(index)-\(line)", rect: rect,
           confidence: 0.9)
       }
       let before = (try? PDFWriter.serialize(graph))?.count ?? 0

@@ -101,9 +101,9 @@ public enum TableCSVExport {
     } else {
       selected = []
     }
-    let text = selected.map { text(for: $0, options: options) }
+    let combinedText = selected.map { Self.text(for: $0, options: options) }
       .joined(separator: options.lineEnding)
-    return encode(text, options: options)
+    return encode(combinedText, options: options)
   }
 
   /// One CSV file per table, written with deterministic names.
