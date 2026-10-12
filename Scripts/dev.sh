@@ -9,7 +9,8 @@ package_options=(--disable-sandbox --scratch-path Work/SwiftPM --cache-path Work
 
 case "${1:-}" in
   test)
-    swift test "${package_options[@]}"
+    shift
+    swift test "${package_options[@]}" "$@"
     ;;
   fixtures)
     swift run "${package_options[@]}" spdf-fixtures Tests/Fixtures
