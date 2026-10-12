@@ -1,0 +1,80 @@
+name: SPDF
+options:
+  minimumXcodeGenVersion: 2.44.0
+  deploymentTarget:
+    macOS: "14.0"
+  createIntermediateGroups: true
+packages:
+  SPDF:
+    path: .
+  Sparkle:
+    url: https://github.com/sparkle-project/Sparkle
+    exactVersion: 2.10.0
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    SWIFT_STRICT_CONCURRENCY: complete
+    MACOSX_DEPLOYMENT_TARGET: "14.0"
+    ENABLE_HARDENED_RUNTIME: YES
+    CODE_SIGN_STYLE: Manual
+    CODE_SIGN_IDENTITY: "-"
+    DEVELOPMENT_TEAM: ""
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    ARCHS: arm64
+    ONLY_ACTIVE_ARCH: NO
+targets:
+  SPDF:
+    type: application
+    platform: macOS
+    sources:
+      - App
+    dependencies:
+      - package: SPDF
+        product: PDFCore
+      - package: SPDF
+        product: DocumentSession
+      - package: SPDF
+        product: MacServices
+      - package: Sparkle
+    settings:
+      base:
+        PRODUCT_NAME: sPDF Editor
+        PRODUCT_BUNDLE_IDENTIFIER: com.parasetam0l.spdf
+        INFOPLIST_KEY_CFBundleDisplayName: sPDF Editor
+        CODE_SIGN_INJECT_BASE_ENTITLEMENTS: NO
+    info:
+      path: App/Info.plist
+      properties:
+        CFBundleName: sPDF Editor
+        CFBundleDisplayName: sPDF Editor
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        LSMinimumSystemVersion: "14.0"
+        LSApplicationCategoryType: public.app-category.productivity
+        NSHighResolutionCapable: true
+        NSPrincipalClass: NSApplication
+        SUFeedURL: https://github.com/parasetam0l/spdf/releases/latest/download/appcast.xml
+        SUPublicEDKey: gl/opneF1c6iY7dHO0LlHtb1XSWZIYDTCBGzTaLh94A= # Public verification key shipped in the app. gitleaks:allow
+        SUScheduledCheckInterval: 86400
+        SUAllowsAutomaticUpdates: false
+        CFBundleDocumentTypes:
+          - CFBundleTypeName: PDF document
+            CFBundleTypeRole: Editor
+            LSHandlerRank: Alternate
+            LSItemContentTypes:
+              - com.adobe.pdf
+            NSDocumentClass: SPDFDocument
+    postBuildScripts:
+      - name: Sign Sparkle helpers
+        script: '"$SRCROOT/Scripts/sparkle-sign.sh"'
+        basedOnDependencyAnalysis: false
+schemes:
+  SPDF:
+    build:
+      targets:
+        SPDF: all
+    run:
+      config: Debug
+    archive:
+      config: Release

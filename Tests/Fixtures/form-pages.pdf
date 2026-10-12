@@ -1,0 +1,608 @@
+%PDF-1.7
+%‚„œ”
+1 0 obj
+<<
+/AcroForm 101 0 R
+/Pages 2 0 R
+/Type /Catalog
+>>
+endobj
+2 0 obj
+<<
+/Count 2
+/Kids [3 0 R 4 0 R]
+/Type /Pages
+>>
+endobj
+3 0 obj
+<<
+/Annots [110 0 R 121 0 R 131 0 R 141 0 R 151 0 R 161 0 R 171 0 R 180 0 R 191 0 R 201 0 R 211 0 R]
+/Contents 5 0 R
+/MediaBox [0 0 612 792]
+/Parent 2 0 R
+/Resources <<
+/Font <<
+/F1 7 0 R
+>>
+>>
+/Type /Page
+>>
+endobj
+4 0 obj
+<<
+/Annots [142 0 R]
+/Contents 6 0 R
+/MediaBox [0 0 612 792]
+/Parent 2 0 R
+/Resources <<
+/Font <<
+/F1 7 0 R
+>>
+>>
+/Type /Page
+>>
+endobj
+5 0 obj
+<<
+/Length 65
+>>
+stream
+BT /F1 12 Tf 42 710 Td (sPDF Editor form fixture - page 1) Tj ET
+
+endstream
+endobj
+6 0 obj
+<<
+/Length 65
+>>
+stream
+BT /F1 12 Tf 42 710 Td (sPDF Editor form fixture - page 2) Tj ET
+
+endstream
+endobj
+7 0 obj
+<<
+/BaseFont /Helvetica
+/Encoding /WinAnsiEncoding
+/Subtype /Type1
+/Type /Font
+>>
+endobj
+100 0 obj
+<<
+/BaseFont /Helvetica
+/Encoding /WinAnsiEncoding
+/Subtype /Type1
+/Type /Font
+>>
+endobj
+101 0 obj
+<<
+/DA <2F48656C7620313220546620302067>
+/DR <<
+/Font <<
+/Helv 100 0 R
+>>
+>>
+/Fields [110 0 R 120 0 R 130 0 R 140 0 R 150 0 R 160 0 R 170 0 R 190 0 R 200 0 R 210 0 R]
+>>
+endobj
+110 0 obj
+<<
+/AP <<
+/N 111 0 R
+>>
+/DA <2F48656C7620313220546620302067>
+/FT /Tx
+/P 3 0 R
+/Rect [100 600 300 620]
+/Subtype /Widget
+/T <6E616D65>
+/V <>
+>>
+endobj
+111 0 obj
+<<
+/BBox [0 0 200 20]
+/FormType 1
+/Length 4
+/Subtype /Form
+/Type /XObject
+>>
+stream
+q Q
+
+endstream
+endobj
+120 0 obj
+<<
+/DV <64656661756C74206E6F746573>
+/FT /Tx
+/Ff 4098
+/Kids [121 0 R]
+/T <6E6F746573>
+/V <>
+>>
+endobj
+121 0 obj
+<<
+/AP <<
+/N 122 0 R
+>>
+/MK <<
+/BC [0 0 0]
+/BG [1 1 1]
+>>
+/P 3 0 R
+/Parent 120 0 R
+/Rect [100 540 300 580]
+/Subtype /Widget
+>>
+endobj
+122 0 obj
+<<
+/BBox [0 0 200 40]
+/FormType 1
+/Length 4
+/Subtype /Form
+/Type /XObject
+>>
+stream
+q Q
+
+endstream
+endobj
+130 0 obj
+<<
+/DV /Off
+/FT /Btn
+/Kids [131 0 R]
+/T <6167726565>
+/V /Off
+>>
+endobj
+131 0 obj
+<<
+/AP <<
+/N <<
+/Off 132 0 R
+/Yes 133 0 R
+>>
+>>
+/AS /Off
+/P 3 0 R
+/Parent 130 0 R
+/Rect [100 480 120 500]
+/Subtype /Widget
+>>
+endobj
+132 0 obj
+<<
+/BBox [0 0 20 20]
+/FormType 1
+/Length 4
+/Subtype /Form
+/Type /XObject
+>>
+stream
+q Q
+
+endstream
+endobj
+133 0 obj
+<<
+/BBox [0 0 20 20]
+/FormType 1
+/Length 26
+/Subtype /Form
+/Type /XObject
+>>
+stream
+q 0 0 m 5 5 l 20 20 l S Q
+
+endstream
+endobj
+140 0 obj
+<<
+/FT /Btn
+/Ff 32768
+/Kids [141 0 R 142 0 R]
+/T <636F6C6F72>
+/V /Off
+>>
+endobj
+141 0 obj
+<<
+/AP <<
+/N <<
+/A 144 0 R
+/Off 143 0 R
+>>
+>>
+/AS /Off
+/P 3 0 R
+/Parent 140 0 R
+/Rect [100 420 120 440]
+/Subtype /Widget
+>>
+endobj
+142 0 obj
+<<
+/AP <<
+/N <<
+/B 145 0 R
+/Off 143 0 R
+>>
+>>
+/AS /Off
+/P 4 0 R
+/Parent 140 0 R
+/Rect [200 420 220 440]
+/Subtype /Widget
+>>
+endobj
+143 0 obj
+<<
+/BBox [0 0 20 20]
+/FormType 1
+/Length 4
+/Subtype /Form
+/Type /XObject
+>>
+stream
+q Q
+
+endstream
+endobj
+144 0 obj
+<<
+/BBox [0 0 20 20]
+/FormType 1
+/Length 19
+/Subtype /Form
+/Type /XObject
+>>
+stream
+q 0 0 20 20 re f Q
+
+endstream
+endobj
+145 0 obj
+<<
+/BBox [0 0 20 20]
+/FormType 1
+/Length 19
+/Subtype /Form
+/Type /XObject
+>>
+stream
+q 0 0 20 20 re f Q
+
+endstream
+endobj
+150 0 obj
+<<
+/FT /Btn
+/Ff 65536
+/Kids [151 0 R]
+/T <7375626D6974>
+>>
+endobj
+151 0 obj
+<<
+/A <<
+/JS <6170702E616C65727428277375626D69742729>
+/S /JavaScript
+>>
+/AP <<
+/N 152 0 R
+>>
+/P 3 0 R
+/Parent 150 0 R
+/Rect [100 360 180 384]
+/Subtype /Widget
+>>
+endobj
+152 0 obj
+<<
+/BBox [0 0 80 24]
+/FormType 1
+/Length 4
+/Subtype /Form
+/Type /XObject
+>>
+stream
+q Q
+
+endstream
+endobj
+160 0 obj
+<<
+/FT /Sig
+/Kids [161 0 R]
+/T <736967>
+>>
+endobj
+161 0 obj
+<<
+/AP <<
+/N 162 0 R
+>>
+/P 3 0 R
+/Parent 160 0 R
+/Rect [100 300 240 330]
+/Subtype /Widget
+>>
+endobj
+162 0 obj
+<<
+/BBox [0 0 140 30]
+/FormType 1
+/Length 4
+/Subtype /Form
+/Type /XObject
+>>
+stream
+q Q
+
+endstream
+endobj
+170 0 obj
+<<
+/FT /Tx
+/Ff 1
+/Kids [171 0 R]
+/T <6C6F636B6564>
+/V <6C6F636B6564>
+>>
+endobj
+171 0 obj
+<<
+/AP <<
+/N 172 0 R
+>>
+/P 3 0 R
+/Parent 170 0 R
+/Rect [100 240 240 264]
+/Subtype /Widget
+>>
+endobj
+172 0 obj
+<<
+/BBox [0 0 140 24]
+/FormType 1
+/Length 4
+/Subtype /Form
+/Type /XObject
+>>
+stream
+q Q
+
+endstream
+endobj
+180 0 obj
+<<
+/AP <<
+/N 181 0 R
+>>
+/P 3 0 R
+/Rect [300 600 320 620]
+/Subtype /Widget
+>>
+endobj
+181 0 obj
+<<
+/BBox [0 0 20 20]
+/FormType 1
+/Length 4
+/Subtype /Form
+/Type /XObject
+>>
+stream
+q Q
+
+endstream
+endobj
+190 0 obj
+<<
+/FT /Btn
+/Kids [191 0 R]
+/T <6578747261>
+/V /Off
+>>
+endobj
+191 0 obj
+<<
+/AP <<
+/N <<
+/Off 192 0 R
+>>
+>>
+/AS /Off
+/P 3 0 R
+/Parent 190 0 R
+/Rect [140 480 160 500]
+/Subtype /Widget
+>>
+endobj
+192 0 obj
+<<
+/BBox [0 0 20 20]
+/FormType 1
+/Length 4
+/Subtype /Form
+/Type /XObject
+>>
+stream
+q Q
+
+endstream
+endobj
+200 0 obj
+<<
+/DV <53616C6573>
+/FT /Ch
+/Ff 131072
+/Kids [201 0 R]
+/Opt [<456E67696E656572696E67> <53616C6573> <537570706F7274>]
+/T <6465706172746D656E74>
+/V <456E67696E656572696E67>
+>>
+endobj
+201 0 obj
+<<
+/AP <<
+/N 202 0 R
+>>
+/P 3 0 R
+/Parent 200 0 R
+/Rect [320 600 480 620]
+/Subtype /Widget
+>>
+endobj
+202 0 obj
+<<
+/BBox [0 0 160 20]
+/FormType 1
+/Length 4
+/Subtype /Form
+/Type /XObject
+>>
+stream
+q Q
+
+endstream
+endobj
+210 0 obj
+<<
+/FT /Ch
+/I [1]
+/Kids [211 0 R]
+/Opt [[<726564> <526564205465616D>] [<626C7565> <426C7565205465616D>]]
+/T <7465616D>
+/V <626C7565>
+>>
+endobj
+211 0 obj
+<<
+/AP <<
+/N 212 0 R
+>>
+/P 3 0 R
+/Parent 210 0 R
+/Rect [320 540 480 580]
+/Subtype /Widget
+>>
+endobj
+212 0 obj
+<<
+/BBox [0 0 160 40]
+/FormType 1
+/Length 4
+/Subtype /Form
+/Type /XObject
+>>
+stream
+q Q
+
+endstream
+endobj
+xref
+0 1
+0000000000 65535 f 
+1 1
+0000000015 00000 n 
+2 1
+0000000082 00000 n 
+3 1
+0000000145 00000 n 
+4 1
+0000000369 00000 n 
+5 1
+0000000513 00000 n 
+6 1
+0000000628 00000 n 
+7 1
+0000000743 00000 n 
+100 1
+0000000840 00000 n 
+101 1
+0000000939 00000 n 
+110 1
+0000001125 00000 n 
+111 1
+0000001284 00000 n 
+120 1
+0000001400 00000 n 
+121 1
+0000001511 00000 n 
+122 1
+0000001655 00000 n 
+130 1
+0000001771 00000 n 
+131 1
+0000001852 00000 n 
+132 1
+0000001995 00000 n 
+133 1
+0000002110 00000 n 
+140 1
+0000002248 00000 n 
+141 1
+0000002338 00000 n 
+142 1
+0000002479 00000 n 
+143 1
+0000002620 00000 n 
+144 1
+0000002735 00000 n 
+145 1
+0000002866 00000 n 
+150 1
+0000002997 00000 n 
+151 1
+0000003073 00000 n 
+152 1
+0000003252 00000 n 
+160 1
+0000003367 00000 n 
+161 1
+0000003427 00000 n 
+162 1
+0000003537 00000 n 
+170 1
+0000003653 00000 n 
+171 1
+0000003742 00000 n 
+172 1
+0000003852 00000 n 
+180 1
+0000003968 00000 n 
+181 1
+0000004062 00000 n 
+190 1
+0000004177 00000 n 
+191 1
+0000004249 00000 n 
+192 1
+0000004379 00000 n 
+200 1
+0000004494 00000 n 
+201 1
+0000004685 00000 n 
+202 1
+0000004795 00000 n 
+210 1
+0000004911 00000 n 
+211 1
+0000005064 00000 n 
+212 1
+0000005174 00000 n 
+trailer
+<<
+/Root 1 0 R
+/Size 213
+>>
+startxref
+5290
+%%EOF

@@ -1,0 +1,82 @@
+%PDF-1.7
+%‚„œ”
+1 0 obj
+<<
+/Pages 2 0 R
+/Type /Catalog
+>>
+endobj
+2 0 obj
+<<
+/Count 2
+/Kids [3 0 R 4 0 R]
+/Type /Pages
+>>
+endobj
+3 0 obj
+<<
+/Contents 5 0 R
+/CropBox [10 20 602 772]
+/MediaBox [0 0 612 792]
+/Parent 2 0 R
+/Resources <<
+/Font <<
+/F1 6 0 R
+>>
+>>
+/Type /Page
+>>
+endobj
+4 0 obj
+<<
+/Contents 5 0 R
+/MediaBox [0 0 612 792]
+/Parent 2 0 R
+/Resources <<
+/Font <<
+/F1 6 0 R
+>>
+>>
+/Rotate 90
+/Type /Page
+>>
+endobj
+5 0 obj
+<<
+/Length 47
+>>
+stream
+BT /F1 12 Tf 42 700 Td (Cropped fixture) Tj ET
+
+endstream
+endobj
+6 0 obj
+<<
+/BaseFont /Helvetica
+/Subtype /Type1
+/Type /Font
+>>
+endobj
+xref
+0 1
+0000000000 65535 f 
+1 1
+0000000015 00000 n 
+2 1
+0000000064 00000 n 
+3 1
+0000000127 00000 n 
+4 1
+0000000278 00000 n 
+5 1
+0000000415 00000 n 
+6 1
+0000000512 00000 n 
+trailer
+<<
+/Root 1 0 R
+/Size 7
+>>
+startxref
+582
+%%EOF

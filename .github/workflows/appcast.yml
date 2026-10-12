@@ -1,0 +1,122 @@
+# Attaches appcast.xml (the Sparkle feed) and release-manifest.json to a
+# release. The feed lists that release's DMG with its EdDSA signature and
+# release notes as published. The app reads it from the latest published
+# release, so drafts are never offered.
+#
+# Runs when the release workflow calls it (before publication) or manually
+# for a trusted repair: Actions → Appcast → Run workflow with a tag.
+#
+# One-time setup (signing key): Docs/Releasing.md.
+name: Appcast
+
+on:
+  workflow_call:
+    inputs:
+      tag:
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag, e.g. v1.2.0"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  appcast:
+    runs-on: macos-26
+    timeout-minutes: 30
+    env:
+      TAG: ${{ inputs.tag }}
+      GH_TOKEN: ${{ github.token }}
+      SPARKLE_VERSION: 2.10.0
+      SPARKLE_SHA256: c2bf58aa8387266ac179357b1415d6f2635f044da8be41042af32425dae6da0c
+    steps:
+      - name: Check the signing key
+        env:
+          SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
+        run: |
+          if [[ -z "$SPARKLE_PRIVATE_KEY" ]]; then
+            echo "::error::Missing repository secret SPARKLE_PRIVATE_KEY (see Docs/Releasing.md)."
+            exit 1
+          fi
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Build the release tools
+        run: |
+          swift build -c release --product release-tools
+          echo "RELEASE_TOOLS_BIN=$(swift build -c release --show-bin-path)/release-tools" >> "$GITHUB_ENV"
+
+      - name: Get Sparkle's tools
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/sparkle.tar.xz" \
+            "https://github.com/sparkle-project/Sparkle/releases/download/$SPARKLE_VERSION/Sparkle-$SPARKLE_VERSION.tar.xz"
+          echo "$SPARKLE_SHA256  $RUNNER_TEMP/sparkle.tar.xz" | shasum -a 256 -c -
+          mkdir -p "$RUNNER_TEMP/sparkle"
+          tar -xf "$RUNNER_TEMP/sparkle.tar.xz" -C "$RUNNER_TEMP/sparkle"
+
+      - name: Download the DMG and read the app's metadata
+        run: |
+          mkdir -p "$RUNNER_TEMP/release" "$RUNNER_TEMP/mnt"
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" \
+            --pattern "sPDF-Editor-*.dmg" --dir "$RUNNER_TEMP/release"
+          dmg="$(ls "$RUNNER_TEMP"/release/sPDF-Editor-*.dmg)"
+          hdiutil attach -nobrowse -readonly -mountpoint "$RUNNER_TEMP/mnt" "$dmg" >/dev/null
+          info="$RUNNER_TEMP/mnt/sPDF Editor.app/Contents/Info.plist"
+          {
+            echo "DMG=$dmg"
+            echo "SHORT_VERSION=$(plutil -extract CFBundleShortVersionString raw -o - "$info")"
+            echo "BUILD_VERSION=$(plutil -extract CFBundleVersion raw -o - "$info")"
+            echo "MINIMUM_SYSTEM=$(plutil -extract LSMinimumSystemVersion raw -o - "$info")"
+            echo "APP_PUBLIC_KEY=$(plutil -extract SUPublicEDKey raw -o - "$info")"
+          } >> "$GITHUB_ENV"
+
+      - name: Sign the DMG and verify independently
+        env:
+          SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
+        run: |
+          signature="$(printf '%s' "$SPARKLE_PRIVATE_KEY" | "$RUNNER_TEMP/sparkle/bin/sign_update" --ed-key-file - -p "$DMG")"
+          # The same check an installed sPDF Editor makes: a key mix-up
+          # fails here instead of on the owner's Mac.
+          "$RELEASE_TOOLS_BIN" verify-signature "$APP_PUBLIC_KEY" "$signature" "$DMG"
+          echo "SIGNATURE=$signature" >> "$GITHUB_ENV"
+
+      - name: Write and attach the appcast and manifest
+        run: |
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" \
+            --json body,publishedAt,url > "$RUNNER_TEMP/release.json"
+          "$RELEASE_TOOLS_BIN" release-body "$RUNNER_TEMP/release.json" "$RUNNER_TEMP/notes.md"
+          gh api markdown -F text=@"$RUNNER_TEMP/notes.md" -f mode=gfm \
+            -f context="$GITHUB_REPOSITORY" > "$RUNNER_TEMP/notes.html"
+          published="$("$RELEASE_TOOLS_BIN" release-field "$RUNNER_TEMP/release.json" publishedAt)"
+          release_url="$("$RELEASE_TOOLS_BIN" release-field "$RUNNER_TEMP/release.json" url)"
+          "$RELEASE_TOOLS_BIN" appcast \
+            --title "sPDF Editor $SHORT_VERSION" \
+            --version "$BUILD_VERSION" \
+            --short-version "$SHORT_VERSION" \
+            --minimum-system "$MINIMUM_SYSTEM" \
+            --published "$published" \
+            --dmg-url "https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/$(basename "$DMG")" \
+            --dmg-path "$DMG" \
+            --signature "$SIGNATURE" \
+            --notes-html "$RUNNER_TEMP/notes.html" \
+            --release-url "$release_url" \
+            --feed-link "https://github.com/$GITHUB_REPOSITORY/releases" \
+            > "$RUNNER_TEMP/appcast.xml"
+          "$RELEASE_TOOLS_BIN" validate-appcast "$RUNNER_TEMP/appcast.xml" \
+            --dmg-path "$DMG" --public-key "$APP_PUBLIC_KEY"
+          "$RELEASE_TOOLS_BIN" manifest \
+            --app "$RUNNER_TEMP/mnt/sPDF Editor.app" \
+            --dmg "$DMG" \
+            --dmg-url "https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/$(basename "$DMG")" \
+            --signature "$SIGNATURE" > "$RUNNER_TEMP/release-manifest.json"
+          hdiutil detach "$RUNNER_TEMP/mnt" -quiet
+          gh release upload "$TAG" "$RUNNER_TEMP/appcast.xml" \
+            "$RUNNER_TEMP/release-manifest.json" --repo "$GITHUB_REPOSITORY" --clobber
+          echo "Attached appcast.xml and release-manifest.json to $TAG: sPDF Editor $SHORT_VERSION ($BUILD_VERSION)." >> "$GITHUB_STEP_SUMMARY"
