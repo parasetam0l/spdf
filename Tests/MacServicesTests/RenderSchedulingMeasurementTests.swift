@@ -80,23 +80,27 @@ struct RenderSchedulingMeasurementTests {
       try await service.render(
         PageRenderRequest(documentID: id, revision: 1, pageIndex: 0, scale: 0.2))
     }
-    _ = await schedulingWait { await gate.entryCount() == 1 }
+    let occupantEntered = await schedulingWait { await gate.entryCount() == 1 }
+    #expect(occupantEntered)
     // Queue background thumbnails, then an interactive visible request.
     let start = ContinuousClock.now
-    let thumbnails = Task {
-      await withTaskGroup(of: Void.self) { group in
-        for page in [1, 2] {
-          group.addTask {
-            _ = try? await service.render(
-              PageRenderRequest(
-                documentID: id, revision: 1, pageIndex: page, scale: 0.2,
-                purpose: .thumbnail))
-          }
-        }
-      }
+    // Establish arrival order before testing FIFO within thumbnail priority.
+    let firstThumbnail = Task {
+      try await service.render(
+        PageRenderRequest(
+          documentID: id, revision: 1, pageIndex: 1, scale: 0.2,
+          purpose: .thumbnail))
     }
-    // Let both thumbnails reach the queue before the visible request.
-    _ = await schedulingWait { await service.pendingRenderCount() >= 3 }
+    let firstQueued = await schedulingWait { await service.pendingRenderCount() >= 2 }
+    #expect(firstQueued)
+    let secondThumbnail = Task {
+      try await service.render(
+        PageRenderRequest(
+          documentID: id, revision: 1, pageIndex: 2, scale: 0.2,
+          purpose: .thumbnail))
+    }
+    let secondQueued = await schedulingWait { await service.pendingRenderCount() >= 3 }
+    #expect(secondQueued)
     let visibleStart = ContinuousClock.now
     let visible = Task {
       try await service.render(
@@ -104,10 +108,12 @@ struct RenderSchedulingMeasurementTests {
           documentID: id, revision: 1, pageIndex: 1, scale: 0.5,
           purpose: .visible))
     }
-    _ = await schedulingWait { await service.pendingRenderCount() >= 4 }
+    let visibleQueued = await schedulingWait { await service.pendingRenderCount() >= 4 }
+    #expect(visibleQueued)
     await gate.release()
     let visibleResult = try await visible.value
-    await thumbnails.value
+    _ = try await firstThumbnail.value
+    _ = try await secondThumbnail.value
     _ = try await occupant.value
     let end = ContinuousClock.now
     let visibleLatency = (visibleStart.duration(to: end) as Duration).formatted
