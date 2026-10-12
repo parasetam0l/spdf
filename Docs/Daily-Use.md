@@ -12,7 +12,7 @@ Select an image or graphic placement to move or resize it. Image commands includ
 
 ## Annotate, fill forms, and organize pages
 
-Use the Tools menu for markup, notes, text boxes, shapes, ink, and drawn signatures. The comments sidebar supports navigation, replies, and review state. Common form fields can be filled in the page; form properties and authoring commands are available through the menus.
+Use the Edit and Annotate menus for markup, notes, text boxes, shapes, ink, and drawn signatures. The comments sidebar supports navigation, replies, and review state. Common form fields can be filled in the page; form properties and authoring commands are available through the menus.
 
 Use the page organizer for supported page reordering, rotation, insertion, import, extraction, and deletion. Operations that would damage references are refused or require a supported resolution.
 
