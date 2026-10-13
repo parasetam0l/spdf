@@ -268,9 +268,14 @@ enum KeyboardAudit {
   static func press(_ title: String) -> Bool {
     guard let item = find(title), !item.keyEquivalent.isEmpty else { return false }
     item.menu?.update()
-    // Key code zero is the physical A key. Save needs an S key event,
-    // otherwise AppKit can treat a synthetic Command-S as Select All.
-    let keyCode = item.keyEquivalent == "s" ? UInt16(kVK_ANSI_S) : UInt16(0)
+    // Text commands need their physical keys as well as their characters.
+    // Key code zero is A, which can route Command-S/F as Select All.
+    let keyCode: UInt16
+    switch item.keyEquivalent {
+    case "s": keyCode = UInt16(kVK_ANSI_S)
+    case "f": keyCode = UInt16(kVK_ANSI_F)
+    default: keyCode = 0
+    }
     guard item.isEnabled,
       let event = NSEvent.keyEvent(
         with: .keyDown, location: .zero, modifierFlags: item.keyEquivalentModifierMask,

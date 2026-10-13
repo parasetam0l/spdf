@@ -188,7 +188,10 @@ struct WorkspaceView: View {
         .buttonStyle(.borderless)
         .padding(.horizontal, 16).padding(.vertical, 8)
         .background(.bar)
-        .onAppear { searchFocused = true }
+        .onAppear {
+          // Focus after SwiftUI has attached the conditional native text field.
+          DispatchQueue.main.async { searchFocused = true }
+        }
         Divider()
       }
       if case .failed(let message) = viewer.documentState {
