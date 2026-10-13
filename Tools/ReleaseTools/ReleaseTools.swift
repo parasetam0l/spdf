@@ -282,6 +282,11 @@ public enum CorpusManifest {
   public struct Manifest: Codable, Sendable, Equatable {
     public var version: Int
     public var documents: [CorpusEntry]
+
+    public init(version: Int, documents: [CorpusEntry]) {
+      self.version = version
+      self.documents = documents
+    }
   }
 
   /// Parse and validate a manifest: version 1, unique non-empty ids, paths
@@ -332,6 +337,122 @@ public enum CorpusManifest {
           sha256: String(repeating: "0", count: 63) + "1",
           notes: "Synthetic example only; not a real document."),
       ])
+  }
+}
+
+// MARK: - Private corpus matrix (P38-025 preparation; P03-023 schema)
+
+/// Groups a validated manifest by producer/version/feature combinations so
+/// coverage gaps are explicit. Operates on in-memory entries only (synthetic
+/// or owner-supplied); performs no filesystem access and never logs document
+/// content. Empty producer/version/feature values are reported under
+/// explicit placeholder keys so gaps are visible instead of silently dropped.
+public struct CorpusMatrix: Sendable, Equatable {
+  public var totalDocuments: Int
+  public var totalPages: Int
+  public var byProducer: [String: Int]
+  public var byProducerVersion: [String: Int]
+  public var byFeature: [String: Int]
+  public var byCombination: [String: Int]
+
+  public init(
+    totalDocuments: Int, totalPages: Int, byProducer: [String: Int],
+    byProducerVersion: [String: Int], byFeature: [String: Int],
+    byCombination: [String: Int]
+  ) {
+    self.totalDocuments = totalDocuments
+    self.totalPages = totalPages
+    self.byProducer = byProducer
+    self.byProducerVersion = byProducerVersion
+    self.byFeature = byFeature
+    self.byCombination = byCombination
+  }
+
+  public static let unspecifiedProducer = "<unspecified-producer>"
+  public static let unspecifiedVersion = "<unspecified-version>"
+  public static let noFeature = "<no-feature>"
+
+  public static func producerVersionKey(producer: String, version: String) -> String {
+    "\(producer) @ \(version)"
+  }
+
+  public static func combinationKey(producer: String, version: String, feature: String)
+    -> String
+  {
+    "\(producer) @ \(version) + \(feature)"
+  }
+
+  static func normalizedProducer(_ raw: String) -> String {
+    let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+    return trimmed.isEmpty ? unspecifiedProducer : trimmed
+  }
+
+  static func normalizedVersion(_ raw: String) -> String {
+    let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+    return trimmed.isEmpty ? unspecifiedVersion : trimmed
+  }
+
+  static func normalizedFeatures(_ raw: [String]) -> [String] {
+    let cleaned = raw.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+      .filter { !$0.isEmpty }
+    return Array(Set(cleaned)).sorted()
+  }
+
+  /// Build matrix counts from an already-validated manifest.
+  public static func build(from manifest: CorpusManifest.Manifest) -> CorpusMatrix {
+    var byProducer: [String: Int] = [:]
+    var byProducerVersion: [String: Int] = [:]
+    var byFeature: [String: Int] = [:]
+    var byCombination: [String: Int] = [:]
+    var totalPages = 0
+    for entry in manifest.documents {
+      let producer = normalizedProducer(entry.producer)
+      let version = normalizedVersion(entry.producerVersion)
+      let features = normalizedFeatures(entry.features)
+      totalPages += max(0, entry.pages)
+      byProducer[producer, default: 0] += 1
+      byProducerVersion[producerVersionKey(producer: producer, version: version), default: 0] += 1
+      if features.isEmpty {
+        byFeature[noFeature, default: 0] += 1
+        byCombination[
+          combinationKey(producer: producer, version: version, feature: noFeature),
+          default: 0] += 1
+      } else {
+        for feature in features {
+          byFeature[feature, default: 0] += 1
+          byCombination[
+            combinationKey(producer: producer, version: version, feature: feature),
+            default: 0] += 1
+        }
+      }
+    }
+    return CorpusMatrix(
+      totalDocuments: manifest.documents.count,
+      totalPages: totalPages,
+      byProducer: byProducer,
+      byProducerVersion: byProducerVersion,
+      byFeature: byFeature,
+      byCombination: byCombination)
+  }
+
+  /// Deterministic human-readable summary with sorted keys.
+  public func report() -> String {
+    func lines(_ title: String, _ counts: [String: Int]) -> [String] {
+      var out = ["\(title) (\(counts.count)):"]
+      for key in counts.keys.sorted() {
+        out.append("  \(key): \(counts[key] ?? 0)")
+      }
+      return out
+    }
+    var out = [
+      "documents: \(totalDocuments)",
+      "pages: \(totalPages)",
+    ]
+    out += lines("producers", byProducer)
+    out += lines("producer-versions", byProducerVersion)
+    out += lines("features", byFeature)
+    out += lines("combinations", byCombination)
+    return out.joined(separator: "\n")
   }
 }
 

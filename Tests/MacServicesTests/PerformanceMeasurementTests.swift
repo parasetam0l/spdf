@@ -274,6 +274,142 @@ struct PerformanceMeasurementTests {
     #expect(fontLatency < 2_000)
   }
 
+  // MARK: - P39-010
+
+  @Test func fontLoadingShapingAndSubsetReuse() throws {
+    // Loading: inventory across the 50-page synthetic doc, two passes.
+    let graph = synthetic(pages: 50, lines: 40, fonts: 8)
+    let pageIDs = try PDFPageTree.pageIDs(in: graph)
+    let loadStart = ContinuousClock.now
+    let firstInventory = PDFFontInventory.fonts(in: graph, pageIDs: pageIDs)
+    let loadLatency = millis(ContinuousClock.now - loadStart)
+    let reloadStart = ContinuousClock.now
+    let secondInventory = PDFFontInventory.fonts(in: graph, pageIDs: pageIDs)
+    let reloadLatency = millis(ContinuousClock.now - reloadStart)
+    #expect(firstInventory.count == secondInventory.count)
+    // Shaping: latin, ligature/combining, and RTL strings through CoreText,
+    // two passes with identical results (no shaping cache in the path).
+    let provider = FontProvider()
+    let samples = [
+      ("Hello world", "Helvetica", "en"),
+      ("fi â İstanbul", "Helvetica", "tr"),
+      ("שלום עולם", "Helvetica", "he"),
+    ]
+    func shapeAll() -> Int {
+      var glyphs = 0
+      for (text, font, language) in samples {
+        for _ in 0..<20 {
+          glyphs += provider.shape(text, fontName: font, pointSize: 12, language: language).glyphs.count
+        }
+      }
+      return glyphs
+    }
+    let shapeStart = ContinuousClock.now
+    let firstGlyphs = shapeAll()
+    let shapeLatency = millis(ContinuousClock.now - shapeStart)
+    let reshapeStart = ContinuousClock.now
+    let secondGlyphs = shapeAll()
+    let reshapeLatency = millis(ContinuousClock.now - reshapeStart)
+    #expect(firstGlyphs > 0)
+    #expect(secondGlyphs == firstGlyphs)
+    // Subsetting: same program+coverage twice. There is no subset-data
+    // cache, so both runs do the work; determinism (identical bytes) is
+    // what makes graph-dedup reuse (P15-022) sound.
+    guard let program = Data(base64Encoded: FontFixtureData.subsetProgramBase64) else {
+      Issue.record("test font program is corrupt")
+      return
+    }
+    let coverage: Set<Int> = [0x41, 0xE2]
+    let subsetStart = ContinuousClock.now
+    let firstSubset = try TrueTypeSubsetter.subset(program: program, unicodes: coverage)
+    let subsetLatency = millis(ContinuousClock.now - subsetStart)
+    let resubsetStart = ContinuousClock.now
+    let secondSubset = try TrueTypeSubsetter.subset(program: program, unicodes: coverage)
+    let resubsetLatency = millis(ContinuousClock.now - resubsetStart)
+    #expect(!firstSubset.isEmpty)
+    #expect(secondSubset == firstSubset)
+    print(
+      "[P39] fonts load \(loadLatency)/\(reloadLatency) ms (\(firstInventory.count)); "
+        + "shape \(shapeLatency)/\(reshapeLatency) ms (\(firstGlyphs) glyphs); "
+        + "subset \(subsetLatency)/\(resubsetLatency) ms (\(firstSubset.count) bytes, deterministic)")
+    #expect(loadLatency < 2_000)
+    #expect(reloadLatency < 2_000)
+    #expect(shapeLatency < 5_000)
+    #expect(reshapeLatency < 5_000)
+    #expect(subsetLatency < 5_000)
+    #expect(resubsetLatency < 5_000)
+  }
+
+  // MARK: - P39-016 (comment core half; sidebar rendering needs the UI session)
+
+  @Test func commentListFilterThreadsAndSummaryAtScale() throws {
+    // 1,000 text annotations across 10 pages with mixed review states and
+    // every tenth as a reply; times listing, filtering, threading, and the
+    // review summary over two passes (pure functions, so passes agree).
+    var graph = synthetic(pages: 10, lines: 5)
+    let parsedIDs = try PDFPageTree.pageIDs(in: graph)
+    let states: [PDFName?] = [nil, PDFName("Accepted"), PDFName("Rejected")]
+    var nextID = 5_000
+    var replyParent: PDFObjectID?
+    for (pageIndex, pageID) in parsedIDs.enumerated() {
+      var items: [PDFValue] = []
+      for index in 0..<100 {
+        let annotationID = PDFObjectID(nextID)
+        nextID += 1
+        var dict: [PDFName: PDFValue] = [
+          PDFName("Type"): .name(PDFName("Annot")),
+          PDFName("Subtype"): .name(PDFName("Text")),
+          PDFName("Rect"): .array([
+            .integer(10), .integer(10), .integer(30), .integer(30),
+          ]),
+          PDFName("Contents"): .string(Data("page \(pageIndex) note \(index)".utf8)),
+          PDFName("T"): .string(Data("Reviewer \(index % 7)".utf8)),
+        ]
+        if let state = states[index % states.count] {
+          dict[PDFName("State")] = .name(state)
+          dict[PDFName("StateModel")] = .name(PDFName("Review"))
+        }
+        if index % 10 == 9, let parent = replyParent {
+          dict[PDFName("IRT")] = .reference(parent)
+          dict[PDFName("RT")] = .name(PDFName("R"))
+          replyParent = nil
+        } else if index % 10 == 8 {
+          replyParent = annotationID
+        }
+        graph.objects[annotationID] = .dictionary(dict)
+        items.append(.reference(annotationID))
+      }
+      guard case .dictionary(var page)? = graph.objects[pageID] else {
+        Issue.record("synthetic page is missing")
+        return
+      }
+      page[PDFName("Annots")] = .array(items)
+      graph.objects[pageID] = .dictionary(page)
+    }
+    func measure() throws -> (listed: Int, threads: Int, summary: String, ms: Int) {
+      let start = ContinuousClock.now
+      let listed = CommentList.comments(in: graph, pageIDs: parsedIDs)
+      let accepted = CommentList.filter(listed, by: CommentFilter(state: PDFName("Accepted")))
+      let threaded = CommentList.threads(listed, by: CommentFilter())
+      let summary = CommentSummary.text(comments: listed)
+      _ = accepted.count
+      return (listed.count, threaded.count, summary, millis(ContinuousClock.now - start))
+    }
+    let first = try measure()
+    let second = try measure()
+    #expect(first.listed == 1_000)
+    #expect(second.listed == first.listed)
+    #expect(second.threads == first.threads)
+    #expect(first.threads == 900)
+    #expect(second.summary == first.summary)
+    #expect(first.summary.contains("Comments: 1000"))
+    print(
+      "[P39] 1000 comments: list/filter/threads/summary \(first.ms)/\(second.ms) ms "
+        + "(\(first.threads) threads)")
+    #expect(first.ms < 5_000)
+    #expect(second.ms < 5_000)
+  }
+
   // MARK: - P39-011
 
   @Test func textEditPreviewAndCommitLatency() throws {

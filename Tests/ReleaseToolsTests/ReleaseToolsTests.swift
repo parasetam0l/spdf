@@ -96,6 +96,9 @@ struct ReleaseToolsTests {
 
 /// P03-023: the private-corpus manifest validates schemas without ever
 /// seeing personal content (the sample below is synthetic).
+///
+/// P38-025 preparation: the matrix groups validated entries by
+/// producer/version/feature so owner-supplied coverage gaps are explicit.
 extension ReleaseToolsTests {
   @Test func corpusManifestValidatesSchemaRules() throws {
     let sample = try JSONEncoder().encode(CorpusManifest.sample())
@@ -130,5 +133,62 @@ extension ReleaseToolsTests {
     #expect(throws: CorpusManifestError.self) {
       try load("not json")
     }
+  }
+
+  @Test func corpusMatrixGroupsByProducerVersionAndFeature() throws {
+    let manifest = CorpusManifest.Manifest(
+      version: 1,
+      documents: [
+        CorpusEntry(
+          id: "a", path: "a.pdf", producer: "Acme Writer",
+          producerVersion: "3.1", features: ["tagged", "forms"], pages: 4),
+        CorpusEntry(
+          id: "b", path: "b.pdf", producer: "Acme Writer",
+          producerVersion: "3.1", features: ["forms"], pages: 2),
+        CorpusEntry(
+          id: "c", path: "c.pdf", producer: "Other Press",
+          producerVersion: "1.0", features: [], pages: 10),
+      ])
+    let matrix = CorpusMatrix.build(from: manifest)
+    #expect(matrix.totalDocuments == 3)
+    #expect(matrix.totalPages == 16)
+    #expect(matrix.byProducer == ["Acme Writer": 2, "Other Press": 1])
+    #expect(
+      matrix.byProducerVersion == [
+        "Acme Writer @ 3.1": 2,
+        "Other Press @ 1.0": 1,
+      ])
+    #expect(
+      matrix.byFeature == [
+        "forms": 2,
+        "tagged": 1,
+        CorpusMatrix.noFeature: 1,
+      ])
+    #expect(matrix.byCombination["Acme Writer @ 3.1 + forms"] == 2)
+    #expect(matrix.byCombination["Acme Writer @ 3.1 + tagged"] == 1)
+    #expect(
+      matrix.byCombination["Other Press @ 1.0 + \(CorpusMatrix.noFeature)"] == 1)
+    // Duplicate/cased/blank features collapse to one count per document.
+    let dupes = CorpusManifest.Manifest(
+      version: 1,
+      documents: [
+        CorpusEntry(
+          id: "d", path: "d.pdf", producer: "  ", producerVersion: "",
+          features: ["forms", "forms", " "], pages: 1),
+      ])
+    let dupeMatrix = CorpusMatrix.build(from: dupes)
+    #expect(
+      dupeMatrix.byProducer == [CorpusMatrix.unspecifiedProducer: 1])
+    #expect(
+      dupeMatrix.byProducerVersion == [
+        "\(CorpusMatrix.unspecifiedProducer) @ \(CorpusMatrix.unspecifiedVersion)": 1
+      ])
+    #expect(dupeMatrix.byFeature == ["forms": 1])
+    // Report is deterministic and sorted.
+    let report = matrix.report()
+    #expect(report.contains("documents: 3"))
+    #expect(report.contains("Acme Writer"))
+    #expect(report.contains("Other Press"))
+    #expect(report.range(of: "(?s)Acme Writer.*Other Press", options: .regularExpression) != nil)
   }
 }

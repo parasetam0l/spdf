@@ -23,7 +23,7 @@ func required(_ name: String, in arguments: [String]) -> String {
 
 let arguments = Array(CommandLine.arguments.dropFirst())
 guard let command = arguments.first else {
-  fail("usage: release-tools <verify-signature|appcast|validate-appcast|notary-check|manifest|release-field|release-body|next-build|check-build>")
+  fail("usage: release-tools <verify-signature|appcast|validate-appcast|notary-check|manifest|release-field|release-body|next-build|check-build|corpus-matrix>")
 }
 
 do {
@@ -147,6 +147,17 @@ do {
       fail("build \(build) is not above the previous published builds (\(previous))")
     }
     print("Build \(build) is monotonic.")
+
+  case "corpus-matrix":
+    // corpus-matrix --manifest <Work/Corpus/manifest.json>
+    // Validates the private-corpus manifest (P03-023) and prints the
+    // producer/version/feature matrix (P38-025). The manifest itself stays
+    // under ignored Work/; only counts and group keys are printed, never
+    // document content.
+    let manifestPath = required("--manifest", in: arguments)
+    let manifestData = try Data(contentsOf: URL(fileURLWithPath: manifestPath))
+    let manifest = try CorpusManifest.load(data: manifestData)
+    print(CorpusMatrix.build(from: manifest).report())
 
   default:
     fail("unknown command \(command)")

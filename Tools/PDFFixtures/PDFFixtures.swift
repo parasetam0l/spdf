@@ -175,6 +175,110 @@ public enum PDFFixtures {
     return file
   }
 
+  /// P38-025/P38-028: a one-page document whose object stream is chained via
+  /// `/Extends`, as found in private-corpus documents from Adobe PDF Library
+  /// 17.0 and Acrobat Distiller 6.0. Chained object streams are explicitly
+  /// unsupported, so parsing must refuse with `.unsupported` rather than
+  /// hanging or mis-resolving. The extension target is never resolved
+  /// because the refusal precedes it. Synthetic only; no private bytes.
+  public static func chainedObjectStreamPages() throws -> Data {
+    var file = Data("%PDF-1.7\n".utf8)
+    file.append(Data([0x25, 0xE2, 0xE3, 0xCF, 0xD3, 0x0A]))
+    var offsets: [Int: Int] = [:]
+    func beginObject(_ number: Int, _ body: Data) {
+      offsets[number] = file.count
+      file.append(Data("\(number) 0 obj\n".utf8))
+      file.append(body)
+      file.append(Data("\nendobj\n".utf8))
+    }
+
+    let catalog: PDFValue = .dictionary([
+      PDFName("Type"): .name(PDFName("Catalog")),
+      PDFName("Pages"): .reference(PDFObjectID(2)),
+    ])
+    let pages: PDFValue = .dictionary([
+      PDFName("Type"): .name(PDFName("Pages")),
+      PDFName("Count"): .integer(1),
+      PDFName("Kids"): .array([.reference(PDFObjectID(4))]),
+    ])
+    let font: PDFValue = .dictionary([
+      PDFName("Type"): .name(PDFName("Font")),
+      PDFName("Subtype"): .name(PDFName("Type1")),
+      PDFName("BaseFont"): .name(PDFName("Helvetica")),
+    ])
+    let page: PDFValue = .dictionary([
+      PDFName("Type"): .name(PDFName("Page")),
+      PDFName("Parent"): .reference(PDFObjectID(2)),
+      PDFName("MediaBox"): .array([.integer(0), .integer(0), .integer(612), .integer(792)]),
+      PDFName("Resources"): .dictionary([
+        PDFName("Font"): .dictionary([PDFName("F1"): .reference(PDFObjectID(3))])
+      ]),
+      PDFName("Contents"): .reference(PDFObjectID(5)),
+    ])
+    let compressedObjects: [(Int, PDFValue)] = [(1, catalog), (2, pages), (3, font), (4, page)]
+    var objectStreamData = Data()
+    var headerParts: [String] = []
+    for (number, value) in compressedObjects {
+      headerParts.append("\(number) \(objectStreamData.count)")
+      objectStreamData.append(try PDFWriter.serializedValue(value))
+      objectStreamData.append(0x0A)
+    }
+    let header = Data((headerParts.joined(separator: " ") + "\n").utf8)
+    var objectStreamContent = header
+    objectStreamContent.append(objectStreamData)
+    let objectStream = PDFStream(
+      dictionary: [
+        PDFName("Type"): .name(PDFName("ObjStm")),
+        PDFName("N"): .integer(Int64(compressedObjects.count)),
+        PDFName("First"): .integer(Int64(header.count)),
+        PDFName("Extends"): .reference(PDFObjectID(5)),
+        PDFName("Filter"): .name(PDFName("FlateDecode")),
+      ], bytes: try PDFFilters.encodeFlate(objectStreamContent))
+
+    let contentText = "BT /F1 24 Tf 42 710 Td (sPDF Editor chained-stream fixture) Tj ET\n"
+    let content = PDFStream(
+      dictionary: [PDFName("Filter"): .name(PDFName("FlateDecode"))],
+      bytes: try PDFFilters.encodeFlate(Data(contentText.utf8)))
+    beginObject(5, try PDFWriter.serializedValue(.stream(content)))
+    beginObject(6, try PDFWriter.serializedValue(.stream(objectStream)))
+
+    let xrefOffset = file.count
+    func field(_ value: Int, width: Int) -> [UInt8] {
+      (0..<width).reversed().map { UInt8((value >> (8 * $0)) & 0xFF) }
+    }
+    var entryFields: [Int: [Int]] = [
+      0: [0, 0, 65_535],
+      5: [1, offsets[5]!, 0],
+      6: [1, offsets[6]!, 0],
+    ]
+    for (index, pair) in compressedObjects.enumerated() {
+      entryFields[pair.0] = [2, 6, index]
+    }
+    entryFields[7] = [1, xrefOffset, 0]
+    var xrefPayload = Data()
+    for number in 0...7 {
+      guard let fields = entryFields[number] else { continue }
+      xrefPayload.append(contentsOf: field(fields[0], width: 1))
+      xrefPayload.append(contentsOf: field(fields[1], width: 4))
+      xrefPayload.append(contentsOf: field(fields[2], width: 2))
+    }
+    let xrefStream = PDFStream(
+      dictionary: [
+        PDFName("Type"): .name(PDFName("XRef")),
+        PDFName("Size"): .integer(8),
+        PDFName("W"): .array([.integer(1), .integer(4), .integer(2)]),
+        PDFName("Index"): .array([.integer(0), .integer(8)]),
+        PDFName("Root"): .reference(PDFObjectID(1)),
+        PDFName("Filter"): .name(PDFName("FlateDecode")),
+      ], bytes: try PDFFilters.encodeFlate(xrefPayload))
+    beginObject(7, try PDFWriter.serializedValue(.stream(xrefStream)))
+    guard offsets[7] == xrefOffset else {
+      preconditionFailure("Cross-reference stream offset changed during assembly")
+    }
+    file.append(Data("startxref\n\(xrefOffset)\n%%EOF\n".utf8))
+    return file
+  }
+
   /// P03-006: a hybrid-reference file. The classic table marks the compressed
   /// objects free while the companion XRefStm stream binds them to an object
   /// stream, so resolution depends on the documented merge precedence.
