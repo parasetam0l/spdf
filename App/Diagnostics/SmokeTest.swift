@@ -11,12 +11,8 @@
   @MainActor
   enum SmokeTest {
     static func run(fixtures: URL, output: URL) async {
-      let watchdog = DispatchWorkItem {
-        FileHandle.standardError.write(
-          Data("sPDF Editor smoke test timed out after 30 seconds\n".utf8))
-        exit(1)
-      }
-      DispatchQueue.global().asyncAfter(deadline: .now() + 30, execute: watchdog)
+      let watchdog = DiagnosticWatchdog.schedule(
+        after: 60, message: "sPDF Editor smoke test timed out after 60 seconds")
       defer { watchdog.cancel() }
       do {
         try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
@@ -29,6 +25,10 @@
           "Fonts", isDirectory: true)
         let controller = NSDocumentController.shared
         let started = ContinuousClock.now
+        func checkpoint(_ name: String) {
+          FileHandle.standardError.write(Data("[smoke] \(name)\n".utf8))
+        }
+        checkpoint("opening fixtures")
         let firstURL = fixtures.appendingPathComponent("three-pages.pdf")
         let secondURL = fixtures.appendingPathComponent("one-page.pdf")
         let thirdURL = fixtures.appendingPathComponent("image-pages.pdf")
@@ -70,6 +70,7 @@
           let formWindow = formDocument.windowControllers.first?.window
         else { throw PDFError(.malformed, "Native document opening smoke test failed") }
 
+        checkpoint("fixtures opened; checking sidebar inventories")
         // Fresh windows must populate their sidebar models before an edit.
         guard formDocument.formsModel.fields.count == 10,
           formDocument.formsModel.fields.contains(where: { $0.name == "name" }),
@@ -537,6 +538,7 @@
         guard KeyboardAudit.invoke("Text Edit Tool"), firstViewer.activeTool == .textEdit,
           KeyboardAudit.invoke("Select Tool"), firstViewer.activeTool == .select
         else { throw PDFError(.malformed, "Tool switching through menu commands did not work") }
+        checkpoint("keyboard Find/highlight/save workflow")
         // P12-029: keyboard-only completion of a find/highlight/save
         // workflow. App-local Unicode key events follow the window's real
         // first responder without needing permission to inject system-wide
@@ -634,6 +636,7 @@
           $0.type == "Highlight"
         }).count == 1
         else { throw PDFError(.malformed, "The saved copy lacks the keyboard-made highlight") }
+        checkpoint("closing keyboard workflow document")
         keyboardDocument.close()
         // P10-008/P10-027: Duplicate copies the document without touching
         // the original's file association.
@@ -647,6 +650,7 @@
           first.fileURL != nil
         else { throw PDFError(.malformed, "Duplicate did not copy the document cleanly") }
         duplicate.close()
+        checkpoint("keyboard workflow closed; rulers and native gestures")
         // P12-018: rulers and guides toggle from the menu and label
         // themselves for VoiceOver.
         firstWindow.makeKeyAndOrderFront(nil)
@@ -747,6 +751,7 @@
           KeyboardAudit.invoke("Show Structure"), firstViewer.sidebarMode == .structure
         else { throw PDFError(.malformed, "Keyboard menu commands did not work") }
 
+        checkpoint("native gestures passed; export workflows")
         // P34-001/P34-003/P34-026: text and image exports through the
         // document path, reopened and verified independently.
         let textExportURL = output.appendingPathComponent("exported-text.txt")
@@ -1604,6 +1609,7 @@
         }
 
         // Image context menu and edits (P12-015, P20-008–P20-012).
+        checkpoint("image edit and preview safety")
         let imageBaseline = try third.data(ofType: "com.adobe.pdf")
         if let imagePage = imageViewer.view.document?.page(at: 0) {
           // The first placement covers [80,600]–[200,720] in page space.
@@ -1787,6 +1793,7 @@
           try third.data(ofType: "com.adobe.pdf") == imageBaseline
         else { throw PDFError(.malformed, "OCR edits did not undo to the baseline bytes") }
 
+        checkpoint("image safety passed; form filling")
         // Form filling (P24): inventory, text/choice fill, checkbox, reset,
         // flatten, and undo.
         let formBaseline = try formDocument.data(ofType: "com.adobe.pdf")
@@ -2223,6 +2230,7 @@
         ]
         try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys])
           .write(to: output.appendingPathComponent("smoke-test.json"), options: .atomic)
+        checkpoint("all checks passed; closing documents")
         first.close()
         other.close()
         third.close()

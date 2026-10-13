@@ -67,11 +67,8 @@ enum WorkspacePerformance {
 
   static func run(output: URL) async {
     active = true
-    let watchdog = DispatchWorkItem {
-      FileHandle.standardError.write(Data("Native workspace measurement timed out\n".utf8))
-      exit(1)
-    }
-    DispatchQueue.global().asyncAfter(deadline: .now() + 60, execute: watchdog)
+    let watchdog = DiagnosticWatchdog.schedule(
+      after: 60, message: "Native workspace measurement timed out")
     defer { watchdog.cancel() }
     do {
       try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)

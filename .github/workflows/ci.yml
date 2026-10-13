@@ -42,7 +42,20 @@ jobs:
       - name: Build native app without distribution credentials
         run: bash Scripts/dev.sh build Debug > Work-build.log 2>&1
       - name: Native document smoke test
-        run: bash Scripts/dev.sh smoke
+        run: |
+          set -o pipefail
+          smoke_status=0
+          bash Scripts/dev.sh smoke 2>&1 | tee Work-smoke.log || smoke_status=$?
+          if [[ "$smoke_status" != 0 ]]; then
+            # The native crash report contains the stack missing from a shell trap.
+            mkdir -p Work/Smoke
+            sleep 5
+            for crash_report in "$HOME"/Library/Logs/DiagnosticReports/"sPDF Editor"*.ips \
+                                /Library/Logs/DiagnosticReports/"sPDF Editor"*.ips; do
+              [[ ! -f "$crash_report" ]] || cp "$crash_report" Work/Smoke/
+            done
+          fi
+          exit "$smoke_status"
       - name: Build optimized native app
         run: bash Scripts/dev.sh build Release > Work-release.log 2>&1
       - name: Keep bounded failure diagnostics
@@ -55,6 +68,8 @@ jobs:
             Work-test-events.jsonl
             Work-build.log
             Work-release.log
+            Work-smoke.log
             Work/Smoke/smoke-test.json
+            Work/Smoke/*.ips
           if-no-files-found: ignore
           retention-days: 7

@@ -12,6 +12,7 @@
 		0E303B5BA3C6EDCDAB053A4C /* ComparisonWindow.swift in Sources */ = {isa = PBXBuildFile; fileRef = C70DB85406AC9CCA1F09669C /* ComparisonWindow.swift */; };
 		0FE384F50302C3E66E04F73F /* InspectorPanels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2A6A1C3ADABC41A95E32748D /* InspectorPanels.swift */; };
 		1AE20342CCEFEE7105C00846 /* StructurePanel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3D9CC0423CA30B340738F418 /* StructurePanel.swift */; };
+		1EF116DDB52A64F2A65C4FD0 /* DiagnosticWatchdog.swift in Sources */ = {isa = PBXBuildFile; fileRef = 83C1D98BA1E6E946D35C5A49 /* DiagnosticWatchdog.swift */; };
 		2BBDA3568867B341E37F70C4 /* PageEditOverlay.swift in Sources */ = {isa = PBXBuildFile; fileRef = 962559E85F133C73EBD3324B /* PageEditOverlay.swift */; };
 		2DC129A2BA815F4E141D9C21 /* ComparisonSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = C2D20568FDE859912E452D28 /* ComparisonSession.swift */; };
 		337CB33D21D1544A6D6330A0 /* TableReviewPanel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 42117F0C4A7F6A3D0F507B8C /* TableReviewPanel.swift */; };
@@ -65,6 +66,7 @@
 		589D64EAB51B3FA3C1A1F58F /* SignaturesModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SignaturesModel.swift; sourceTree = "<group>"; };
 		6716E75AAC823E2EA26B0072 /* TableReviewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TableReviewModel.swift; sourceTree = "<group>"; };
 		6F91EF2F352F7D8A64BA83B0 /* SPDFDocument.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SPDFDocument.swift; sourceTree = "<group>"; };
+		83C1D98BA1E6E946D35C5A49 /* DiagnosticWatchdog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiagnosticWatchdog.swift; sourceTree = "<group>"; };
 		9452F6B367E81926CFCAB840 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		962559E85F133C73EBD3324B /* PageEditOverlay.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PageEditOverlay.swift; sourceTree = "<group>"; };
 		A10BEC367F4A982BF380EEF7 /* CommentsPanel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CommentsPanel.swift; sourceTree = "<group>"; };
@@ -154,6 +156,7 @@
 			isa = PBXGroup;
 			children = (
 				A426D276236110E33031673E /* AccessibilityAudit.swift */,
+				83C1D98BA1E6E946D35C5A49 /* DiagnosticWatchdog.swift */,
 				40CFDE87E89D9F244DF2A500 /* SmokeTest.swift */,
 				D65800C5E45DCA901B0CC22D /* WorkspacePerformance.swift */,
 			);
@@ -278,6 +281,7 @@
 				D476B0FEEFA9A0A50D0C12C7 /* CommentsPanel.swift in Sources */,
 				2DC129A2BA815F4E141D9C21 /* ComparisonSession.swift in Sources */,
 				0E303B5BA3C6EDCDAB053A4C /* ComparisonWindow.swift in Sources */,
+				1EF116DDB52A64F2A65C4FD0 /* DiagnosticWatchdog.swift in Sources */,
 				61BD6843AD9FDF5F7C46AB91 /* FontsModel.swift in Sources */,
 				68D01E3A362B8CC0AC282B2A /* FontsPanel.swift in Sources */,
 				04C4F4655A8F5F7AAC79696E /* FormsModel.swift in Sources */,
