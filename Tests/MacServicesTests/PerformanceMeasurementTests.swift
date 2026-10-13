@@ -420,9 +420,15 @@ struct PerformanceMeasurementTests {
 
   // MARK: - P39-014 (recognition runs on this machine; hosted CI may differ)
 
-  @Test func ocrConcurrencyThroughputAndCancellation() async throws {
-    // Vision works on this Mac (33 languages); each task opens its own
-    // PDFDocument from shared bytes because PDFDocument is not Sendable.
+  @Test(
+    .enabled(
+      if: ProcessInfo.processInfo.environment["SPDF_RUN_VISION_BENCHMARKS"] == "1",
+      "Real Vision throughput is an opt-in host measurement; hosted runners can stall."))
+  func ocrConcurrencyThroughputAndCancellation() async throws {
+    // The host must have a working Vision recognition service. Routine CI
+    // still checks language availability, tolerant recognition, rasterization
+    // and deterministic job cancellation in OCRJobTests.
+    // Each task opens its own PDFDocument because it is not Sendable.
     let fixture = try PDFFixtures.threePages()
     guard PDFDocument(data: fixture)?.pageCount == 3 else {
       Issue.record("three-page fixture did not open")
@@ -464,7 +470,6 @@ struct PerformanceMeasurementTests {
       Issue.record("fixture did not open for cancellation")
       return
     }
-    var progressCalls = 0
     let progressBox = ProgressCounter()
     let cancelStart = ContinuousClock.now
     let job = Task {

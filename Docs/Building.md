@@ -18,6 +18,12 @@ The smoke check uses the Debug app and the synthetic fixtures in `Tests/Fixtures
 
 Some tests use optional independent tools: qpdf, MuPDF (`mutool`), veraPDF, OpenSSL, Python, and macOS `textutil`, `unzip`, and Quick Look. They report or skip unavailable tools; installing them expands verification coverage. OCR recognition and display-dependent behavior can vary with the host environment.
 
+Real Vision throughput/concurrency is an opt-in measurement for a host with a working recognition service. Hosted runners can stall in this benchmark. Routine tests retain OCR transforms, rasterization, progress, cancellation and tolerant Vision recognition checks. To include the throughput benchmark locally:
+
+```sh
+SPDF_RUN_VISION_BENCHMARKS=1 bash Scripts/dev.sh test --no-parallel
+```
+
 For a Developer ID archive, `bash Scripts/dev.sh release` uses an installed signing identity. Set `SPDF_NOTARY_PROFILE` to an existing `notarytool` keychain profile to enable notarization and stapling. Distribution through GitHub Actions is described in [Releasing](Releasing.md).
 
 ## Native workspace measurements

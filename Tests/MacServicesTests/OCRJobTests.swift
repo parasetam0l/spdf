@@ -222,6 +222,57 @@ struct OCRJobTests {
     }
   }
 
+  @Test func cancellationAfterFirstPageStopsBeforeTheNextRecognition() async throws {
+    final class Probe: TextRecognizing, @unchecked Sendable {
+      private let lock = NSLock()
+      private var recognitions = 0
+      private var completions: [Int] = []
+
+      func recognize(image: CGImage, languages: [String], level: OCRRecognitionLevel) throws
+        -> [OCRObservation]
+      {
+        lock.withLock { recognitions += 1 }
+        return [
+          OCRObservation(
+            text: "Recognized fixture", confidence: 1,
+            boundingBox: CGRect(x: 0.1, y: 0.5, width: 0.5, height: 0.1))
+        ]
+      }
+
+      func recordProgress(_ completed: Int) {
+        lock.withLock { completions.append(completed) }
+      }
+
+      var snapshot: (recognitions: Int, completions: [Int]) {
+        lock.withLock { (recognitions, completions) }
+      }
+    }
+
+    let fixture = try PDFFixtures.threePages()
+    let probe = Probe()
+    let job = Task {
+      let document = try #require(PDFDocument(data: fixture))
+      return try OCRJob.run(
+        document: document, pageIndexes: [0, 1, 2], languages: [], recognizer: probe,
+        onProgress: { completed, _ in
+          probe.recordProgress(completed)
+          if completed == 1 {
+            // Cancel after real work starts, without a scheduler/sleep race.
+            withUnsafeCurrentTask { $0?.cancel() }
+          }
+        })
+    }
+    switch await job.result {
+    case .success:
+      Issue.record("Canceled OCR returned partial results instead of CancellationError")
+    case .failure(let error):
+      #expect(error is CancellationError)
+    }
+    let observed = probe.snapshot
+    #expect(observed.recognitions == 1)
+    #expect(observed.completions == [1])
+  }
+
   private func approximatelyEqual(_ lhs: [Double], _ rhs: [Double], tolerance: Double = 0.01)
     -> Bool
   {
