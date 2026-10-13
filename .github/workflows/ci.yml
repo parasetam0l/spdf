@@ -30,7 +30,10 @@ jobs:
         run: brew install xcodegen
       - name: Swift tests
         # Keep timing assertions isolated from unrelated test-suite load.
-        run: bash Scripts/dev.sh test --no-parallel > Work-test.log 2>&1
+        timeout-minutes: 18
+        run: |
+          set -o pipefail
+          bash Scripts/dev.sh test --no-parallel 2>&1 | tee Work-test.log
       - name: Generate and validate original fixtures
         run: bash Scripts/dev.sh fixtures
       - name: Build native app without distribution credentials
