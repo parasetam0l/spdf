@@ -30,10 +30,22 @@ jobs:
         run: brew install xcodegen
       - name: Swift tests
         # Keep timing assertions isolated from unrelated test-suite load.
-        timeout-minutes: 18
+        timeout-minutes: 8
+        env:
+          NSUnbufferedIO: "YES"
         run: |
           set -o pipefail
-          bash Scripts/dev.sh test --no-parallel 2>&1 | tee Work-test.log
+          # Preserve the blocked process's stack even if SwiftPM buffers output.
+          (
+            sleep 240
+            pgrep -f '(swift-testing-helper|/xctest)' | while read -r test_pid; do
+              sample "$test_pid" 5 -file "Work-test-sample-${test_pid}.txt" || true
+            done
+          ) &
+          diagnostic_pid=$!
+          trap 'kill "$diagnostic_pid" 2>/dev/null || true' EXIT
+          bash Scripts/dev.sh test --no-parallel \
+            --event-stream-output-path "$PWD/Work-test-events.jsonl" 2>&1 | tee Work-test.log
       - name: Generate and validate original fixtures
         run: bash Scripts/dev.sh fixtures
       - name: Build native app without distribution credentials
@@ -49,6 +61,8 @@ jobs:
           name: build-test-diagnostics
           path: |
             Work-test.log
+            Work-test-events.jsonl
+            Work-test-sample-*.txt
             Work-build.log
             Work-release.log
             Work/Smoke/smoke-test.json
