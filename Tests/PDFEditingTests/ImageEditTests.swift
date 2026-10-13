@@ -320,17 +320,19 @@ struct ImageEditTests {
       PDFTransaction([RotateImageCommand(pageID: page1, placementIndex: 0, degrees: 90)]),
       to: parsed.graph)
     let placements = try ImageInventory.placements(in: graph, pageID: page1)
-    #expect(placements[0].matrix == [0, 120, -120, 0, 80, 600])
-    #expect(placements[0].bounds == [-40, 600, 80, 720])
+    // Center-pivot: the 120x120 footprint stays centered at (140, 660).
+    #expect(placements[0].matrix == [0, 120, -120, 0, 200, 600])
+    #expect(placements[0].bounds == [80, 600, 200, 720])
     #expect(placements[1].matrix == [120, 0, 0, 120, 80, 400])
     let text = String(decoding: try PageContent.load(pageID: page1, in: graph).bytes, as: UTF8.self)
-    #expect(text.contains("0 120 -120 0 80 600"))
+    #expect(text.contains("0 120 -120 0 200 600"))
 
     let twice = try PDFEditingEngine.commit(
       PDFTransaction([RotateImageCommand(pageID: page1, placementIndex: 0, degrees: 180)]),
       to: graph)
     let twicePlacements = try ImageInventory.placements(in: twice, pageID: page1)
-    #expect(twicePlacements[0].matrix == [0, -120, 120, 0, 80, 600])
+    #expect(twicePlacements[0].matrix == [0, -120, 120, 0, 80, 720])
+    #expect(twicePlacements[0].bounds == [80, 600, 200, 720])
     #expect(throws: PDFError.self) {
       _ = try PDFEditingEngine.commit(
         PDFTransaction([RotateImageCommand(pageID: page1, placementIndex: 0, degrees: 45)]),

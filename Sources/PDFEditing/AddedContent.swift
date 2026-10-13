@@ -508,9 +508,16 @@ public enum AddedContent {
   ) throws {
     let bytes = Data(content.utf8)
     let streamID = nextObjectID(in: graph)
+    // Provenance marker: only streams the app appended are app-created
+    // graphics. Native document streams can share the same operators, so
+    // the marker — not operator shape — decides selectability and mutation.
+    // Readers ignore the unknown key; the writer round-trips it.
     graph.objects[streamID] = .stream(
       PDFStream(
-        dictionary: [PDFName("Length"): .integer(Int64(bytes.count))], bytes: bytes))
+        dictionary: [
+          PDFName("Length"): .integer(Int64(bytes.count)),
+          PDFName("SPDFAdded"): .boolean(true),
+        ], bytes: bytes))
     guard case .dictionary(var page)? = graph.objects[pageID] else {
       throw PDFError(.malformed, "Page is missing")
     }

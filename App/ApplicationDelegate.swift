@@ -159,6 +159,9 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
   @objc private func pageTool(_ sender: Any?) {
     _ = currentDocument?.viewer?.activateTool(.page)
   }
+  @objc private func imageEditTool(_ sender: Any?) {
+    _ = currentDocument?.viewer?.activateTool(.imageEdit)
+  }
   @objc private func flattenAnnotations(_ sender: Any?) {
     currentDocument?.flattenAnnotations()
   }
@@ -386,11 +389,13 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
       guard let viewer = document.viewer else { return false }
       menuItem.state = viewer.isInkToolActive ? .on : .off
       return !viewer.isLocked && viewer.pageCount > 0
-    case #selector(selectTool), #selector(textEditTool), #selector(pageTool):
+    case #selector(selectTool), #selector(textEditTool), #selector(pageTool),
+      #selector(imageEditTool):
       guard let viewer = document.viewer else { return false }
       let tool: ViewerToolMode =
         menuItem.action == #selector(textEditTool) ? .textEdit
-        : menuItem.action == #selector(pageTool) ? .page : .select
+        : menuItem.action == #selector(pageTool) ? .page
+        : menuItem.action == #selector(imageEditTool) ? .imageEdit : .select
       menuItem.state = viewer.activeTool == tool ? .on : .off
       return !viewer.isLocked && viewer.pageCount > 0
     case #selector(flattenAnnotations):
@@ -719,6 +724,9 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
       target: self, to: annotate)
     add(
       "Page Tool", #selector(pageTool), key: "3", modifiers: [.command, .control],
+      target: self, to: annotate)
+    add(
+      "Image Edit Tool", #selector(imageEditTool), key: "4", modifiers: [.command, .control],
       target: self, to: annotate)
     add(
       "Ink Tool", #selector(toggleInkTool), key: "i", modifiers: [.command, .shift], target: self,

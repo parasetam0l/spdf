@@ -6,11 +6,13 @@ import PDFKit
 import SwiftUI
 
 /// P12-017: pointer selection for app-created graphics (image stamps and
-/// rectangles). Click selects, empty-area drags rubber-band multi-select,
-/// body drags move, and eight resize handles (12 pt visuals, 24 pt hit
-/// targets) resize through the P21-010 core commands as one transaction on
-/// release. Drags starting on form widgets or document text pass through to
-/// the page view, so native form editing and text selection keep working.
+/// rectangles). Preview first: in Select (and Page) mode clicks select,
+/// empty-area drags rubber-band multi-select, and nothing mutates the
+/// document — body drags only preview the selection. Arming the Image Edit
+/// tool enables move, resize handles, and keyboard nudging through the
+/// P21-010 core commands as one transaction on release. Drags starting on
+/// form widgets or document text pass through to the page view, so native
+/// form editing and text selection keep working.
 struct GraphicSelectionOverlay: NSViewRepresentable {
   @ObservedObject var viewer: PDFViewingSession
 
@@ -59,6 +61,14 @@ final class GraphicSelectionOverlayView: NSView {
   private var toolsEnabled: Bool {
     guard let viewer else { return false }
     return viewer.activeTool == .select || viewer.activeTool == .page
+      || viewer.activeTool == .imageEdit
+  }
+
+  /// Mutating gestures (move, resize, keyboard nudge) only in the explicit
+  /// Image Edit tool. In Select/Page preview modes drags only select, so a
+  /// stray drag can never dirty the document.
+  private var editsEnabled: Bool {
+    viewer?.activeTool == .imageEdit
   }
 
   // MARK: - Geometry
@@ -126,7 +136,9 @@ final class GraphicSelectionOverlayView: NSView {
     let values = [Double(pagePoint.x), Double(pagePoint.y)]
     // Form widgets always win; text drags stay native.
     if viewer?.formFieldProvider?(index, values) != nil { return nil }
-    if handleAt(point) != nil { return self }
+    // Resize handles only exist in the Image Edit tool; in preview modes
+    // the pointer passes through to selection and rubber-band behavior.
+    if editsEnabled, handleAt(point) != nil { return self }
     if viewer?.graphicTargetProvider?(index, values) != nil { return self }
     if viewer?.textRunProvider?(index, values) != nil { return nil }
     // Empty area: a drag may rubber-band, a click clears the selection —
@@ -144,7 +156,7 @@ final class GraphicSelectionOverlayView: NSView {
     let point = convert(event.locationInWindow, from: nil)
     pressPoint = point
     pressGraphic = nil
-    if let handle = handleAt(point) {
+    if editsEnabled, let handle = handleAt(point) {
       drag = .resize(
         handle: handle, start: point, current: point,
         uniform: event.modifierFlags.contains(.shift))
@@ -193,7 +205,7 @@ final class GraphicSelectionOverlayView: NSView {
       commitRubberBand(from: start, to: point, pageIndex: pageIndex)
     case .move(let start, _):
       let moved = hypot(point.x - start.x, point.y - start.y) > Self.clickTolerance
-      if moved {
+      if moved, editsEnabled {
         commitMove(from: start, to: point)
       } else if let target = pressGraphic {
         viewer?.selectGraphics([target])
@@ -203,7 +215,9 @@ final class GraphicSelectionOverlayView: NSView {
       }
     case .resize(let handle, let start, _, let uniform):
       let moved = hypot(point.x - start.x, point.y - start.y) > Self.clickTolerance
-      if moved { commitResize(handle: handle, from: start, to: point, uniform: uniform) }
+      if moved, editsEnabled {
+        commitResize(handle: handle, from: start, to: point, uniform: uniform)
+      }
     }
   }
 
@@ -277,7 +291,7 @@ final class GraphicSelectionOverlayView: NSView {
   // MARK: - Keyboard
 
   override func keyDown(with event: NSEvent) {
-    guard let viewer, !viewer.selectedGraphics.isEmpty else {
+    guard editsEnabled, let viewer, !viewer.selectedGraphics.isEmpty else {
       super.keyDown(with: event)
       return
     }
@@ -326,7 +340,7 @@ final class GraphicSelectionOverlayView: NSView {
     // Move preview offset in overlay points (same-frame assumption as the
     // text overlay: overlay and view coordinates agree).
     var preview = NSPoint.zero
-    if case .move(let start, let current) = drag,
+    if editsEnabled, case .move(let start, let current) = drag,
       hypot(current.x - start.x, current.y - start.y) > Self.clickTolerance
     {
       preview = NSPoint(x: current.x - start.x, y: current.y - start.y)
@@ -341,6 +355,9 @@ final class GraphicSelectionOverlayView: NSView {
       let inner = NSBezierPath(rect: drawn.insetBy(dx: 1, dy: 1))
       inner.lineWidth = 1
       inner.stroke()
+      // Handles only in the Image Edit tool; preview modes show the
+      // selection frame without offering a mutation affordance.
+      guard editsEnabled else { continue }
       for (_, center) in GraphicSelectionModel.handleCenters(bounds: drawn) {
         let visual = CGRect(
           x: center.x - GraphicSelectionModel.handleVisualSize / 2,

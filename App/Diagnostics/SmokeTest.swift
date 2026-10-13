@@ -1629,11 +1629,89 @@
         let rotatedGraph = try PDFParser.parse(try third.data(ofType: "com.adobe.pdf")).graph
         let rotatedPlacements = try ImageInventory.placements(
           in: rotatedGraph, pageID: third.editSession.pageIDs[0])
-        guard rotatedPlacements[0].matrix == [0, 120, -120, 0, 80, 600] else {
+        guard rotatedPlacements[0].matrix == [0, 120, -120, 0, 200, 600] else {
           throw PDFError(.malformed, "Image rotation did not round-trip")
         }
         guard third.undoEdit(), try third.data(ofType: "com.adobe.pdf") == imageBaseline else {
           throw PDFError(.malformed, "Image rotation undo did not restore the baseline bytes")
+        }
+        // Preview-first gestures (joint session): rotation keeps the
+        // footprint inside the page, and overlay drags on a native image
+        // never mutate the document in any tool mode.
+        let rotatedBounds = rotatedPlacements[0].bounds
+        if let mediaPage = imageViewer.view.document?.page(at: 0) {
+          let mediaBox = mediaPage.bounds(for: .mediaBox)
+          guard rotatedBounds.count == 4, rotatedBounds[0] >= mediaBox.minX,
+            rotatedBounds[1] >= mediaBox.minY, rotatedBounds[2] <= mediaBox.maxX,
+            rotatedBounds[3] <= mediaBox.maxY
+          else { throw PDFError(.malformed, "Rotated image left the page") }
+        }
+        func findGraphicOverlay(in view: NSView) -> GraphicSelectionOverlayView? {
+          if let overlay = view as? GraphicSelectionOverlayView { return overlay }
+          for sub in view.subviews {
+            if let found = findGraphicOverlay(in: sub) { return found }
+          }
+          return nil
+        }
+        do {
+          guard let dragPage = imageViewer.view.document?.page(at: 0),
+            let overlayRoot = imageWindow.contentView,
+            let overlay = findGraphicOverlay(in: overlayRoot)
+          else { throw PDFError(.malformed, "Native-image drag regression has no graphics overlay") }
+          let dragFromPage = NSPoint(x: 140, y: 660)
+          let dragFromView = imageViewer.view.convert(dragFromPage, from: dragPage)
+          let dragFromWindow = imageViewer.view.convert(dragFromView, to: nil)
+          let dragStart = overlay.convert(dragFromWindow, from: nil)
+          let dragEnd = NSPoint(x: dragStart.x + 40, y: dragStart.y + 30)
+          func syntheticDrag() {
+            let endWindow = overlay.convert(dragEnd, to: nil)
+            guard let down = NSEvent.mouseEvent(
+              with: .leftMouseDown, location: dragFromWindow, modifierFlags: [],
+              timestamp: ProcessInfo.processInfo.systemUptime,
+              windowNumber: imageWindow.windowNumber, context: nil, eventNumber: 0,
+              clickCount: 1, pressure: 1),
+              let dragged = NSEvent.mouseEvent(
+                with: .leftMouseDragged, location: endWindow, modifierFlags: [],
+                timestamp: ProcessInfo.processInfo.systemUptime,
+                windowNumber: imageWindow.windowNumber, context: nil, eventNumber: 0,
+                clickCount: 1, pressure: 1),
+              let up = NSEvent.mouseEvent(
+                with: .leftMouseUp, location: endWindow, modifierFlags: [],
+                timestamp: ProcessInfo.processInfo.systemUptime,
+                windowNumber: imageWindow.windowNumber, context: nil, eventNumber: 0,
+                clickCount: 1, pressure: 1)
+            else { return }
+            overlay.mouseDown(with: down)
+            overlay.mouseDragged(with: dragged)
+            overlay.mouseUp(with: up)
+          }
+          // Native images are not selectable graphics: the overlay must
+          // pass the pointer through instead of claiming it.
+          guard overlay.hitTest(dragStart) == nil else {
+            throw PDFError(.malformed, "Native image claimed by graphics overlay")
+          }
+          let dragBaseline = try third.data(ofType: "com.adobe.pdf")
+          guard imageViewer.activeTool == .select else {
+            throw PDFError(.malformed, "Image window did not start in the select tool")
+          }
+          syntheticDrag()
+          guard try third.data(ofType: "com.adobe.pdf") == dragBaseline else {
+            throw PDFError(.malformed, "Select-mode drag mutated the document")
+          }
+          imageWindow.makeKeyAndOrderFront(nil)
+          guard KeyboardAudit.invoke("Image Edit Tool"),
+            imageViewer.activeTool == .imageEdit
+          else { throw PDFError(.malformed, "Could not arm the image edit tool") }
+          guard overlay.hitTest(dragStart) == nil else {
+            throw PDFError(.malformed, "Native image claimed in image edit mode")
+          }
+          syntheticDrag()
+          guard try third.data(ofType: "com.adobe.pdf") == dragBaseline else {
+            throw PDFError(.malformed, "Image-edit drag on a native image mutated it")
+          }
+          guard KeyboardAudit.invoke("Select Tool"), imageViewer.activeTool == .select else {
+            throw PDFError(.malformed, "Could not restore the select tool after dragging")
+          }
         }
         // Import a generated PNG, replace one instance, then all shared ones.
         let png = Self.tinyPNGData()

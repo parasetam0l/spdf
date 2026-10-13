@@ -231,6 +231,26 @@ public struct SelectableGraphic: Sendable, Equatable {
 }
 
 public enum AddedGraphics {
+  /// Whether the stream was appended by the app (see `AddedContent.append`).
+  /// Native document streams are never app-created, even when their
+  /// operators resemble an image stamp or rectangle.
+  public static func isAppCreated(streamID: PDFObjectID, in graph: PDFGraph) -> Bool {
+    guard case .stream(let stream)? = graph.objects[streamID] else { return false }
+    return stream.dictionary[PDFName("SPDFAdded")] == .boolean(true)
+  }
+
+  /// Provenance gate for graphic mutation: only app-appended streams may be
+  /// moved, resized, or rotated. Native document streams share operator
+  /// shapes but live in unknown transform contexts, so rewriting their
+  /// matrices would corrupt the page instead of moving the picture.
+  public static func requireAppCreated(streamID: PDFObjectID, in graph: PDFGraph) throws {
+    guard isAppCreated(streamID: streamID, in: graph) else {
+      throw PDFError(
+        .unsupported,
+        "Only graphics added by sPDF can be moved or reshaped; document images use the explicit image operations")
+    }
+  }
+
   /// Classify an appended content stream by its operators.
   public static func kindOf(streamID: PDFObjectID, in graph: PDFGraph) throws -> AddedGraphicKind {
     let instructions = try decodedInstructions(streamID: streamID, in: graph)
@@ -270,8 +290,10 @@ public enum AddedGraphics {
   }
 
   /// P12-017: every app-created graphic on a page that selection can
-  /// address, in content order. Unsupported kinds (text, ellipses, paths)
-  /// and boundless streams are skipped, never fabricated.
+  /// address, in content order. Unsupported kinds (text, ellipses, paths),
+  /// boundless streams, and native document streams (no provenance marker)
+  /// are skipped, never fabricated — moving those would rewrite matrices in
+  /// an unknown transform context and corrupt the page.
   public static func selectable(
     pageID: PDFObjectID, in graph: PDFGraph
   ) throws -> [SelectableGraphic] {
@@ -292,7 +314,8 @@ public enum AddedGraphics {
     }
     var result: [SelectableGraphic] = []
     for streamID in references {
-      guard let kind = try? kindOf(streamID: streamID, in: graph),
+      guard isAppCreated(streamID: streamID, in: graph),
+        let kind = try? kindOf(streamID: streamID, in: graph),
         kind != .unsupported,
         let bounds = try? boundsOf(streamID: streamID, in: graph),
         bounds.count == 4, bounds[2] > bounds[0], bounds[3] > bounds[1]
@@ -412,6 +435,7 @@ public struct MoveAddedGraphicCommand: PDFEditCommand, Equatable, Sendable {
     guard dx.isFinite, dy.isFinite else {
       throw PDFError(.malformed, "The graphic offset is not finite")
     }
+    try AddedGraphics.requireAppCreated(streamID: streamID, in: graph)
     _ = try edits(in: graph)
   }
 
@@ -478,6 +502,7 @@ public struct ScaleAddedGraphicCommand: PDFEditCommand, Equatable, Sendable {
     guard scaleX.isFinite, scaleY.isFinite, scaleX > 0, scaleY > 0 else {
       throw PDFError(.malformed, "Graphic scale factors must be positive finite numbers")
     }
+    try AddedGraphics.requireAppCreated(streamID: streamID, in: graph)
     _ = try edits(in: graph)
   }
 
@@ -542,6 +567,7 @@ public struct RotateAddedGraphicCommand: PDFEditCommand, Equatable, Sendable {
     guard degrees % 90 == 0 else {
       throw PDFError(.malformed, "Graphic rotation must be a multiple of 90 degrees")
     }
+    try AddedGraphics.requireAppCreated(streamID: streamID, in: graph)
     _ = try edits(in: graph)
   }
 

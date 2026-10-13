@@ -130,8 +130,9 @@ struct RenderingTests {
     #expect(second.g > 200 && second.r < 60 && second.b < 60)
   }
 
-  /// P20-006 verification: a 90-degree placement rotation moves the rendered
-  /// image exactly, and the vacated area returns to the page background.
+  /// P20-006 verification: a 90-degree placement rotation turns the rendered
+  /// image in place about its footprint center, and the vacated area returns
+  /// to the page background.
   @Test func rotatedImageRendersInCoreGraphics() throws {
     let parsed = try PDFParser.parse(PDFFixtures.imagePages())
     let pageID = parsed.pageIDs[0]
@@ -139,8 +140,12 @@ struct RenderingTests {
       PDFTransaction([RotateImageCommand(pageID: pageID, placementIndex: 0, degrees: 90)]),
       to: parsed.graph)
     let edited = try PDFWriter.write(graph)
-    let inside = try Self.pixel(of: edited, page: 1, at: CGPoint(x: 40, y: 660))
-    #expect(inside.g > 200 && inside.r < 60 && inside.b < 60)
+    // Footprint [80, 200] x [600, 720]: the center is image content before
+    // and after, the old left strip is background again.
+    let center = try Self.pixel(of: edited, page: 1, at: CGPoint(x: 140, y: 660))
+    #expect(center.g > 200 && center.r < 60 && center.b < 60)
+    let vacated = try Self.pixel(of: edited, page: 1, at: CGPoint(x: 40, y: 660))
+    #expect(vacated.r > 240 && vacated.g > 240 && vacated.b > 240)
     let background = try Self.pixel(of: edited, page: 1, at: CGPoint(x: 300, y: 300))
     #expect(background.r > 240 && background.g > 240 && background.b > 240)
   }

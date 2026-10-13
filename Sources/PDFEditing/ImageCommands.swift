@@ -335,12 +335,14 @@ public struct ScaleImageCommand: PDFEditCommand, Equatable, Sendable {
   }
 }
 
-/// P20-006: rotate one placement in 90-degree steps about its own origin by
-/// rewriting all six matrix operands. Right angles are exact; every other
-/// byte of the page and image data stays identical. The view-coordinate half
-/// is `ImageViewMapping` (PDF-space handles plus explicit PDF<->view mapping
-/// through the caller's view transform); a snapped handle drag feeds the
-/// same `degrees` this command applies.
+/// P20-006: rotate one placement in 90-degree steps about its footprint
+/// center by rewriting all six matrix operands. Right angles are exact;
+/// every other byte of the page and image data stays identical. Centering
+/// keeps the rotated picture where it was: pivoting about the placement
+/// origin instead would swing images partly or fully off the page. The
+/// view-coordinate half is `ImageViewMapping` (PDF-space handles plus
+/// explicit PDF<->view mapping through the caller's view transform); a
+/// snapped handle drag feeds the same `degrees` this command applies.
 public struct RotateImageCommand: PDFEditCommand, Equatable, Sendable {
   public let pageID: PDFObjectID
   public let placementIndex: Int
@@ -377,9 +379,13 @@ public struct RotateImageCommand: PDFEditCommand, Equatable, Sendable {
     let m = placement.matrix
     let local = [m[0], m[1], m[2], m[3], 0, 0]
     let rotated = ImageInventory.concat(rotation, local)
-    let result = [
-      rotated[0], rotated[1], rotated[2], rotated[3], rotated[4] + m[4], rotated[5] + m[5],
-    ]
+    // Keep the footprint centered: the unit square's center maps to the
+    // footprint center before and after, so only orientation changes.
+    let bounds = ImageInventory.bounds(of: m)
+    let center = [(bounds[0] + bounds[2]) / 2, (bounds[1] + bounds[3]) / 2]
+    let e = center[0] - (rotated[0] + rotated[2]) / 2
+    let f = center[1] - (rotated[1] + rotated[3]) / 2
+    let result = [rotated[0], rotated[1], rotated[2], rotated[3], e, f]
     let content = try PageContent.load(pageID: pageID, in: graph, limits: limits)
     let ranges = zip(placement.operandSpans, result).map {
       ($0.0, Array(ImageInventory.numberToken($0.1).utf8))

@@ -10,7 +10,7 @@ Use Command-F to open Find. Enter a phrase and press Return to search, then use 
 
 Choose Annotate → Text Edit Tool (Control-Command-2), then click a supported text run to edit its actual content. Return commits the edit; undo and redo use the Edit menu. Reflow Paragraph supports longer replacements within its stated font and region limits.
 
-Switch back with Annotate → Select Tool (Control-Command-1). Graphics added by sPDF can be selected, moved, and resized with handles. For supported images already in the PDF, right-click the image to rotate, scale, or replace it. Shared resources and unsupported content produce explicit choices or refusal reasons.
+Switch back with Annotate → Select Tool (Control-Command-1). In Select mode, dragging a graphic only selects it and never dirties the document. To move or resize graphics, arm Annotate → Image Edit Tool (Control-Command-4) first; handles and keyboard nudging work only there. For supported images already in the PDF, right-click the image to rotate, scale, or replace it. Shared resources and unsupported content produce explicit choices or refusal reasons.
 
 ## Annotate, fill forms, and organize pages
 

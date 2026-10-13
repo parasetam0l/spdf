@@ -220,6 +220,44 @@ struct AddedGraphicsTests {
 
   // MARK: - P12-017 selection inventory
 
+  @Test func nativeImageStreamsRefuseGraphicMutation() throws {
+    // Joint-session finding: dragging a document image rewrote its native
+    // placement matrix (unknown transform context), moved the picture out
+    // of place, and broke the page. Only app-appended streams carrying the
+    // provenance marker are selectable or mutable now.
+    let parsed = try PDFParser.parse(PDFFixtures.imagePages())
+    let pageID = parsed.pageIDs[0]
+    let images = try PDFImageInventory.images(in: parsed.graph, pageIDs: [pageID])
+    #expect(!images.isEmpty)
+    #expect(try AddedGraphics.selectable(pageID: pageID, in: parsed.graph).isEmpty)
+    guard case .dictionary(let page)? = parsed.graph.objects[pageID] else {
+      Issue.record("image fixture page is missing")
+      return
+    }
+    let contentID: PDFObjectID
+    switch page[PDFName("Contents")] {
+    case .reference(let id)?:
+      contentID = id
+    case .array(let items)?:
+      guard case .reference(let id)? = items.first else {
+        Issue.record("image fixture page has no content stream")
+        return
+      }
+      contentID = id
+    default:
+      Issue.record("image fixture page has no content stream")
+      return
+    }
+    do {
+      _ = try PDFEditingEngine.commit(
+        PDFTransaction([MoveAddedGraphicCommand(streamID: contentID, dx: 5, dy: 5)]),
+        to: parsed.graph)
+      Issue.record("native stream accepted graphic mutation")
+    } catch let error as PDFError {
+      #expect(error.kind == .unsupported)
+    }
+  }
+
   @Test func selectableListsSupportedGraphicsInContentOrder() throws {
     let graph = try graph()
     let pageID = try PDFPageTree.pageIDs(in: graph)[0]
