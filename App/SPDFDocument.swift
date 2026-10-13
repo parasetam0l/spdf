@@ -122,8 +122,10 @@ final class SPDFDocument: NSDocument {
     }
     guard editSession.canEdit, editSession.isDirty else { return }
     lastRecoverySnapshotAt = now
-    _ = try? recoveryStore.snapshot(
-      session: editSession, key: recoveryKey, originalURL: fileURL, now: now)
+    _ = try? WorkspacePerformance.profile("recovery-snapshot") {
+      try recoveryStore.snapshot(
+        session: editSession, key: recoveryKey, originalURL: fileURL, now: now)
+    }
   }
 
   func snapshotRecoveryNow() {
@@ -1121,7 +1123,9 @@ final class SPDFDocument: NSDocument {
   /// P24-017: fill a text field from the forms panel.
   func fillFormText(fieldName: String, text: String) {
     do {
-      try editSession.fillFormText(fieldName: fieldName, text: text)
+      try WorkspacePerformance.profile("form-edit") {
+        try editSession.fillFormText(fieldName: fieldName, text: text)
+      }
     } catch {
       presentError(error)
       return
@@ -3209,11 +3213,13 @@ final class SPDFDocument: NSDocument {
   /// P22-015: set or clear a comment's review status.
   func setState(_ state: PDFName?, on comment: Comment) {
     do {
-      try editSession.apply(
-        PDFTransaction([
-          SetAnnotationStateCommand(
-            pageID: comment.pageID, annotationIndex: comment.annotation.index, state: state)
-        ]))
+      try WorkspacePerformance.profile("comment-edit") {
+        try editSession.apply(
+          PDFTransaction([
+            SetAnnotationStateCommand(
+              pageID: comment.pageID, annotationIndex: comment.annotation.index, state: state)
+          ]))
+      }
     } catch {
       presentError(error)
       return
@@ -3653,8 +3659,10 @@ final class SPDFDocument: NSDocument {
       fontsModel.update(with: [])
       return
     }
-    let fonts = PDFFontInventory.fonts(in: graph, pageIDs: editSession.pageIDs)
-    fontsModel.update(with: FontProvisioning.statuses(for: fonts))
+    WorkspacePerformance.profile("font-inventory") {
+      let fonts = PDFFontInventory.fonts(in: graph, pageIDs: editSession.pageIDs)
+      fontsModel.update(with: FontProvisioning.statuses(for: fonts))
+    }
   }
 
   var hasFonts: Bool { !fontsModel.entries.isEmpty }
@@ -3864,7 +3872,9 @@ final class SPDFDocument: NSDocument {
   }
 
   func refreshComments() {
-    commentsModel.comments = editSession.comments()
+    commentsModel.comments = WorkspacePerformance.profile("comments-inventory") {
+      editSession.comments()
+    }
   }
 
   /// P12-020: install document facts for the info panel from the core
@@ -3888,14 +3898,16 @@ final class SPDFDocument: NSDocument {
   }
 
   func refreshForms() {
-    formsModel.fields = editSession.formFields()
-    guard let graph = editSession.currentGraph else {
-      formsModel.orphanedWidgetCount = 0
-      return
+    WorkspacePerformance.profile("forms-inventory") {
+      formsModel.fields = editSession.formFields()
+      guard let graph = editSession.currentGraph else {
+        formsModel.orphanedWidgetCount = 0
+        return
+      }
+      formsModel.orphanedWidgetCount = FormInventory.orphanedWidgets(
+        in: graph, pageIDs: editSession.pageIDs
+      ).count
     }
-    formsModel.orphanedWidgetCount = FormInventory.orphanedWidgets(
-      in: graph, pageIDs: editSession.pageIDs
-    ).count
   }
 
   /// UTC PDF date string for annotation timestamps.
@@ -3908,10 +3920,12 @@ final class SPDFDocument: NSDocument {
   }
 
   private func refreshViewer(preservingPage page: Int) {
-    guard let data = try? editSession.bytesForSave(),
+    guard let data = try? WorkspacePerformance.profile("serialize-for-viewer", operation: {
+      try editSession.bytesForSave()
+    }),
       let source = try? PDFSource(data: data)
     else { return }
-    try? viewer?.open(source)
+    try? WorkspacePerformance.profile("renderer-reload") { try viewer?.open(source) }
     if page > 0 { viewer?.go(to: page) }
     refreshComments()
     refreshForms()

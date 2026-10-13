@@ -9,6 +9,32 @@ import Testing
 /// state, snapshot undo/redo, bounded history, and verified save bytes.
 @Suite("Edit sessions")
 struct EditSessionTests {
+  @Test func repeatedSaveConsumersNeverReuseAnEarlierDocumentState() throws {
+    let session = DocumentEditSession()
+    let original = try PDFFixtures.threePages()
+    session.load(try PDFSource(data: original))
+    try session.rotatePage(at: 0, byDegrees: 90)
+    let first = try session.bytesForSave()
+    // The viewer, recovery and Save may each request the same revision.
+    #expect(try session.bytesForSave() == first)
+    #expect(try session.bytesForSave() == first)
+    session.noteSaved()
+    try session.rotatePage(at: 1, byDegrees: 180)
+    let second = try session.bytesForSave()
+    #expect(second != first)
+    #expect(second.starts(with: first))
+    #expect(try session.bytesForSave() == second)
+    #expect(session.undo())
+    #expect(try session.bytesForSave() == first)
+    #expect(session.redo())
+    #expect(try session.bytesForSave() == second)
+    // Loading another source invalidates every previous consumer's result.
+    let replacement = try PDFFixtures.onePage()
+    session.load(try PDFSource(data: replacement))
+    #expect(try session.bytesForSave() == replacement)
+    #expect(session.pageIDs.count == 1)
+  }
+
   @Test func editedSessionRoundTripUndoRedoAndExactOriginalBytes() throws {
     let original = try PDFFixtures.threePages()
     let session = DocumentEditSession()

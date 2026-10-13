@@ -10,6 +10,13 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
 
   func applicationDidFinishLaunching(_ notification: Notification) {
     installMenus()
+    if let index = CommandLine.arguments.firstIndex(of: "--measure-workspace"),
+      CommandLine.arguments.count > index + 1
+    {
+      let output = URL(fileURLWithPath: CommandLine.arguments[index + 1], isDirectory: true)
+      Task { await WorkspacePerformance.run(output: output) }
+      return
+    }
     #if DEBUG
       if let index = CommandLine.arguments.firstIndex(of: "--smoke-test"),
         CommandLine.arguments.count > index + 2
@@ -70,6 +77,10 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
   }
 
   func application(_ sender: NSApplication, openFiles filenames: [String]) {
+    if CommandLine.arguments.contains("--measure-workspace") {
+      sender.reply(toOpenOrPrint: .success)
+      return
+    }
     #if DEBUG
       // AppKit also interprets positional launch arguments as file-open requests.
       // The smoke harness owns its fixture/output paths and opens documents itself.

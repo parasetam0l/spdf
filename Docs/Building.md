@@ -19,3 +19,16 @@ The smoke check uses the Debug app and the synthetic fixtures in `Tests/Fixtures
 Some tests use optional independent tools: qpdf, MuPDF (`mutool`), veraPDF, OpenSSL, Python, and macOS `textutil`, `unzip`, and Quick Look. They report or skip unavailable tools; installing them expands verification coverage. OCR recognition and display-dependent behavior can vary with the host environment.
 
 For a Developer ID archive, `bash Scripts/dev.sh release` uses an installed signing identity. Set `SPDF_NOTARY_PROFILE` to an existing `notarytool` keychain profile to enable notarization and stapling. Distribution through GitHub Actions is described in [Releasing](Releasing.md).
+
+## Native workspace measurements
+
+The opt-in probe generates synthetic documents, exposes a native window, and records display-linked scrolling, 200-field/1,000-comment sidebar actions, layout/draw costs, and verified Undo:
+
+```sh
+"Work/Build/Build/Products/Debug/sPDF Editor.app/Contents/MacOS/sPDF Editor" \
+  --measure-workspace Work/WorkspaceMetrics
+```
+
+Results and generated inputs stay in that output directory. The probe does not start update checks. Callback timing measures the current display cadence; it is distinct from a GPU-presented-frame count. A virtual machine's display and results should be identified as virtual.
+
+For optimized measurements, use a Developer ID-signed Release build with all nested Sparkle code signed with the same identity. A hardened ad-hoc Release may fail library validation; Debug is the credential-free local run path. Distribution signing/notarization is covered in [Releasing](Releasing.md).

@@ -47,6 +47,7 @@ public final class DocumentEditSession: @unchecked Sendable {
   private var pendingBase: ParsedPDF?
   private var savedBytes: Data?
   private var pendingBytes: Data?
+  private var pendingRevision: UInt64?
   private var pages: [PDFObjectID] = []
   private var undoStack: [UndoEntry] = []
   private var redoStack: [UndoEntry] = []
@@ -84,6 +85,7 @@ public final class DocumentEditSession: @unchecked Sendable {
       pendingBase = nil
       savedBytes = nil
       pendingBytes = nil
+      pendingRevision = nil
       pages = parsed?.pageIDs ?? []
       undoStack.removeAll()
       redoStack.removeAll()
@@ -111,6 +113,7 @@ public final class DocumentEditSession: @unchecked Sendable {
       pendingBase = nil
       savedBytes = nil
       pendingBytes = nil
+      pendingRevision = nil
       pages = unlocked.parsed.pageIDs
       undoStack.removeAll()
       redoStack.removeAll()
@@ -467,6 +470,7 @@ public final class DocumentEditSession: @unchecked Sendable {
         savedBytes = pendingBytes
         self.pendingBytes = nil
       }
+      pendingRevision = nil
       saved = current
     }
   }
@@ -476,6 +480,8 @@ public final class DocumentEditSession: @unchecked Sendable {
   /// exists, otherwise a verified full rewrite. Every produced byte string
   /// is reparsed and compared against the edited graph before it is offered
   /// to AppKit, and the reparsed result becomes the next incremental base.
+  /// Repeated consumers of the same unprotected revision reuse those verified
+  /// bytes, so viewer refresh and recovery do not repeat serialization.
   public func bytesForSave() throws -> Data {
     try lock.withLock {
       guard let source else {
@@ -495,6 +501,7 @@ public final class DocumentEditSession: @unchecked Sendable {
         pendingBytes = output
         return output
       }
+      if pendingRevision == revision, let pendingBytes { return pendingBytes }
       let plan = PDFWriter.plan(
         current: current, original: original, baseAvailable: parsedBase != nil)
       guard plan.mode != .originalBytes, let currentGraph = current else {
@@ -529,6 +536,7 @@ public final class DocumentEditSession: @unchecked Sendable {
       }
       pendingBase = reparsed
       pendingBytes = output
+      pendingRevision = revision
       return output
     }
   }

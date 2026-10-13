@@ -30,12 +30,18 @@ final class AppUpdater: ObservableObject {
   }
 
   private init() {
-    #if DEBUG
+    if CommandLine.arguments.contains("--measure-workspace") {
+      // An explicitly requested local measurement never starts network checks
+      // or changes the owner's update preference.
       controller = nil
-    #else
-      controller = SPUStandardUpdaterController(
-        startingUpdater: true, updaterDelegate: nil, userDriverDelegate: nil)
-    #endif
+    } else {
+      #if DEBUG
+        controller = nil
+      #else
+        controller = SPUStandardUpdaterController(
+          startingUpdater: true, updaterDelegate: nil, userDriverDelegate: nil)
+      #endif
+    }
     if let updater = controller?.updater {
       updater.publisher(for: \.canCheckForUpdates)
         .receive(on: DispatchQueue.main)

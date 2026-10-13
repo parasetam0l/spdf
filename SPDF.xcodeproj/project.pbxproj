@@ -24,6 +24,7 @@
 		67EC875EAFB1EC1F449D06CE /* PDFCore in Frameworks */ = {isa = PBXBuildFile; productRef = 5A1B9A364B27DD2150671136 /* PDFCore */; };
 		68D01E3A362B8CC0AC282B2A /* FontsPanel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A47BE52ECA0F0EF59D065A11 /* FontsPanel.swift */; };
 		73CAAFA4B2309D979E39F4F6 /* ApplicationDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 07489EF96ED38AC775027645 /* ApplicationDelegate.swift */; };
+		8767D9ABC02F99629065E1B2 /* WorkspacePerformance.swift in Sources */ = {isa = PBXBuildFile; fileRef = D65800C5E45DCA901B0CC22D /* WorkspacePerformance.swift */; };
 		89C657CE2CBD250F48A1B98E /* UpdateSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0705225D1C69ADFF420119E /* UpdateSettingsView.swift */; };
 		8FA8CCE8E693BEBA78AD15A3 /* TableReviewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6716E75AAC823E2EA26B0072 /* TableReviewModel.swift */; };
 		9BDD7D0E0E17C86FCEEAADF2 /* CommentsModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 50BAA98BFBFE2B0F82566CFA /* CommentsModel.swift */; };
@@ -75,6 +76,7 @@
 		C2D20568FDE859912E452D28 /* ComparisonSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComparisonSession.swift; sourceTree = "<group>"; };
 		C70DB85406AC9CCA1F09669C /* ComparisonWindow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComparisonWindow.swift; sourceTree = "<group>"; };
 		CAEDDE0A21FD109A8C499FD3 /* SignatureCanvas.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SignatureCanvas.swift; sourceTree = "<group>"; };
+		D65800C5E45DCA901B0CC22D /* WorkspacePerformance.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspacePerformance.swift; sourceTree = "<group>"; };
 		E22A55458206C80891A19A5B /* StructureModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StructureModel.swift; sourceTree = "<group>"; };
 		F09E92DC94966E861838CFF6 /* SPDF.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = SPDF.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
@@ -153,6 +155,7 @@
 			children = (
 				A426D276236110E33031673E /* AccessibilityAudit.swift */,
 				40CFDE87E89D9F244DF2A500 /* SmokeTest.swift */,
+				D65800C5E45DCA901B0CC22D /* WorkspacePerformance.swift */,
 			);
 			path = Diagnostics;
 			sourceTree = "<group>";
@@ -296,6 +299,7 @@
 				8FA8CCE8E693BEBA78AD15A3 /* TableReviewModel.swift in Sources */,
 				337CB33D21D1544A6D6330A0 /* TableReviewPanel.swift in Sources */,
 				89C657CE2CBD250F48A1B98E /* UpdateSettingsView.swift in Sources */,
+				8767D9ABC02F99629065E1B2 /* WorkspacePerformance.swift in Sources */,
 				A2BD3844AD100A6C0F0E0BAF /* WorkspaceView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
