@@ -4,6 +4,7 @@ import ImageIO
 import PDFCore
 import PDFEditing
 import PDFFixtures
+import PDFKit
 import Testing
 import UniformTypeIdentifiers
 @testable import MacServices
@@ -14,6 +15,13 @@ import UniformTypeIdentifiers
 /// measured separately in an interactive session instead of being claimed here.
 @Suite("Performance measurements")
 struct PerformanceMeasurementTests {
+  private final class ProgressCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+    func increment() { lock.withLock { count += 1 } }
+    var value: Int { lock.withLock { count } }
+  }
+
   private func millis(_ duration: Duration) -> Int {
     Int(duration.components.seconds * 1000)
       + Int(duration.components.attoseconds / 1_000_000_000_000_000)
@@ -408,6 +416,84 @@ struct PerformanceMeasurementTests {
         + "(\(first.threads) threads)")
     #expect(first.ms < 5_000)
     #expect(second.ms < 5_000)
+  }
+
+  // MARK: - P39-014 (recognition runs on this machine; hosted CI may differ)
+
+  @Test func ocrConcurrencyThroughputAndCancellation() async throws {
+    // Vision works on this Mac (33 languages); each task opens its own
+    // PDFDocument from shared bytes because PDFDocument is not Sendable.
+    let fixture = try PDFFixtures.threePages()
+    guard PDFDocument(data: fixture)?.pageCount == 3 else {
+      Issue.record("three-page fixture did not open")
+      return
+    }
+    func runPages(_ indexes: [Int]) throws -> Int {
+      guard let document = PDFDocument(data: fixture) else { return -1 }
+      return try OCRJob.run(
+        document: document, pageIndexes: indexes, languages: ["en"], level: .fast
+      ).reduce(0) { $0 + $1.lines.count }
+    }
+    // Sequential baseline over all pages.
+    let seqStart = ContinuousClock.now
+    let seqLines = try runPages([0, 1, 2])
+    let seqMs = millis(ContinuousClock.now - seqStart)
+    #expect(seqLines >= 0)
+    // Concurrent: one job per page.
+    let concStart = ContinuousClock.now
+    let concLines = try await withThrowingTaskGroup(of: Int.self) { group in
+      for index in 0..<3 {
+        group.addTask { try runPages([index]) }
+      }
+      var total = 0
+      for try await lines in group { total += lines }
+      return total
+    }
+    let concMs = millis(ContinuousClock.now - concStart)
+    #expect(concLines == seqLines)
+    // Temperature drift: two more sequential rounds, recorded not asserted.
+    var rounds = [seqMs]
+    for _ in 1...2 {
+      let start = ContinuousClock.now
+      _ = try runPages([0, 1, 2])
+      rounds.append(millis(ContinuousClock.now - start))
+    }
+    // Cancellation: cancel mid-run (after ~50 ms into ~20 fast pages),
+    // so the acknowledgement crosses an in-flight page boundary.
+    guard let cancelDoc = PDFDocument(data: fixture) else {
+      Issue.record("fixture did not open for cancellation")
+      return
+    }
+    var progressCalls = 0
+    let progressBox = ProgressCounter()
+    let cancelStart = ContinuousClock.now
+    let job = Task {
+      try OCRJob.run(
+        document: cancelDoc, pageIndexes: Array(repeating: 0, count: 20),
+        languages: ["en"], level: .fast,
+        onProgress: { _, _ in progressBox.increment() })
+    }
+    try await Task.sleep(for: .milliseconds(50))
+    job.cancel()
+    let ackMs: Int
+    do {
+      _ = try await job.value
+      ackMs = millis(ContinuousClock.now - cancelStart)
+    } catch is CancellationError {
+      ackMs = millis(ContinuousClock.now - cancelStart)
+    } catch {
+      Issue.record("cancellation threw \(error) instead of CancellationError")
+      return
+    }
+    #expect(progressBox.value > 0, "cancel landed before any page finished")
+    print(
+      "[P39] OCR 3 pages: sequential \(seqMs) ms (\(seqLines) lines), "
+        + "concurrent \(concMs) ms (\(concLines) lines), "
+        + "repeat rounds \(rounds.map(String.init).joined(separator: "/")) ms, "
+        + "cancel ack \(ackMs) ms")
+    #expect(seqMs < 120_000)
+    #expect(concMs < 120_000)
+    #expect(ackMs < 10_000)
   }
 
   // MARK: - P39-011
