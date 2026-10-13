@@ -35,6 +35,7 @@ final class SPDFDocument: NSDocument {
   /// P12-021: background-job progress and cancellation for this document.
   let jobCenter = JobProgressCenter()
   private var lastRecoverySnapshotAt: Date?
+  private var recoveredRecoveryKey: String?
   private var sourceFingerprint: SourceFingerprint?
   private(set) var viewer: PDFViewingSession?
   private(set) var coreInspection: CoreInspection?
@@ -104,7 +105,7 @@ final class SPDFDocument: NSDocument {
   }
 
   /// P10-022: the key follows the file's identity across moves and renames.
-  var recoveryKey: String { RecoveryStore.documentKey(for: fileURL) }
+  var recoveryKey: String { recoveredRecoveryKey ?? RecoveryStore.documentKey(for: fileURL) }
 
   /// P10-016: bounded autosave — snapshot a dirty session at most once per
   /// policy interval, or on demand.
@@ -130,15 +131,17 @@ final class SPDFDocument: NSDocument {
   }
 
   /// P10-021: discard recovery state after a verified save.
-  func discardRecoveryRecords() {
-    try? recoveryStore.discard(for: recoveryKey)
+  func discardRecoveryRecords(for key: String? = nil) {
+    try? recoveryStore.discard(for: key ?? recoveryKey)
+    recoveredRecoveryKey = nil
     lastRecoverySnapshotAt = nil
   }
 
   /// P10-020: open recovered unsaved edits as a dirty untitled document.
-  func loadRecovered(_ data: Data) {
-    guard let source = try? PDFSource(data: data) else { return }
-    try? sourceStore.load(data)
+  func loadRecovered(_ data: Data, recoveryKey: String? = nil) throws {
+    let source = try PDFSource(data: data)
+    try sourceStore.load(data)
+    recoveredRecoveryKey = recoveryKey
     editSession.load(source)
     undoManager?.removeAllActions()
     updateChangeCount(.changeDone)
@@ -204,6 +207,9 @@ final class SPDFDocument: NSDocument {
     to url: URL, ofType typeName: String, for saveOperation: NSDocument.SaveOperationType,
     completionHandler: @escaping (Error?) -> Void
   ) {
+    // A verified atomic replacement changes the destination inode. Keep the
+    // key used by the edits until their save has actually succeeded.
+    let savedRecoveryKey = recoveryKey
     if saveOperation == .saveOperation, destinationChangedExternally(),
       !confirmExternallyModifiedSave()
     {
@@ -214,7 +220,7 @@ final class SPDFDocument: NSDocument {
       if error == nil {
         editSession.noteSaved()
         Task { @MainActor [weak self] in
-          self?.discardRecoveryRecords()
+          self?.discardRecoveryRecords(for: savedRecoveryKey)
           if let url = self?.fileURL {
             self?.sourceFingerprint = SourceFingerprint.capture(of: url)
           }
@@ -384,6 +390,8 @@ final class SPDFDocument: NSDocument {
     addWindowController(NSWindowController(window: window))
     restoreViewState(viewer: viewer)
     refreshComments()
+    refreshForms()
+    refreshFonts()
     refreshSignatures()
     refreshStructure()
     refreshDocumentInfo()

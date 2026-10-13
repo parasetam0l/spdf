@@ -1,4 +1,5 @@
 import AppKit
+import Carbon.HIToolbox
 
 /// P33-024: independent accessibility audit through the system accessibility
 /// API — the same interface VoiceOver uses — plus a keyboard map audit over
@@ -265,13 +266,18 @@ enum KeyboardAudit {
   @discardableResult
   @MainActor
   static func press(_ title: String) -> Bool {
-    guard let item = find(title), !item.keyEquivalent.isEmpty,
+    guard let item = find(title), !item.keyEquivalent.isEmpty else { return false }
+    item.menu?.update()
+    // Key code zero is the physical A key. Save needs an S key event,
+    // otherwise AppKit can treat a synthetic Command-S as Select All.
+    let keyCode = item.keyEquivalent == "s" ? UInt16(kVK_ANSI_S) : UInt16(0)
+    guard item.isEnabled,
       let event = NSEvent.keyEvent(
         with: .keyDown, location: .zero, modifierFlags: item.keyEquivalentModifierMask,
         timestamp: ProcessInfo.processInfo.systemUptime,
         windowNumber: NSApp.keyWindow?.windowNumber ?? 0, context: nil,
         characters: item.keyEquivalent, charactersIgnoringModifiers: item.keyEquivalent,
-        isARepeat: false, keyCode: 0)
+        isARepeat: false, keyCode: keyCode)
     else { return false }
     return NSApp.mainMenu?.performKeyEquivalent(with: event) ?? false
   }

@@ -4,15 +4,17 @@
 
 Open a PDF with File → Open or Finder. Use the View menu for fit-page, fit-width, actual size, page navigation, and outlines. Locked documents remain restricted until you use File → Unlock Document.
 
+Use Command-F to open Find. Enter a phrase and press Return to search, then use Previous Match or Next Match to move through the results.
+
 ## Edit text and images
 
-Select a supported text run to edit its actual content. Return commits the edit; undo and redo use the Edit menu. Reflow Paragraph supports longer replacements within its stated font and region limits.
+Choose Annotate → Text Edit Tool (Control-Command-2), then click a supported text run to edit its actual content. Return commits the edit; undo and redo use the Edit menu. Reflow Paragraph supports longer replacements within its stated font and region limits.
 
-Select an image or graphic placement to move or resize it. Image commands include rotation, replacement, and import. Shared resources and unsupported content produce explicit choices or refusal reasons.
+Switch back with Annotate → Select Tool (Control-Command-1). Graphics added by sPDF can be selected, moved, and resized with handles. For supported images already in the PDF, right-click the image to rotate, scale, or replace it. Shared resources and unsupported content produce explicit choices or refusal reasons.
 
 ## Annotate, fill forms, and organize pages
 
-Use the Edit and Annotate menus for markup, notes, text boxes, shapes, ink, and drawn signatures. The comments sidebar supports navigation, replies, and review state. Common form fields can be filled in the page; form properties and authoring commands are available through the menus.
+Use the Edit and Annotate menus for markup, notes, text boxes, shapes, ink, and drawn signatures. The comments sidebar supports navigation, replies, and review state. Common form fields can be filled in the page or Forms sidebar; press Return to commit a text value. Form properties and authoring commands are available through the menus.
 
 Use the page organizer for supported page reordering, rotation, insertion, import, extraction, and deletion. Operations that would damage references are refused or require a supported resolution.
 

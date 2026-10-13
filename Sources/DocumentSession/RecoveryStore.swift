@@ -137,8 +137,9 @@ public struct RecoveryStore: Sendable {
         at: policy.directory, includingPropertiesForKeys: [.isDirectoryKey], options: [])
     else { return [] }
     return contents.filter { url in
-      (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
-    }.map(\.lastPathComponent).sorted()
+      url.lastPathComponent.hasPrefix("recovery-")
+        && (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
+    }.map { String($0.lastPathComponent.dropFirst("recovery-".count)) }.sorted()
   }
 
   // MARK: - Private

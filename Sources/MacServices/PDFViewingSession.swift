@@ -719,7 +719,9 @@ public final class PDFViewingSession: NSObject, ObservableObject, PDFViewDelegat
     } else {
       box = .zero
     }
-    if box.width > 0.5, box.height > 0.5, let selection = page.selection(for: box) {
+    if box.width > 0.5, box.height > 0.5, let selection = page.selection(for: box),
+      let text = selection.string, !text.isEmpty
+    {
       view.setCurrentSelection(selection, animate: false)
       view.go(to: selection)
     } else if box != .zero {

@@ -41,18 +41,24 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
     }
     alert.addButton(withTitle: "Recover")
     alert.addButton(withTitle: "Discard")
-    guard alert.runModal() == .alertFirstButtonReturn,
-      let bytes = try? store.latestBytes(for: key)
-    else {
+    guard alert.runModal() == .alertFirstButtonReturn else {
       try? store.discard(for: key)
       return
     }
-    Task { @MainActor in
-      if let document = try? await documents.openUntitledDocumentAndDisplay(true)
-        as? SPDFDocument
-      {
-        document.loadRecovered(bytes)
-      }
+    do {
+      guard let bytes = try store.latestBytes(for: key),
+        let document = try documents.makeUntitledDocument(ofType: "com.adobe.pdf")
+          as? SPDFDocument
+      else { throw CocoaError(.fileReadCorruptFile) }
+      // An empty untitled document has no source to display. Load its recovery
+      // snapshot before creating and showing the document's window.
+      try document.loadRecovered(bytes, recoveryKey: key)
+      documents.addDocument(document)
+      document.showWindows()
+      welcome?.close()
+    } catch {
+      // Keep the snapshot available if restoration failed.
+      documents.presentError(error)
     }
   }
 

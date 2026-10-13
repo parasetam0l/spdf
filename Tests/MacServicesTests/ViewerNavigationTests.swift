@@ -8,6 +8,16 @@ import Testing
 
 @Suite("Viewer navigation and overlay pinning")
 struct ViewerNavigationTests {
+  @Test @MainActor func commentFocusNavigatesToARegionWithoutText() throws {
+    let session = PDFViewingSession()
+    try session.open(PDFSource(data: PDFFixtures.annotationPages()))
+    #expect(session.pageNumber == 1)
+    session.focus(onPageIndex: 1, rect: [100, 100, 120, 120])
+    #expect(session.pageNumber == 2)
+    session.focus(onPageIndex: 0, rect: [100, 100, 120, 120])
+    #expect(session.pageNumber == 1)
+  }
+
   // MARK: - Overlay anchors (P11-017)
 
   @Test func overlayAnchorsResolveAndGoStaleWithRevisions() async throws {

@@ -88,6 +88,22 @@ struct RecoveryStoreTests {
     #expect(try store.latest(for: "empty") == nil)
   }
 
+  @Test func pendingKeysResolveStoredSnapshots() throws {
+    let directory = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let store = RecoveryStore(policy: RecoveryPolicy(directory: directory))
+    let session = DocumentEditSession()
+    session.load(try PDFSource(data: PDFFixtures.onePage()))
+    try session.rotatePage(at: 0, byDegrees: 90)
+    let expected = try session.bytesForSave()
+    _ = try store.snapshot(session: session, key: "inode-123", originalURL: nil)
+    try FileManager.default.createDirectory(
+      at: directory.appendingPathComponent("unrelated"), withIntermediateDirectories: true)
+    #expect(store.pendingKeys() == ["inode-123"])
+    let key = try #require(store.pendingKeys().first)
+    #expect(try store.latestBytes(for: key) == expected)
+  }
+
   @Test func documentKeySurvivesMovesAndRenames() throws {
     let directory = try temporaryDirectory()
     defer { try? FileManager.default.removeItem(at: directory) }

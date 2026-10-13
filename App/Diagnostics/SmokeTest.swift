@@ -70,6 +70,16 @@
           let formWindow = formDocument.windowControllers.first?.window
         else { throw PDFError(.malformed, "Native document opening smoke test failed") }
 
+        // Fresh windows must populate their sidebar models before an edit.
+        guard formDocument.formsModel.fields.count == 10,
+          formDocument.formsModel.fields.contains(where: { $0.name == "name" }),
+          formDocument.formsModel.fields.contains(where: { $0.name == "notes" }),
+          formDocument.formsModel.orphanedWidgetCount == 1,
+          first.fontsModel.entries.contains(where: {
+            $0.font.familyName == "Helvetica" && $0.installed
+          })
+        else { throw PDFError(.malformed, "Fresh document sidebar inventories are missing") }
+
         // P30: the signed fixture is inventoried and validated offline with
         // separate cryptographic and trust statuses; the panel is available.
         guard signedDocument.signaturesModel.entries.count == 1,
@@ -135,8 +145,6 @@
 
         // P43-002/P43-004: the font inspector surfaces installed, embedded,
         // and missing fonts with concrete fallbacks and paid-font warnings.
-        taggedDocument.refreshFonts()
-        first.refreshFonts()
         guard taggedDocument.fontsModel.entries.contains(where: {
           $0.font.familyName == "F1" && !$0.font.isEmbedded && $0.needsProvisioning
         }),
@@ -595,13 +603,31 @@
         guard KeyboardAudit.invoke("Highlight Selection"),
           keyboardDocument.commentsModel.comments.count == commentsBefore + 1
         else { throw PDFError(.malformed, "Highlight Selection did not annotate the match") }
-        guard KeyboardAudit.press("Save") else {
+        // Text-input or utility windows can become key during the workflow.
+        // Save must be sent with the intended document owning keyboard focus.
+        keyboardWindow.makeKeyAndOrderFront(nil)
+        let keyboardRecoveryKey = keyboardDocument.recoveryKey
+        guard NSApp.keyWindow === keyboardWindow, KeyboardAudit.press("Save") else {
           throw PDFError(.malformed, "Save did not run over the keyboard")
         }
-        try await Task.sleep(for: .milliseconds(500))
-        let savedData = try Data(contentsOf: keyboardCopyURL)
-        guard let savedDocument = PDFDocument(data: savedData) else {
-          throw PDFError(.malformed, "The saved copy does not reopen")
+        // NSDocument saves asynchronously. Wait for the actual disk result,
+        // rather than assuming it is present after a fixed 500 ms delay.
+        let saveDeadline = ContinuousClock.now.advanced(by: .seconds(3))
+        var savedDocument: PDFDocument?
+        repeat {
+          if let savedData = try? Data(contentsOf: keyboardCopyURL),
+            let candidate = PDFDocument(data: savedData),
+            candidate.page(at: 1)?.annotations.filter({ $0.type == "Highlight" }).count == 1,
+            !keyboardDocument.editSession.isDirty,
+            !keyboardDocument.recoveryStore.pendingKeys().contains(keyboardRecoveryKey)
+          {
+            savedDocument = candidate
+            break
+          }
+          try await Task.sleep(for: .milliseconds(50))
+        } while ContinuousClock.now < saveDeadline
+        guard let savedDocument else {
+          throw PDFError(.malformed, "The saved highlight did not reopen within three seconds")
         }
         guard savedDocument.page(at: 1)?.annotations.filter({
           // PDFAnnotation.type omits the subtype's leading slash.
@@ -1757,7 +1783,6 @@
         guard inlineFields.first(where: { $0.name == "notes" })?.stringValue == "Inline note"
         else { throw PDFError(.malformed, "In-page form edit did not commit") }
 
-        formDocument.formsModel.fields = formDocument.editSession.formFields()
         formViewer.showForms()
         try await Task.sleep(for: .milliseconds(300))
         if let formsContent = formDocument.windowControllers.first?.window?.contentView {
