@@ -32,7 +32,6 @@ struct WorkspaceView: View {
   var onRejectStructureSuggestion: (UUID) -> Void
   var onApplyStructureSuggestions: () -> Void
   var onDiscardStructureSuggestions: () -> Void
-  @State private var continuous = true
   @State private var pageEntry = "1"
   @FocusState private var searchFocused: Bool
 
@@ -126,14 +125,14 @@ struct WorkspaceView: View {
             .disabled(!jobs.canCancel(id: job.id))
           }
         }
-        Picker("Page layout", selection: $continuous) {
+        Picker("Page layout", selection: Binding(
+          get: { viewer.view.displayMode == .singlePageContinuous },
+          set: { viewer.setContinuous($0) })) {
           Text("Continuous").tag(true)
           Text("Single Page").tag(false)
         }
         .labelsHidden()
         .frame(width: 130)
-        .onChange(of: continuous) { _, value in viewer.setContinuous(value) }
-        .onAppear { continuous = viewer.view.displayMode == .singlePageContinuous }
       }
       .buttonStyle(.borderless)
       .padding(.horizontal, 16).padding(.vertical, 12)

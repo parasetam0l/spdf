@@ -623,6 +623,10 @@ public final class PDFViewingSession: NSObject, ObservableObject, PDFViewDelegat
     refresh()
   }
 
+  /// Synchronize toolbar metadata after the app restores native window and
+  /// zoom values, without waiting for a queued PDFKit notification.
+  public func synchronizeViewState() { refresh() }
+
   public func showComments() { sidebarMode = .comments }
   public func showPages() { sidebarMode = .pages }
   public func showForms() { sidebarMode = .forms }

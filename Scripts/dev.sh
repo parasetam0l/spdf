@@ -44,6 +44,22 @@ case "${1:-}" in
     "$app" --smoke-test "$task_root/Tests/Fixtures" "$task_root/Work/Smoke" \
       -ApplePersistenceIgnoreState YES
     ;;
+  relaunch-smoke)
+    app="$task_root/Work/Build/Build/Products/Debug/sPDF Editor.app/Contents/MacOS/sPDF Editor"
+    if [[ ! -x "$app" ]]; then
+      printf 'Build the Debug app first: bash Scripts/dev.sh build Debug\n' >&2
+      exit 2
+    fi
+    output="$task_root/Work/Relaunch"
+    # Reusing a previous completed diagnostic must not consume its pending state.
+    mkdir -p "$output"
+    if [[ -f "$output/State/UpdateRelaunch/pending.json" ]]; then
+      mv "$output/State/UpdateRelaunch/pending.json" "$output/State/UpdateRelaunch/previous-diagnostic.json"
+    fi
+    "$app" --test-relaunch capture "$task_root/Tests/Fixtures" "$output" -ApplePersistenceIgnoreState YES
+    mv -f "$output/second.pdf" "$output/renamed.pdf"
+    "$app" --test-relaunch restore "$task_root/Tests/Fixtures" "$output" -ApplePersistenceIgnoreState YES
+    ;;
   termination-smoke)
     app="$task_root/Work/Build/Build/Products/Debug/sPDF Editor.app/Contents/MacOS/sPDF Editor"
     if [[ ! -x "$app" ]]; then
@@ -99,7 +115,7 @@ case "${1:-}" in
     fi
     ;;
   *)
-    printf 'Usage: bash Scripts/dev.sh {test|fixtures|build [Debug|Release]|smoke|termination-smoke|release}\n' >&2
+    printf 'Usage: bash Scripts/dev.sh {test|fixtures|build [Debug|Release]|smoke|termination-smoke|relaunch-smoke|release}\n' >&2
     exit 2
     ;;
 esac

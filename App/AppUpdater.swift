@@ -39,7 +39,10 @@ final class AppUpdater: NSObject, ObservableObject, SPUUpdaterDelegate {
       // or changes the owner's update preference.
       controller = nil
     } else {
-      #if DEBUG
+      #if SPDF_UPDATER_ACCEPTANCE
+        controller = SPUStandardUpdaterController(
+          startingUpdater: true, updaterDelegate: self, userDriverDelegate: nil)
+      #elseif DEBUG
         controller = nil
       #else
         controller = SPUStandardUpdaterController(
@@ -101,9 +104,14 @@ final class AppUpdater: NSObject, ObservableObject, SPUUpdaterDelegate {
   }
 
   func updater(_ updater: SPUUpdater, didAbortWithError error: Error) {
+    UpdateRelaunchCoordinator.disarm()
     installGeneration = UUID()
     pendingInstall = nil
     isInstallDeferred = false
+  }
+
+  func updaterWillRelaunchApplication(_ updater: SPUUpdater) {
+    UpdateRelaunchCoordinator.arm()
   }
 
   /// "1.2.0 (1791023807)"

@@ -2,7 +2,7 @@ import Foundation
 
 /// P10-023: window and navigation state, stored separately from document
 /// edits so restoring a view never replays transactions.
-public struct ViewState: Sendable, Equatable {
+public struct ViewState: Sendable, Equatable, Codable {
   public var windowFrame: [Double]
   public var pageNumber: Int
   public var scale: Double

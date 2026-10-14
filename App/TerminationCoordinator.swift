@@ -150,6 +150,11 @@ final class TerminationCoordinator: NSObject {
         $0.jobCenter.jobs.isEmpty
           && reviewed[ObjectIdentifier($0)] == $0.editSession.documentRevision
       }) {
+        do { try UpdateRelaunchCoordinator.capture(latest) }
+        catch {
+          NSDocumentController.shared.presentError(error)
+          return false
+        }
         for document in latest { document.close() }
         return true
       }

@@ -51,6 +51,8 @@ final class SPDFDocument: NSDocument {
   private var inspectionTask: Task<Void, Never>?
   private var isClosed = false
   private var isRunningOCR = false
+  private var restoredFileAccess: URL?
+  private var pendingUnlockedViewState: ViewState?
 
   // AppKit constructs concurrent-reading documents on its worker queue.
   // No views or other main-actor objects are created until makeWindowControllers().
@@ -110,12 +112,21 @@ final class SPDFDocument: NSDocument {
       directory: recoveryBaseDirectory().appendingPathComponent("ViewState", isDirectory: true))
   }
 
+  static func makeUpdateRelaunchStore() -> UpdateRelaunchStore {
+    UpdateRelaunchStore(
+      directory: recoveryBaseDirectory().appendingPathComponent("UpdateRelaunch", isDirectory: true))
+  }
+
   private static func recoveryBaseDirectory() -> URL {
     if let override = recoveryDirectoryOverride { return override }
     let base =
       FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
       ?? FileManager.default.temporaryDirectory
-    return base.appendingPathComponent("sPDF Editor", isDirectory: true)
+    #if SPDF_UPDATER_ACCEPTANCE
+      return base.appendingPathComponent("sPDF Updater Acceptance", isDirectory: true)
+    #else
+      return base.appendingPathComponent("sPDF Editor", isDirectory: true)
+    #endif
   }
 
   /// P10-022: the key follows the file's identity across moves and renames.
@@ -168,7 +179,8 @@ final class SPDFDocument: NSDocument {
     }
   }
 
-  func saveViewState(viewer: PDFViewingSession) {
+  func captureViewState() -> ViewState? {
+    guard let viewer else { return nil }
     let frame = windowControllers.first?.window?.frame ?? .zero
     let mode = viewer.sidebarMode.storedName
     // P12-019: the sidebar width is captured from the laid-out thumbnails
@@ -176,34 +188,52 @@ final class SPDFDocument: NSDocument {
     // width was never laid out and restores as automatic.
     let sidebarWidth =
       viewer.isSidebarVisible ? Double(viewer.thumbnails.frame.width) : viewer.sidebarWidth
-    try? viewStateStore.save(
-      ViewState(
+    return ViewState(
         windowFrame: [frame.origin.x, frame.origin.y, frame.size.width, frame.size.height],
         pageNumber: viewer.pageNumber, scale: viewer.scale,
         sidebarVisible: viewer.isSidebarVisible, sidebarMode: mode,
         sidebarWidth: sidebarWidth > 1 ? sidebarWidth : 0,
-        continuous: viewer.view.displayMode == .singlePageContinuous),
-      for: recoveryKey)
+        continuous: viewer.view.displayMode == .singlePageContinuous)
+  }
+
+  func saveViewState(viewer: PDFViewingSession) {
+    guard let state = captureViewState() else { return }
+    try? viewStateStore.save(state, for: recoveryKey)
+  }
+
+  func adoptRestoredFileAccess(_ url: URL, accessing: Bool) {
+    guard accessing else { return }
+    if restoredFileAccess == nil { restoredFileAccess = url }
+    else { url.stopAccessingSecurityScopedResource() }
   }
 
   /// P10-023: restore window and navigation state without replaying edits.
   func restoreViewState(viewer: PDFViewingSession) {
     guard let state = viewStateStore.load(for: recoveryKey) else { return }
+    applyViewState(state)
+  }
+
+  func applyViewState(_ state: ViewState) {
+    guard let viewer else { return }
+    // A locked PDF cannot navigate to its saved page yet. Keep metadata
+    // until the existing password/keychain decision unlocks its viewer.
+    pendingUnlockedViewState = viewer.isLocked ? state : nil
     viewer.isSidebarVisible = state.sidebarVisible
     viewer.sidebarMode = SidebarMode(storedName: state.sidebarMode) ?? .pages
     viewer.setContinuous(state.continuous)
     if state.sidebarWidth > 1 {
       viewer.sidebarWidth = state.sidebarWidth
     }
-    if state.pageNumber > 1 {
+    if !viewer.isLocked, state.pageNumber > 0 {
       viewer.go(to: min(state.pageNumber, max(1, viewer.pageCount)))
     }
-    if state.scale > 0 {
+    if !viewer.isLocked, state.scale > 0 {
       viewer.view.autoScales = false
       viewer.view.scaleFactor = max(
         viewer.view.minScaleFactor, min(viewer.view.maxScaleFactor, state.scale))
     }
-    if state.windowFrame.count == 4, let window = windowControllers.first?.window {
+    if state.windowFrame.count == 4, state.windowFrame.allSatisfy(\.isFinite),
+      let window = windowControllers.first?.window {
       let frame = NSRect(
         x: state.windowFrame[0], y: state.windowFrame[1], width: state.windowFrame[2],
         height: state.windowFrame[3])
@@ -211,6 +241,7 @@ final class SPDFDocument: NSDocument {
         window.setFrame(frame, display: false)
       }
     }
+    viewer.synchronizeViewState()
   }
 
   nonisolated override func data(ofType typeName: String) throws -> Data {
@@ -665,7 +696,13 @@ final class SPDFDocument: NSDocument {
     }
     refreshComments()
     refreshForms()
-    refreshViewer(preservingPage: viewer?.pageNumber ?? 1)
+    // Loading the core has not edited the file. Keep PDFKit's unlocked
+    // original document and its permission policy instead of reopening
+    // encrypted save bytes (which would immediately lock it again).
+    _ = viewer?.unlock(password: password)
+    refreshFonts()
+    refreshDocumentInfo()
+    if let state = pendingUnlockedViewState { applyViewState(state) }
   }
 
   /// P28-023: lock the document again, releasing the decrypted graph and file
@@ -4084,6 +4121,8 @@ final class SPDFDocument: NSDocument {
     inspectionTask = nil
     viewer?.closeDocument()
     viewer = nil
+    restoredFileAccess?.stopAccessingSecurityScopedResource()
+    restoredFileAccess = nil
     super.close()
   }
 }

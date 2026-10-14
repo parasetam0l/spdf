@@ -63,6 +63,11 @@ jobs:
           bash Scripts/dev.sh termination-smoke 2>&1 | tee Work-termination.log
       - name: Build optimized native app
         run: bash Scripts/dev.sh build Release > Work-release.log 2>&1
+      - name: Native relaunch state check
+        timeout-minutes: 3
+        run: |
+          set -o pipefail
+          bash Scripts/dev.sh relaunch-smoke 2>&1 | tee Work-relaunch.log
       - name: Keep bounded failure diagnostics
         if: failure()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -75,8 +80,10 @@ jobs:
             Work-release.log
             Work-smoke.log
             Work-termination.log
+            Work-relaunch.log
             Work/Smoke/smoke-test.json
             Work/Smoke/*.ips
             Work/Termination/termination-test.json
+            Work/Relaunch/relaunch-test.json
           if-no-files-found: ignore
           retention-days: 7

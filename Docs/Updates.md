@@ -18,7 +18,9 @@ Install published builds by dragging the application from the DMG into Applicati
 
 If OCR, an export, font preparation, or a save is active, choose to wait, cancel background jobs and wait, or keep working. Cancellation waits for the actual worker to finish; atomic saves finish their verified write. Completed export files remain in the destination folder. A deferred update can be resumed from Update Settings.
 
-Restoration, migrations and installation locations across an actual authenticated updater installation are still being verified.
+An update restart records saved file bookmarks and view metadata after all save decisions succeed. Relaunch reopens those files once and restores page/zoom/sidebar/window state and Update Settings. Protected PDFs follow your existing password and Keychain preferences; when no remembered credential is available, they reopen locked and resume their saved view after you unlock them. Missing files or access failures leave the files unchanged and provide File → Open guidance. Compatible metadata is retained for rollback; document contents and passwords are never part of this record.
+
+Migrations and installation locations across authenticated updater installations are still being verified.
 
 To return to an older build, download its published DMG, quit the app, replace it, and reopen. The updater does not perform downgrades. Back up preferences and recovery state before rollback; replacing the application does not change document files.
 

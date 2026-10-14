@@ -7,6 +7,7 @@ import SwiftUI
 final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
   private var welcome: NSWindowController?
   private let documents = NSDocumentController.shared
+  private var updateSettingsWindow: NSWindow?
 
   func applicationDidFinishLaunching(_ notification: Notification) {
     installMenus()
@@ -18,6 +19,15 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
       return
     }
     #if DEBUG
+      if let index = CommandLine.arguments.firstIndex(of: "--test-relaunch"),
+        CommandLine.arguments.count > index + 3
+      {
+        let phase = CommandLine.arguments[index + 1]
+        let fixtures = URL(fileURLWithPath: CommandLine.arguments[index + 2], isDirectory: true)
+        let output = URL(fileURLWithPath: CommandLine.arguments[index + 3], isDirectory: true)
+        Task { await RelaunchSmoke.run(phase: phase, fixtures: fixtures, output: output) }
+        return
+      }
       if let index = CommandLine.arguments.firstIndex(of: "--test-termination-ui"),
         CommandLine.arguments.count > index + 2
       {
@@ -43,9 +53,18 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
         return
       }
     #endif
-    if documents.documents.isEmpty { showWelcome() }
-    offerRecoveryIfNeeded()
-    NSApp.activate(ignoringOtherApps: true)
+    Task { @MainActor in
+      do { try await UpdateRelaunchCoordinator.restore() }
+      catch { documents.presentError(error) }
+      if documents.documents.isEmpty { showWelcome() }
+      else { welcome?.close() }
+      #if SPDF_UPDATER_ACCEPTANCE
+        do { try await ActualUpdaterProbe.didLaunch() }
+        catch { documents.presentError(error) }
+      #endif
+      offerRecoveryIfNeeded()
+      NSApp.activate(ignoringOtherApps: true)
+    }
   }
 
   /// P10-020: offer to restore unsaved edits from a previous session.
@@ -114,6 +133,7 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
       if CommandLine.arguments.contains("--smoke-test")
         || CommandLine.arguments.contains("--test-termination")
         || CommandLine.arguments.contains("--test-termination-ui")
+        || CommandLine.arguments.contains("--test-relaunch")
       {
         sender.reply(toOpenOrPrint: .success)
         return
@@ -384,11 +404,31 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
 
   /// P41-009: native update settings window (preferences, current
   /// version, last-check state, manual check action).
-  @objc private func showUpdateSettings(_ sender: Any?) {
+  var updateSettingsFrame: [Double]? {
+    guard let window = updateSettingsWindow, window.isVisible else { return nil }
+    let frame = window.frame
+    return [frame.origin.x, frame.origin.y, frame.width, frame.height]
+  }
+
+  func restoreUpdateSettings(frame: [Double]) {
+    showUpdateSettings(nil)
+    if frame.count == 4, frame.allSatisfy(\.isFinite), frame[2] > 200, frame[3] > 150 {
+      updateSettingsWindow?.setFrame(NSRect(x: frame[0], y: frame[1], width: frame[2], height: frame[3]),
+        display: true)
+    }
+  }
+
+  @objc func showUpdateSettings(_ sender: Any?) {
+    if let window = updateSettingsWindow {
+      window.makeKeyAndOrderFront(nil)
+      return
+    }
     let window = NSWindow(
       contentRect: NSRect(x: 0, y: 0, width: 460, height: 380),
       styleMask: [.titled, .closable], backing: .buffered, defer: false)
     window.title = "Update Settings"
+    window.isReleasedWhenClosed = false
+    updateSettingsWindow = window
     window.contentView = NSHostingView(rootView: UpdateSettingsView())
     window.center()
     window.makeKeyAndOrderFront(nil)
