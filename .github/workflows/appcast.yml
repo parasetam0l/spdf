@@ -90,12 +90,14 @@ jobs:
       - name: Write and attach the appcast and manifest
         run: |
           gh release view "$TAG" --repo "$GITHUB_REPOSITORY" \
-            --json body,publishedAt,url > "$RUNNER_TEMP/release.json"
+            --json body,publishedAt,createdAt > "$RUNNER_TEMP/release.json"
           "$RELEASE_TOOLS_BIN" release-body "$RUNNER_TEMP/release.json" "$RUNNER_TEMP/notes.md"
           gh api markdown -F text=@"$RUNNER_TEMP/notes.md" -f mode=gfm \
             -f context="$GITHUB_REPOSITORY" > "$RUNNER_TEMP/notes.html"
-          published="$("$RELEASE_TOOLS_BIN" release-field "$RUNNER_TEMP/release.json" publishedAt)"
-          release_url="$("$RELEASE_TOOLS_BIN" release-field "$RUNNER_TEMP/release.json" url)"
+          published="$("$RELEASE_TOOLS_BIN" release-date "$RUNNER_TEMP/release.json")"
+          # Draft URLs contain a temporary untagged identifier. Link notes to
+          # the final release tag so the prepared feed works after publication.
+          release_url="https://github.com/$GITHUB_REPOSITORY/releases/tag/$TAG"
           "$RELEASE_TOOLS_BIN" appcast \
             --title "sPDF Editor $SHORT_VERSION" \
             --version "$BUILD_VERSION" \

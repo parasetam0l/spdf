@@ -5,6 +5,26 @@ import Testing
 
 @Suite("Release tools")
 struct ReleaseToolsTests {
+  @Test func releaseDatesSupportDraftsAndPreferPublication() throws {
+    let draft = Data(#"{"publishedAt":null,"createdAt":"2026-10-14T14:24:00Z"}"#.utf8)
+    #expect(try ReleaseDate.iso8601(from: draft) == "2026-10-14T14:24:00Z")
+    let published = Data(
+      #"{"publishedAt":"2026-10-15T08:00:00Z","createdAt":"2026-10-14T14:24:00Z"}"#.utf8)
+    #expect(try ReleaseDate.iso8601(from: published) == "2026-10-15T08:00:00Z")
+  }
+
+  @Test func releaseDatesRejectMissingOrInvalidMetadata() throws {
+    for json in [
+      "[]", "{}", #"{"publishedAt":null,"createdAt":"invalid"}"#,
+      #"{"publishedAt":"invalid","createdAt":"2026-10-14T14:24:00Z"}"#,
+      #"{"publishedAt":123,"createdAt":"2026-10-14T14:24:00Z"}"#,
+    ] {
+      #expect(throws: ReleaseToolsError.self) {
+        try ReleaseDate.iso8601(from: Data(json.utf8))
+      }
+    }
+  }
+
   @Test func updateSignaturesVerifyAndRejectTalks() throws {
     let key = Curve25519.Signing.PrivateKey()
     let payload = Data("sPDF Editor update payload".utf8)

@@ -23,7 +23,7 @@ func required(_ name: String, in arguments: [String]) -> String {
 
 let arguments = Array(CommandLine.arguments.dropFirst())
 guard let command = arguments.first else {
-  fail("usage: release-tools <verify-signature|appcast|validate-appcast|notary-check|manifest|release-field|release-body|next-build|check-build|corpus-matrix>")
+  fail("usage: release-tools <verify-signature|appcast|validate-appcast|notary-check|manifest|release-date|release-field|release-body|next-build|check-build|corpus-matrix>")
 }
 
 do {
@@ -98,6 +98,10 @@ do {
       assetRemoteURL: required("--dmg-url", in: arguments),
       signature: required("--signature", in: arguments))
     FileHandle.standardOutput.write(try ReleaseManifestBuilder.json(manifest))
+
+  case "release-date":
+    guard arguments.count == 2 else { fail("usage: release-date <release.json>") }
+    print(try ReleaseDate.iso8601(from: Data(contentsOf: URL(fileURLWithPath: arguments[1]))))
 
   case "release-field":
     // release-field <release.json> <field>

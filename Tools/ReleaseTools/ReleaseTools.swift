@@ -35,6 +35,28 @@ public enum UpdateSignature {
   }
 }
 
+// MARK: - Release dates
+
+public enum ReleaseDate {
+  /// GitHub drafts have a null publishedAt. Use their creation date while
+  /// preparing the feed, and prefer the publication date once published.
+  public static func iso8601(from data: Data) throws -> String {
+    guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+      throw ReleaseToolsError.invalid("Release metadata is not a JSON object")
+    }
+    let value: Any?
+    if let published = object["publishedAt"], !(published is NSNull) {
+      value = published
+    } else {
+      value = object["createdAt"]
+    }
+    guard let date = value as? String, ISO8601DateFormatter().date(from: date) != nil else {
+      throw ReleaseToolsError.invalid("The release needs a valid publication or draft creation date")
+    }
+    return date
+  }
+}
+
 // MARK: - Appcast
 
 public struct AppcastItem: Sendable {
