@@ -14,7 +14,9 @@ The release workflow prepares a signed, notarized DMG and attaches its appcast b
 
 ## Installation and recovery
 
-Install published builds by dragging the application from the DMG into Applications. Before Quit or an update restarts the app, pending text and form input is committed and each modified document gets its native save decision. Canceling a save or Save As, a rejected edit, or a failed write keeps the app open. Windows close only after every document is ready.
+Install published builds by dragging the application from the DMG into Applications. In-place updates require a writable installation outside Desktop. Desktop, read-only and macOS translocated copies provide installation guidance before checking for an update; the app and unsaved work stay open. Save your work, quit, move the app to Applications or another writable folder outside Desktop, and reopen it.
+
+Before Quit or an update restarts the app, pending text and form input is committed and each modified document gets its native save decision. Canceling a save or Save As, a rejected edit, or a failed write keeps the app open. Windows close only after every document is ready.
 
 If OCR, an export, font preparation, or a save is active, choose to wait, cancel background jobs and wait, or keep working. Cancellation waits for the actual worker to finish; atomic saves finish their verified write. Completed export files remain in the destination folder. A deferred update can be resumed from Update Settings.
 

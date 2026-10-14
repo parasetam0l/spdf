@@ -1,5 +1,6 @@
 import AppKit
 import Combine
+import MacServices
 import Sparkle
 
 /// Updates from GitHub Releases with Sparkle. The feed (`SUFeedURL`) is the
@@ -70,6 +71,19 @@ final class AppUpdater: NSObject, ObservableObject, SPUUpdaterDelegate {
       return
     }
     controller?.checkForUpdates(nil)
+  }
+
+  func updater(_ updater: SPUUpdater, mayPerform updateCheck: SPUUpdateCheck) throws {
+    guard let restriction = UpdateInstallationLocation.restriction(for: Bundle.main.bundleURL)
+    else { return }
+    throw NSError(
+      domain: "com.parasetam0l.spdf.update-location", code: restriction.rawValue,
+      userInfo: [
+        NSLocalizedDescriptionKey: "Move sPDF Editor to Applications before updating.",
+        NSLocalizedRecoverySuggestionErrorKey:
+          "Save your work and quit sPDF Editor. Move the app to Applications or another writable "
+          + "folder outside Desktop, reopen it, then check for updates again.",
+      ])
   }
 
   func updater(
