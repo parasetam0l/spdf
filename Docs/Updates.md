@@ -16,13 +16,15 @@ The release workflow prepares a signed, notarized DMG and attaches its appcast b
 
 Install published builds by dragging the application from the DMG into Applications. In-place updates require a writable installation outside Desktop. Desktop, read-only and macOS translocated copies provide installation guidance before checking for an update; the app and unsaved work stay open. Save your work, quit, move the app to Applications or another writable folder outside Desktop, and reopen it.
 
+On a read-only copy, Check for Updates and Update Settings remain available to show these instructions even when Sparkle cannot start. A quarantined build must also pass Gatekeeper before the application can display guidance.
+
 Before Quit or an update restarts the app, pending text and form input is committed and each modified document gets its native save decision. Canceling a save or Save As, a rejected edit, or a failed write keeps the app open. Windows close only after every document is ready.
 
 If OCR, an export, font preparation, or a save is active, choose to wait, cancel background jobs and wait, or keep working. Cancellation waits for the actual worker to finish; atomic saves finish their verified write. Completed export files remain in the destination folder. A deferred update can be resumed from Update Settings.
 
 An update restart records saved file bookmarks and view metadata after all save decisions succeed. Relaunch reopens those files once and restores page/zoom/sidebar/window state and Update Settings. Protected PDFs follow your existing password and Keychain preferences; when no remembered credential is available, they reopen locked and resume their saved view after you unlock them. Missing files or access failures leave the files unchanged and provide File → Open guidance. Compatible metadata is retained for rollback; document contents and passwords are never part of this record.
 
-Migrations and installation locations across authenticated updater installations are still being verified.
+Update settings and recovery records are stored outside the application bundle. The current formats remain compatible across updates: older recovery indexes and view records load optional fields with defaults. Compatible relaunch metadata is retained for rollback. Notarized, quarantined distribution is verified separately from local signed updates.
 
 To return to an older build, download its published DMG, quit the app, replace it, and reopen. The updater does not perform downgrades. Back up preferences and recovery state before rollback; replacing the application does not change document files.
 

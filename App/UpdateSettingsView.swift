@@ -14,7 +14,10 @@ struct UpdateSettingsView: View {
         LabeledContent("Installed version", value: AppUpdater.currentVersion)
       }
       Section("Checking") {
-        if updater.isAvailable {
+        if let guidance = updater.installationGuidance {
+          Text(guidance)
+          Button("Show Installation Instructions") { updater.checkForUpdates() }
+        } else if updater.isAvailable {
           Toggle(
             "Automatically check for updates",
             isOn: Binding(

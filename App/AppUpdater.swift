@@ -25,6 +25,10 @@ final class AppUpdater: NSObject, ObservableObject, SPUUpdaterDelegate {
 
   var isAvailable: Bool { controller != nil }
 
+  var installationGuidance: String? {
+    isAvailable ? installationError()?.localizedRecoverySuggestion : nil
+  }
+
   var automaticallyChecksForUpdates: Bool {
     get { controller?.updater.automaticallyChecksForUpdates ?? false }
     set {
@@ -51,11 +55,14 @@ final class AppUpdater: NSObject, ObservableObject, SPUUpdaterDelegate {
       #endif
     }
     if let updater = controller?.updater {
+      // Sparkle cannot start on a read-only volume. Keep the manual command
+      // available so that installation instructions remain reachable.
+      canCheckForUpdates = installationGuidance != nil
       updater.publisher(for: \.canCheckForUpdates)
         .receive(on: DispatchQueue.main)
         .sink { [weak self] in
           guard let self else { return }
-          canCheckForUpdates = $0 || pendingInstall != nil
+          canCheckForUpdates = $0 || pendingInstall != nil || installationGuidance != nil
         }
         .store(in: &cancellables)
       updater.publisher(for: \.lastUpdateCheckDate)
@@ -66,6 +73,15 @@ final class AppUpdater: NSObject, ObservableObject, SPUUpdaterDelegate {
   }
 
   func checkForUpdates() {
+    if isAvailable, let error = installationError() {
+      let alert = NSAlert(error: error)
+      if let window = NSApp.keyWindow ?? NSApp.mainWindow {
+        alert.beginSheetModal(for: window)
+      } else {
+        alert.runModal()
+      }
+      return
+    }
     if pendingInstall != nil {
       resumePendingInstall()
       return
@@ -74,9 +90,13 @@ final class AppUpdater: NSObject, ObservableObject, SPUUpdaterDelegate {
   }
 
   func updater(_ updater: SPUUpdater, mayPerform updateCheck: SPUUpdateCheck) throws {
+    if let error = installationError() { throw error }
+  }
+
+  private func installationError() -> NSError? {
     guard let restriction = UpdateInstallationLocation.restriction(for: Bundle.main.bundleURL)
-    else { return }
-    throw NSError(
+    else { return nil }
+    return NSError(
       domain: "com.parasetam0l.spdf.update-location", code: restriction.rawValue,
       userInfo: [
         NSLocalizedDescriptionKey: "Move sPDF Editor to Applications before updating.",
