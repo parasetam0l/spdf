@@ -201,6 +201,22 @@ public struct OCRPageResult: Sendable, Equatable {
 /// and returns results; nothing is committed until the caller applies them,
 /// so cancellation always leaves a valid document.
 public enum OCRJob {
+  /// Create a private PDFKit document on the concurrent executor. A viewer's
+  /// live PDFDocument must never cross into a background OCR task.
+  public static func run(
+    data: Data, pageIndexes: [Int], languages: [String],
+    level: OCRRecognitionLevel = .accurate, recognizer: TextRecognizing = VisionTextRecognizer(),
+    onProgress: (@Sendable (Int, Int) -> Void)? = nil
+  ) async throws -> [OCRPageResult] {
+    try Task.checkCancellation()
+    guard let document = PDFDocument(data: data), !document.isLocked else {
+      throw PDFError(.unsupported, "OCR requires a readable document snapshot")
+    }
+    return try run(
+      document: document, pageIndexes: pageIndexes, languages: languages,
+      level: level, recognizer: recognizer, onProgress: onProgress)
+  }
+
   public static func run(
     document: PDFDocument, pageIndexes: [Int], languages: [String],
     level: OCRRecognitionLevel = .accurate, recognizer: TextRecognizing = VisionTextRecognizer(),
@@ -215,11 +231,15 @@ public enum OCRJob {
       else { continue }
       let observations = try recognizer.recognize(
         image: raster.image, languages: languages, level: level)
+      // Vision can be in a non-interruptible request when Cancel arrives.
+      // Do not return or apply that page's result after it acknowledges.
+      try Task.checkCancellation()
       results.append(
         OCRPageResult(
           pageIndex: index, lines: group(observations, transform: raster.transform)))
       onProgress?(position + 1, total)
     }
+    try Task.checkCancellation()
     return results
   }
 

@@ -9,6 +9,24 @@ import Testing
 /// state, snapshot undo/redo, bounded history, and verified save bytes.
 @Suite("Edit sessions")
 struct EditSessionTests {
+  @Test func earlierSaveCannotMarkANewerEditSaved() throws {
+    let session = DocumentEditSession()
+    session.load(try PDFSource(data: PDFFixtures.threePages()))
+    try session.rotatePage(at: 0, byDegrees: 90)
+    let writingRevision = session.documentRevision
+    let earlierBytes = try session.bytesForSave()
+    try session.rotatePage(at: 1, byDegrees: 180)
+    #expect(!session.noteSaved(ifRevisionIs: writingRevision))
+    #expect(session.isDirty)
+    #expect(session.canUndo)
+    let currentBytes = try session.bytesForSave()
+    #expect(currentBytes != earlierBytes)
+    #expect(try PDFParser.parse(currentBytes).graph != PDFParser.parse(earlierBytes).graph)
+    #expect(session.noteSaved(ifRevisionIs: session.documentRevision))
+    #expect(!session.isDirty)
+    #expect(try session.bytesForSave() == currentBytes)
+  }
+
   @Test func repeatedSaveConsumersNeverReuseAnEarlierDocumentState() throws {
     let session = DocumentEditSession()
     let original = try PDFFixtures.threePages()

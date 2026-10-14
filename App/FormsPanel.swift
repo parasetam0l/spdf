@@ -10,6 +10,7 @@ struct FormsPanel: View {
   let fields: [FormField]
   let orphanedWidgetCount: Int
   var onSubmitText: (String, String) -> Void
+  var onDraftText: (String, String) -> Void
   var onToggle: (String, Bool) -> Void
   var onSelectChoice: (String, String) -> Void
   var onSelect: (FormField) -> Void
@@ -64,7 +65,7 @@ struct FormsPanel: View {
       }
       switch field.kind {
       case .text:
-        FormTextFieldRow(field: field, onSubmit: onSubmitText)
+        FormTextFieldRow(field: field, onSubmit: onSubmitText, onDraft: onDraftText)
           .id("\(field.name)-\(field.stringValue ?? "")")
       case .button where !field.isPushButton:
         FormToggleRow(field: field, onToggle: onToggle)
@@ -100,11 +101,16 @@ struct FormsPanel: View {
 private struct FormTextFieldRow: View {
   let field: FormField
   var onSubmit: (String, String) -> Void
+  var onDraft: (String, String) -> Void
   @State private var text: String
 
-  init(field: FormField, onSubmit: @escaping (String, String) -> Void) {
+  init(
+    field: FormField, onSubmit: @escaping (String, String) -> Void,
+    onDraft: @escaping (String, String) -> Void
+  ) {
     self.field = field
     self.onSubmit = onSubmit
+    self.onDraft = onDraft
     _text = State(initialValue: field.stringValue ?? "")
   }
 
@@ -114,6 +120,7 @@ private struct FormTextFieldRow: View {
       .font(.callout)
       .disabled(field.isReadOnly)
       .onSubmit { onSubmit(field.name, text) }
+      .onChange(of: text) { _, value in onDraft(field.name, value) }
       .accessibilityLabel("Field \(field.name)")
   }
 }

@@ -15,11 +15,13 @@ struct PageEditOverlay: NSViewRepresentable {
   func makeNSView(context: Context) -> PageEditOverlayView {
     let view = PageEditOverlayView()
     view.viewer = viewer
+    viewer.pendingEditFinisher = { [weak view] in view?.commitEditing() ?? true }
     return view
   }
 
   func updateNSView(_ nsView: PageEditOverlayView, context: Context) {
     nsView.viewer = viewer
+    viewer.pendingEditFinisher = { [weak nsView] in nsView?.commitEditing() ?? true }
     // P12-013: leaving the text tool finishes the pending edit instead of
     // abandoning it behind the new tool.
     if viewer.activeTool != .textEdit {
@@ -31,6 +33,7 @@ struct PageEditOverlay: NSViewRepresentable {
 @MainActor
 final class PageEditOverlayView: NSView, NSTextFieldDelegate {
   weak var viewer: PDFViewingSession?
+  private var isCommitting = false
 
   enum EditTarget {
     case form(FormFieldTarget)
@@ -88,7 +91,7 @@ final class PageEditOverlayView: NSView, NSTextFieldDelegate {
   private var pressPoint: NSPoint = .zero
 
   override func hitTest(_ point: NSPoint) -> NSView? {
-    if let editor {
+    if editor != nil {
       return super.hitTest(point) ?? self
     }
     guard let target = target(at: point) else { return nil }
@@ -191,16 +194,26 @@ final class PageEditOverlayView: NSView, NSTextFieldDelegate {
     commitEditing()
   }
 
-  func commitEditing() {
-    guard let editor, let target else { return }
-    let text = editor.stringValue
-    removeEditor()
+  @discardableResult
+  func commitEditing() -> Bool {
+    guard !isCommitting, let editor, let target else { return true }
+    isCommitting = true
+    defer { isCommitting = false }
+    let text = editor.currentEditor()?.string ?? editor.stringValue
+    let accepted: Bool
     switch target {
     case .form(let form):
-      viewer?.onFormFieldCommit?(form.fieldName, text)
+      accepted = viewer?.onFormFieldCommit?(form.fieldName, text) ?? false
     case .textRun(let run):
-      viewer?.onTextRunCommit?(run.pageIndex, run.runIndex, text)
+      accepted = viewer?.onTextRunCommit?(run.pageIndex, run.runIndex, text) ?? false
     }
+    guard accepted else { return false }
+    removeEditor()
+    return true
+  }
+
+  func control(_ control: NSControl, textShouldEndEditing fieldEditor: NSText) -> Bool {
+    commitEditing()
   }
 
   private func cancelEditing() {

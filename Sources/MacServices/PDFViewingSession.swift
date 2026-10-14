@@ -208,6 +208,9 @@ public final class PDFViewingSession: NSObject, ObservableObject, PDFViewDelegat
   /// edit before the active tool changes. Returning false vetoes the switch
   /// and keeps the current tool.
   public var pendingEditFinisher: (() -> Bool)?
+  /// A pointer transaction cannot be abandoned by an update mid-drag.
+  public var hasPendingInkGesture: (() -> Bool)?
+  public var hasPendingGraphicGesture: (() -> Bool)?
   /// P12-024: human-readable description of the current page selection for
   /// inspectors and VoiceOver; nil when nothing is selected.
   @Published public private(set) var selectedObjectSummary: String?
@@ -251,11 +254,11 @@ public final class PDFViewingSession: NSObject, ObservableObject, PDFViewDelegat
   /// P24-013: resolve an editable text field under a page point.
   public var formFieldProvider: ((Int, [Double]) -> FormFieldTarget?)?
   /// P24-013: commit inline form text (field name, new text).
-  public var onFormFieldCommit: ((String, String) -> Void)?
+  public var onFormFieldCommit: ((String, String) -> Bool)?
   /// P18-021: resolve an editable document text run under a page point.
   public var textRunProvider: ((Int, [Double]) -> PageTextTarget?)?
   /// P18-021: commit an in-place text-run replacement.
-  public var onTextRunCommit: ((Int, Int, String) -> Void)?
+  public var onTextRunCommit: ((Int, Int, String) -> Bool)?
   /// P12-017: resolve an app-created graphic under a page point.
   public var graphicTargetProvider: ((Int, [Double]) -> AddedGraphicTarget?)?
   /// P12-017: list every selectable app-created graphic on a page, in

@@ -14,7 +14,11 @@ The release workflow prepares a signed, notarized DMG and attaches its appcast b
 
 ## Installation and recovery
 
-Install published builds by dragging the application from the DMG into Applications. Resolve unsaved work before installing a development preview update. Live testing of every save, cancellation, background-job, restoration, and installation-location path is still being completed.
+Install published builds by dragging the application from the DMG into Applications. Before Quit or an update restarts the app, pending text and form input is committed and each modified document gets its native save decision. Canceling a save or Save As, a rejected edit, or a failed write keeps the app open. Windows close only after every document is ready.
+
+If OCR, an export, font preparation, or a save is active, choose to wait, cancel background jobs and wait, or keep working. Cancellation waits for the actual worker to finish; atomic saves finish their verified write. Completed export files remain in the destination folder. A deferred update can be resumed from Update Settings.
+
+Restoration, migrations and installation locations across an actual authenticated updater installation are still being verified.
 
 To return to an older build, download its published DMG, quit the app, replace it, and reopen. The updater does not perform downgrades. Back up preferences and recovery state before rollback; replacing the application does not change document files.
 

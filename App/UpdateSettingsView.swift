@@ -24,7 +24,12 @@ struct UpdateSettingsView: View {
             "Schedule",
             value: "Daily (\(Int(UpdateSettings.checkIntervalHours)) h) once allowed")
           LabeledContent("Last check", value: UpdateSettings.lastCheckText(updater.lastCheck))
-          Button("Check for Updates Now") { updater.checkForUpdates() }
+          if updater.isInstallDeferred {
+            Text("Installation is waiting for your work. Resume when you are ready to quit.")
+          }
+          Button(updater.isInstallDeferred ? "Resume Update" : "Check for Updates Now") {
+            updater.checkForUpdates()
+          }
             .disabled(!updater.canCheckForUpdates)
         } else {
           Text("Update checks are unavailable in development builds.")

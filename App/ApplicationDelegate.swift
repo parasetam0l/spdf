@@ -18,6 +18,22 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
       return
     }
     #if DEBUG
+      if let index = CommandLine.arguments.firstIndex(of: "--test-termination-ui"),
+        CommandLine.arguments.count > index + 2
+      {
+        let fixtures = URL(fileURLWithPath: CommandLine.arguments[index + 1], isDirectory: true)
+        let output = URL(fileURLWithPath: CommandLine.arguments[index + 2], isDirectory: true)
+        Task { await TerminationSmoke.prepareInteractive(fixtures: fixtures, output: output) }
+        return
+      }
+      if let index = CommandLine.arguments.firstIndex(of: "--test-termination"),
+        CommandLine.arguments.count > index + 2
+      {
+        let fixtures = URL(fileURLWithPath: CommandLine.arguments[index + 1], isDirectory: true)
+        let output = URL(fileURLWithPath: CommandLine.arguments[index + 2], isDirectory: true)
+        Task { await TerminationSmoke.run(fixtures: fixtures, output: output) }
+        return
+      }
       if let index = CommandLine.arguments.firstIndex(of: "--smoke-test"),
         CommandLine.arguments.count > index + 2
       {
@@ -71,6 +87,17 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
 
   func applicationShouldOpenUntitledFile(_ sender: NSApplication) -> Bool { false }
 
+  func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+    // The application's pre-Quit gate closes approved documents before
+    // calling super.terminate. Do not enter a nested modal loop and enqueue
+    // another MainActor task from that task's completion callback.
+    if documents.documents.isEmpty { return .terminateNow }
+    let gate = TerminationCoordinator.shared
+    guard !gate.isPreparing else { return .terminateCancel }
+    gate.requestTermination { allowed in sender.reply(toApplicationShouldTerminate: allowed) }
+    return .terminateLater
+  }
+
   func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows: Bool) -> Bool {
     if !hasVisibleWindows && documents.documents.isEmpty { showWelcome() }
     return true
@@ -84,7 +111,10 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
     #if DEBUG
       // AppKit also interprets positional launch arguments as file-open requests.
       // The smoke harness owns its fixture/output paths and opens documents itself.
-      if CommandLine.arguments.contains("--smoke-test") {
+      if CommandLine.arguments.contains("--smoke-test")
+        || CommandLine.arguments.contains("--test-termination")
+        || CommandLine.arguments.contains("--test-termination-ui")
+      {
         sender.reply(toOpenOrPrint: .success)
         return
       }
@@ -350,6 +380,7 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
     currentDocument?.lockDocument()
   }
   @objc private func checkForUpdates(_ sender: Any?) { AppUpdater.shared.checkForUpdates() }
+  @objc private func quitApplication(_ sender: Any?) { NSApp.terminate(sender) }
 
   /// P41-009: native update settings window (preferences, current
   /// version, last-check state, manual check action).
@@ -364,6 +395,9 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
   }
 
   func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+    if menuItem.action == #selector(quitApplication) {
+      return !TerminationCoordinator.shared.isPreparing
+    }
     if menuItem.action == #selector(checkForUpdates(_:)) {
       return AppUpdater.shared.canCheckForUpdates
     }
@@ -546,7 +580,7 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
       modifiers: [.command, .option], to: app)
     add("Show All", #selector(NSApplication.unhideAllApplications(_:)), to: app)
     app.addItem(.separator())
-    add("Quit sPDF Editor", #selector(NSApplication.terminate(_:)), key: "q", to: app)
+    add("Quit sPDF Editor", #selector(quitApplication), key: "q", target: self, to: app)
 
     let file = submenu("File", in: bar)
     add(

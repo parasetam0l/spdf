@@ -16,6 +16,8 @@ Build outputs and caches stay under the ignored `Work/` directory. The build com
 
 The smoke check uses the Debug app and the synthetic fixtures in `Tests/Fixtures`. Regenerate those fixtures with `bash Scripts/dev.sh fixtures`.
 
+`bash Scripts/dev.sh termination-smoke` drives native document save/cancel panels and real OCR/export workers on disposable copies under `Work/Termination`. Diagnostic launches ignore macOS window restoration for that process; saved user preferences remain intact. The report describes the tested scope and does not install an update payload.
+
 Some tests use optional independent tools: qpdf, MuPDF (`mutool`), veraPDF, OpenSSL, Python, and macOS `textutil`, `unzip`, and Quick Look. They report or skip unavailable tools; installing them expands verification coverage. OCR recognition and display-dependent behavior can vary with the host environment.
 
 Real Vision throughput/concurrency is an opt-in measurement for a host with a working recognition service. Hosted runners can stall in this benchmark. Routine tests retain OCR transforms, rasterization, progress, cancellation and tolerant Vision recognition checks. To include the throughput benchmark locally:

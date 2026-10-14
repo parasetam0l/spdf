@@ -59,6 +59,7 @@ public enum PDFImageExport {
       let number = (perPageCounts[image.pageIndex] ?? 0) + 1
       perPageCounts[image.pageIndex] = number
       let encoded = try encodedImage(image, pageIDs: pageIDs, graph: graph, options: options)
+      try Task.checkCancellation()
       let name = filename(
         baseName: baseName, pageNumber: image.pageIndex + 1, imageNumber: number,
         fileExtension: encoded.fileExtension)
@@ -71,6 +72,7 @@ public enum PDFImageExport {
           byteCount: encoded.data.count))
       progress?(offset + 1, images.count)
     }
+    try Task.checkCancellation()
     return exported
   }
 

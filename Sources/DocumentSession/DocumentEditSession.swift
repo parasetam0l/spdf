@@ -460,8 +460,12 @@ public final class DocumentEditSession: @unchecked Sendable {
   /// Called after the destination write succeeded; the current graph becomes
   /// the saved revision for both Save and Save As, and the written bytes
   /// become the base for later incremental updates.
-  public func noteSaved() {
+  @discardableResult
+  public func noteSaved(ifRevisionIs expectedRevision: UInt64? = nil) -> Bool {
     lock.withLock {
+      // A background write may finish after another user edit. Never mark
+      // that newer graph saved using bytes from the earlier revision.
+      if let expectedRevision, revision != expectedRevision { return false }
       if let pendingBase {
         parsedBase = pendingBase
         self.pendingBase = nil
@@ -472,6 +476,7 @@ public final class DocumentEditSession: @unchecked Sendable {
       }
       pendingRevision = nil
       saved = current
+      return true
     }
   }
 

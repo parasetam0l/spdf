@@ -11,6 +11,7 @@ struct InkOverlay: NSViewRepresentable {
   func makeNSView(context: Context) -> InkOverlayView {
     let view = InkOverlayView()
     view.viewer = viewer
+    viewer.hasPendingInkGesture = { [weak view] in view?.pageIndex != nil }
     return view
   }
 
@@ -23,7 +24,7 @@ struct InkOverlay: NSViewRepresentable {
 final class InkOverlayView: NSView {
   weak var viewer: PDFViewingSession?
   private var stroke: [NSPoint] = []
-  private var pageIndex: Int?
+  fileprivate var pageIndex: Int?
 
   override var acceptsFirstResponder: Bool { true }
 

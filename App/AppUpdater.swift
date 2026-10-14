@@ -10,11 +10,14 @@ import Sparkle
 /// installing (`SUAllowsAutomaticUpdates` is off). Development builds never
 /// check: they are not releases.
 @MainActor
-final class AppUpdater: ObservableObject {
+final class AppUpdater: NSObject, ObservableObject, SPUUpdaterDelegate {
   static let shared = AppUpdater()
 
   /// Nil in development builds.
-  private let controller: SPUStandardUpdaterController?
+  private var controller: SPUStandardUpdaterController?
+  private var pendingInstall: (() -> Void)?
+  private var installGeneration = UUID()
+  @Published private(set) var isInstallDeferred = false
   @Published private(set) var canCheckForUpdates = false
   @Published private(set) var lastCheck: Date?
   private var cancellables: Set<AnyCancellable> = []
@@ -29,7 +32,8 @@ final class AppUpdater: ObservableObject {
     }
   }
 
-  private init() {
+  private override init() {
+    super.init()
     if CommandLine.arguments.contains("--measure-workspace") {
       // An explicitly requested local measurement never starts network checks
       // or changes the owner's update preference.
@@ -39,13 +43,16 @@ final class AppUpdater: ObservableObject {
         controller = nil
       #else
         controller = SPUStandardUpdaterController(
-          startingUpdater: true, updaterDelegate: nil, userDriverDelegate: nil)
+          startingUpdater: true, updaterDelegate: self, userDriverDelegate: nil)
       #endif
     }
     if let updater = controller?.updater {
       updater.publisher(for: \.canCheckForUpdates)
         .receive(on: DispatchQueue.main)
-        .sink { [weak self] in self?.canCheckForUpdates = $0 }
+        .sink { [weak self] in
+          guard let self else { return }
+          canCheckForUpdates = $0 || pendingInstall != nil
+        }
         .store(in: &cancellables)
       updater.publisher(for: \.lastUpdateCheckDate)
         .receive(on: DispatchQueue.main)
@@ -55,7 +62,48 @@ final class AppUpdater: ObservableObject {
   }
 
   func checkForUpdates() {
+    if pendingInstall != nil {
+      resumePendingInstall()
+      return
+    }
     controller?.checkForUpdates(nil)
+  }
+
+  func updater(
+    _ updater: SPUUpdater, shouldPostponeRelaunchForUpdate item: SUAppcastItem,
+    untilInvokingBlock installHandler: @escaping () -> Void
+  ) -> Bool {
+    guard TerminationCoordinator.shared.hasActiveWork,
+      !TerminationCoordinator.shared.isPreparing
+    else { return false }
+    pendingInstall = installHandler
+    installGeneration = UUID()
+    isInstallDeferred = true
+    canCheckForUpdates = true
+    resumePendingInstall()
+    return true
+  }
+
+  private func resumePendingInstall() {
+    guard pendingInstall != nil, !TerminationCoordinator.shared.isPreparing else { return }
+    let generation = installGeneration
+    TerminationCoordinator.shared.postponeUpdate { [weak self] allowed in
+      guard let self, generation == installGeneration, allowed,
+        let install = pendingInstall
+      else { return }
+      pendingInstall = nil
+      isInstallDeferred = false
+      canCheckForUpdates = controller?.updater.canCheckForUpdates ?? false
+      // Sparkle subsequently requests AppKit termination. The app-wide gate
+      // still reviews pending edits and every document's save decision.
+      install()
+    }
+  }
+
+  func updater(_ updater: SPUUpdater, didAbortWithError error: Error) {
+    installGeneration = UUID()
+    pendingInstall = nil
+    isInstallDeferred = false
   }
 
   /// "1.2.0 (1791023807)"

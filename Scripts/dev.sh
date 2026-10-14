@@ -41,7 +41,17 @@ case "${1:-}" in
       printf 'Build the Debug app first: bash Scripts/dev.sh build Debug\n' >&2
       exit 2
     fi
-    "$app" --smoke-test "$task_root/Tests/Fixtures" "$task_root/Work/Smoke"
+    "$app" --smoke-test "$task_root/Tests/Fixtures" "$task_root/Work/Smoke" \
+      -ApplePersistenceIgnoreState YES
+    ;;
+  termination-smoke)
+    app="$task_root/Work/Build/Build/Products/Debug/sPDF Editor.app/Contents/MacOS/sPDF Editor"
+    if [[ ! -x "$app" ]]; then
+      printf 'Build the Debug app first: bash Scripts/dev.sh build Debug\n' >&2
+      exit 2
+    fi
+    "$app" --test-termination "$task_root/Tests/Fixtures" "$task_root/Work/Termination" \
+      -ApplePersistenceIgnoreState YES
     ;;
   release)
     if [[ "$(uname -m)" != arm64 ]]; then
@@ -89,7 +99,7 @@ case "${1:-}" in
     fi
     ;;
   *)
-    printf 'Usage: bash Scripts/dev.sh {test|fixtures|build [Debug|Release]|smoke|release}\n' >&2
+    printf 'Usage: bash Scripts/dev.sh {test|fixtures|build [Debug|Release]|smoke|termination-smoke|release}\n' >&2
     exit 2
     ;;
 esac

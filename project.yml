@@ -53,7 +53,7 @@ targets:
         LSMinimumSystemVersion: "14.0"
         LSApplicationCategoryType: public.app-category.productivity
         NSHighResolutionCapable: true
-        NSPrincipalClass: NSApplication
+        NSPrincipalClass: SPDFApplicationHost
         SUFeedURL: https://github.com/parasetam0l/spdf/releases/latest/download/appcast.xml
         SUPublicEDKey: gl/opneF1c6iY7dHO0LlHtb1XSWZIYDTCBGzTaLh94A= # Public verification key shipped in the app. gitleaks:allow
         SUScheduledCheckInterval: 86400

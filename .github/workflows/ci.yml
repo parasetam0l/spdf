@@ -56,6 +56,11 @@ jobs:
             done
           fi
           exit "$smoke_status"
+      - name: Native termination and active-job checks
+        timeout-minutes: 3
+        run: |
+          set -o pipefail
+          bash Scripts/dev.sh termination-smoke 2>&1 | tee Work-termination.log
       - name: Build optimized native app
         run: bash Scripts/dev.sh build Release > Work-release.log 2>&1
       - name: Keep bounded failure diagnostics
@@ -69,7 +74,9 @@ jobs:
             Work-build.log
             Work-release.log
             Work-smoke.log
+            Work-termination.log
             Work/Smoke/smoke-test.json
             Work/Smoke/*.ips
+            Work/Termination/termination-test.json
           if-no-files-found: ignore
           retention-days: 7

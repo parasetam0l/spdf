@@ -7,4 +7,6 @@ final class FormsModel: ObservableObject {
   @Published var fields: [FormField] = []
   /// P24-028: widgets not linked to any canonical field.
   @Published var orphanedWidgetCount = 0
+  /// Text typed in the sidebar before Return must participate in Save/Quit.
+  var pendingText: [String: String] = [:]
 }

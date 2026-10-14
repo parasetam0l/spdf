@@ -108,6 +108,7 @@ public enum PageImageExport {
       guard let index = pageIDs.firstIndex(of: pageID), let page = document.page(at: index + 1)
       else { throw ExportError.missingPage }
       let encoded = try encode(page: page, options: options)
+      try Task.checkCancellation()
       let name = filename(
         baseName: baseName, pageNumber: index + 1, pageCount: pageIDs.count, format: options.format)
       let url = directory.appendingPathComponent(name)
@@ -118,6 +119,7 @@ public enum PageImageExport {
           byteCount: encoded.data.count))
       progress?(offset + 1, pages.count)
     }
+    try Task.checkCancellation()
     return exported
   }
 

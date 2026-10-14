@@ -30,6 +30,15 @@ final class SPDFDocument: NSDocument {
   /// P10-016: bounded autosave and local recovery state. The smoke test can
   /// redirect the directory before opening documents.
   static var recoveryDirectoryOverride: URL?
+  #if DEBUG
+    /// The native diagnostic drives the real Save As panel on disposable files.
+    static var diagnosticSavePanelObserver: ((NSSavePanel) -> Void)?
+    override func prepareSavePanel(_ savePanel: NSSavePanel) -> Bool {
+      let prepared = super.prepareSavePanel(savePanel)
+      Self.diagnosticSavePanelObserver?(savePanel)
+      return prepared
+    }
+  #endif
   private(set) lazy var recoveryStore = SPDFDocument.makeRecoveryStore()
   private(set) lazy var viewStateStore = SPDFDocument.makeViewStateStore()
   /// P12-021: background-job progress and cancellation for this document.
@@ -40,12 +49,17 @@ final class SPDFDocument: NSDocument {
   private(set) var viewer: PDFViewingSession?
   private(set) var coreInspection: CoreInspection?
   private var inspectionTask: Task<Void, Never>?
+  private var isClosed = false
+  private var isRunningOCR = false
 
   // AppKit constructs concurrent-reading documents on its worker queue.
   // No views or other main-actor objects are created until makeWindowControllers().
   nonisolated override init() { super.init() }
 
   override class var autosavesInPlace: Bool { false }
+  nonisolated override var isDocumentEdited: Bool {
+    super.isDocumentEdited || editSession.isDirty
+  }
   nonisolated override class func canConcurrentlyReadDocuments(ofType typeName: String) -> Bool {
     true
   }
@@ -146,7 +160,7 @@ final class SPDFDocument: NSDocument {
     recoveredRecoveryKey = recoveryKey
     editSession.load(source)
     undoManager?.removeAllActions()
-    updateChangeCount(.changeDone)
+    updateChangeCount(.changeReadOtherContents)
     if windowControllers.isEmpty {
       makeWindowControllers()
     } else if let viewer {
@@ -203,6 +217,16 @@ final class SPDFDocument: NSDocument {
     try editSession.bytesForSave()
   }
 
+  override func save(_ sender: Any?) {
+    guard finishPendingEdits() else { return }
+    super.save(sender)
+  }
+
+  override func saveAs(_ sender: Any?) {
+    guard finishPendingEdits() else { return }
+    super.saveAs(sender)
+  }
+
   /// Mark the saved revision only after the destination write succeeded;
   /// canceled or failed saves leave the document dirty.
   override func save(
@@ -218,15 +242,21 @@ final class SPDFDocument: NSDocument {
       completionHandler(NSError(domain: NSCocoaErrorDomain, code: NSUserCancelledError))
       return
     }
+    let revision = editSession.documentRevision
+    let job = jobCenter.start(title: "Saving document", total: 1)
     super.save(to: url, ofType: typeName, for: saveOperation) { [editSession] error in
-      if error == nil {
-        editSession.noteSaved()
-        Task { @MainActor [weak self] in
-          self?.discardRecoveryRecords(for: savedRecoveryKey)
-          if let url = self?.fileURL {
-            self?.sourceFingerprint = SourceFingerprint.capture(of: url)
+      let savedCurrentRevision = error == nil && editSession.noteSaved(ifRevisionIs: revision)
+      Task { @MainActor [weak self] in
+        guard let self else { return }
+        if error == nil {
+          if savedCurrentRevision { discardRecoveryRecords(for: savedRecoveryKey) }
+          // An edit made during an asynchronous write still needs saving.
+          if !savedCurrentRevision { updateChangeCount(.changeDone) }
+          if let url = fileURL {
+            sourceFingerprint = SourceFingerprint.capture(of: url)
           }
         }
+        jobCenter.finish(id: job)
       }
       completionHandler(error)
     }
@@ -290,6 +320,9 @@ final class SPDFDocument: NSDocument {
   override func makeWindowControllers() {
     guard let source = sourceStore.snapshot() else { return }
     undoManager?.removeAllActions()
+    // PDF transactions already define their undo boundary. Do not leave a
+    // registration waiting for the next event-loop turn before Save As.
+    undoManager?.groupsByEvent = false
     let viewer = PDFViewingSession()
     do {
       try viewer.open(source)
@@ -308,13 +341,13 @@ final class SPDFDocument: NSDocument {
       self?.formFieldTarget(pageIndex: pageIndex, pagePoint: pagePoint)
     }
     viewer.onFormFieldCommit = { [weak self] fieldName, text in
-      self?.fillFormText(fieldName: fieldName, text: text)
+      self?.fillFormText(fieldName: fieldName, text: text) ?? false
     }
     viewer.textRunProvider = { [weak self] pageIndex, pagePoint in
       self?.textRunTarget(pageIndex: pageIndex, pagePoint: pagePoint)
     }
     viewer.onTextRunCommit = { [weak self] pageIndex, runIndex, text in
-      _ = self?.replaceText(pageIndex: pageIndex, runIndex: runIndex, with: text)
+      self?.replaceText(pageIndex: pageIndex, runIndex: runIndex, with: text) ?? false
     }
     viewer.graphicTargetProvider = { [weak self] pageIndex, pagePoint in
       self?.graphicTarget(pageIndex: pageIndex, pagePoint: pagePoint)
@@ -489,17 +522,20 @@ final class SPDFDocument: NSDocument {
   /// latest edit; direct session edits (scripts, tests) keep the fallback
   /// path in `undoEdit()`/`redoEdit()`.
   private func noteUserEdit() {
-    updateChangeCount(.changeDone)
-    guard let undoManager else { return }
+    // NSDocument observes this manager's groups and updates its change count
+    // itself. Explicitly incrementing as well counts each native edit twice.
+    guard let undoManager else { updateChangeCount(.changeDone); return }
     // Each closure performs exactly one session step and only when the
     // session is still at the revision it was registered for: if AppKit's
     // event grouping coalesces several registrations into one action, the
     // stale closures no-op and a single undo remains a single step.
     let revision = editSession.documentRevision
+    undoManager.beginUndoGrouping()
     undoManager.registerUndo(withTarget: self) { document in
       document.performSessionUndo(registeredRevision: revision)
     }
     undoManager.setActionName("Edit")
+    undoManager.endUndoGrouping()
   }
 
   private func performSessionUndo(registeredRevision: UInt64?) {
@@ -507,7 +543,6 @@ final class SPDFDocument: NSDocument {
       return
     }
     guard editSession.undo() else { return }
-    updateChangeCount(.changeUndone)
     // registerUndo during an undo becomes the redo action.
     let revision = editSession.documentRevision
     undoManager?.registerUndo(withTarget: self) { document in
@@ -522,7 +557,6 @@ final class SPDFDocument: NSDocument {
       return
     }
     guard editSession.redo() else { return }
-    updateChangeCount(.changeDone)
     let revision = editSession.documentRevision
     undoManager?.registerUndo(withTarget: self) { document in
       document.performSessionUndo(registeredRevision: revision)
@@ -1121,17 +1155,20 @@ final class SPDFDocument: NSDocument {
   // MARK: - Form filling (P24)
 
   /// P24-017: fill a text field from the forms panel.
-  func fillFormText(fieldName: String, text: String) {
+  @discardableResult
+  func fillFormText(fieldName: String, text: String) -> Bool {
     do {
       try WorkspacePerformance.profile("form-edit") {
         try editSession.fillFormText(fieldName: fieldName, text: text)
       }
     } catch {
       presentError(error)
-      return
+      return false
     }
+    formsModel.pendingText[fieldName] = nil
     noteUserEdit()
     refreshViewer(preservingPage: viewer?.pageNumber ?? 1)
+    return true
   }
 
   /// P24-013: resolve an editable text widget under a page point.
@@ -1348,16 +1385,10 @@ final class SPDFDocument: NSDocument {
       let baseName =
         self.fileURL?.deletingPathExtension().lastPathComponent.isEmpty == false
         ? self.fileURL!.deletingPathExtension().lastPathComponent : "page"
-      // P12-021: the export runs as a cancellable job with progress.
-      let job = self.jobCenter.start(
-        title: "Exporting page images", total: self.editSession.pageIDs.count)
-      var exportTask: Task<Void, Never>?
-      self.jobCenter.attach(id: job) { exportTask?.cancel() }
-      exportTask = Task { @MainActor [weak self] in
-        defer { self?.jobCenter.finish(id: job) }
+      Task { @MainActor [weak self] in
         do {
           _ = try await self?.exportPageImages(
-            to: directory, baseName: baseName, options: options, job: job)
+            to: directory, baseName: baseName, options: options)
         } catch is CancellationError {
         } catch {
           if let self { self.presentError(error) }
@@ -1380,7 +1411,10 @@ final class SPDFDocument: NSDocument {
     // on the progress control. Captured up front on the caller's executor.
     let window = windowControllers.first?.window
     let pageView = viewer?.view
+    let job = try job ?? beginDocumentJob(
+      title: "Exporting page images", total: editSession.pageIDs.count)
     defer {
+      jobCenter.finish(id: job)
       Task { @MainActor [weak window, weak pageView] in
         if let pageView { window?.makeFirstResponder(pageView) }
       }
@@ -1389,8 +1423,7 @@ final class SPDFDocument: NSDocument {
     // The callback is explicitly Sendable (relay and job only) so it can
     // cross into the concurrent exporter.
     let relay = JobProgressRelay(center: jobCenter)
-    let progress: @Sendable (Int, Int) -> Void = { [weak relay, job] done, _ in
-      guard let job, let relay else { return }
+    let progress: @Sendable (Int, Int) -> Void = { [relay, job] done, _ in
       relay.update(id: job, completed: done)
     }
     return try await PageImageExport.export(
@@ -2319,6 +2352,7 @@ final class SPDFDocument: NSDocument {
       Task { @MainActor in
         do {
           let exported = try await self.exportImages(to: directory, baseName: baseName)
+          guard !TerminationCoordinator.shared.isPreparing else { return }
           let alert = NSAlert()
           alert.messageText = "Images Exported"
           alert.informativeText =
@@ -2341,9 +2375,16 @@ final class SPDFDocument: NSDocument {
     guard let graph = editSession.currentGraph else {
       throw PDFError(.malformed, "There is no document to export")
     }
+    let total = try PDFImageInventory.images(in: graph, pageIDs: editSession.pageIDs).count
+    let job = try beginDocumentJob(title: "Exporting images", total: total)
+    defer { jobCenter.finish(id: job) }
+    let relay = JobProgressRelay(center: jobCenter)
+    let progress: @Sendable (Int, Int) -> Void = { [relay, job] done, _ in
+      relay.update(id: job, completed: done)
+    }
     return try await PDFImageExport.export(
       pageIDs: editSession.pageIDs, in: graph, to: directory, baseName: baseName,
-      options: options)
+      options: options, progress: progress)
   }
 
   /// P35-015–P35-019: export the document as an editable DOCX reconstruction.
@@ -2374,6 +2415,7 @@ final class SPDFDocument: NSDocument {
       Task { @MainActor in
         do {
           let blocks = try await self.exportDOCX(to: url, mode: mode)
+          guard !TerminationCoordinator.shared.isPreparing else { return }
           let alert = NSAlert()
           alert.messageText = "DOCX Exported"
           alert.informativeText =
@@ -2421,16 +2463,10 @@ final class SPDFDocument: NSDocument {
     guard let graph = editSession.currentGraph else {
       throw PDFError(.malformed, "There is no document to export")
     }
-    let pageIDs = editSession.pageIDs
-    let reconstruction = try DOCXReconstructionBuilder.reconstruct(
-      pageIDs: pageIDs, in: graph, mode: mode)
-    let resolver: DOCXImageResolver = { request in
-      try? PDFImageExport.docxResource(for: request, pageIDs: pageIDs, in: graph)
-    }
-    let data = try DOCXExport.package(
-      reconstruction: reconstruction, imageResolver: resolver)
-    try data.write(to: url, options: .atomic)
-    return reconstruction.blocks.count
+    let job = try beginDocumentJob(title: "Exporting DOCX", total: 1)
+    defer { jobCenter.finish(id: job) }
+    return try await DOCXDocumentExport.export(
+      pageIDs: editSession.pageIDs, in: graph, to: url, mode: mode)
   }
 
   /// P37-001/P37-007/P37-019: a read-only compatibility report (version and
@@ -3498,19 +3534,19 @@ final class SPDFDocument: NSDocument {
 
   /// P26-003/P26-018: run the local OCR job for the current page.
   func runOCR() {
-    guard let viewer, let document = viewer.view.document, viewer.pageNumber > 0 else { return }
+    guard let viewer, viewer.view.document != nil, viewer.pageNumber > 0 else { return }
     let index = viewer.pageNumber - 1
     guard index < editSession.pageIDs.count,
       let candidate = editSession.ocrCandidates().first(where: {
         $0.pageID == editSession.pageIDs[index]
       })
     else { return }
-    runOCR(pageIndexes: [index], replacing: candidate.replacing ? [index] : [], document: document)
+    startOCR(pageIndexes: [index], replacing: candidate.replacing ? [index] : [])
   }
 
   /// P26-003: run the local OCR job for every candidate page.
   func runOCRAllPages() {
-    guard let viewer, let document = viewer.view.document else { return }
+    guard viewer?.view.document != nil else { return }
     let candidates = editSession.ocrCandidates()
     guard !candidates.isEmpty else { return }
     var indexes: [Int] = []
@@ -3520,44 +3556,77 @@ final class SPDFDocument: NSDocument {
       indexes.append(index)
       if candidate.replacing { replacing.insert(index) }
     }
-    runOCR(pageIndexes: indexes, replacing: replacing, document: document)
+    startOCR(pageIndexes: indexes, replacing: replacing)
   }
 
   var canRunOCR: Bool {
-    guard let viewer, viewer.pageNumber > 0, viewer.pageNumber <= editSession.pageIDs.count
+    guard !isRunningOCR, let viewer, viewer.pageNumber > 0,
+      viewer.pageNumber <= editSession.pageIDs.count
     else { return false }
     let pageID = editSession.pageIDs[viewer.pageNumber - 1]
     return editSession.ocrCandidates().contains { $0.pageID == pageID }
   }
 
   var canRunOCRAllPages: Bool {
-    !editSession.ocrCandidates().isEmpty
+    !isRunningOCR && !editSession.ocrCandidates().isEmpty
   }
 
-  private func runOCR(pageIndexes: [Int], replacing: Set<Int>, document: PDFDocument) {
-    do {
-      let results = try OCRJob.run(
-        document: document, pageIndexes: pageIndexes, languages: ["en-US"], level: .accurate)
-      let commands = results.compactMap { result -> AddSearchableTextLayerCommand? in
-        guard !result.lines.isEmpty,
-          result.pageIndex >= 0, result.pageIndex < editSession.pageIDs.count
-        else { return nil }
-        let lines = result.lines.map {
-          SearchableTextLine(text: $0.text, rect: $0.rect, confidence: $0.confidence)
-        }
-        return AddSearchableTextLayerCommand(
-          pageID: editSession.pageIDs[result.pageIndex], lines: lines,
-          replacingExistingLayer: replacing.contains(result.pageIndex))
-      }
-      guard !commands.isEmpty else {
-        presentError(PDFError(.unsupported, "No text was recognized on the selected pages"))
-        return
-      }
-      try editSession.apply(PDFTransaction(commands))
-    } catch {
-      presentError(error)
-      return
+  private func startOCR(pageIndexes: [Int], replacing: Set<Int>) {
+    guard !isRunningOCR else { return }
+    Task { @MainActor in
+      do {
+        try await performOCR(pageIndexes: pageIndexes, replacing: replacing)
+      } catch is CancellationError {
+      } catch { presentError(error) }
     }
+  }
+
+  /// Recognition reads an immutable in-memory graph snapshot. Applying its
+  /// results requires the exact revision; edits, Undo, page moves or closing
+  /// the document while recognition runs cannot attach text to stale pages.
+  func performOCR(
+    pageIndexes: [Int], replacing: Set<Int> = [],
+    recognizer: TextRecognizing = VisionTextRecognizer()
+  ) async throws {
+    guard !isRunningOCR, editSession.canEdit, let graph = editSession.currentGraph else {
+      throw PDFError(.unsupported, "This document is not available for OCR")
+    }
+    let revision = editSession.documentRevision
+    let pageIDs = editSession.pageIDs
+    // A protected session's decrypted graph is rendered only in memory.
+    // Removing the encryption marker here does not change the edit session
+    // or its re-encrypted save/recovery policy.
+    var snapshot = graph
+    if editSession.isProtected { snapshot.trailer[PDFName("Encrypt")] = nil }
+    let bytes = try PDFWriter.write(snapshot)
+    let job = try beginDocumentJob(title: "Recognizing text", total: pageIndexes.count)
+    isRunningOCR = true
+    defer { isRunningOCR = false; jobCenter.finish(id: job) }
+    let relay = JobProgressRelay(center: jobCenter)
+    let progress: @Sendable (Int, Int) -> Void = { [relay, job] done, _ in
+      relay.update(id: job, completed: done)
+    }
+    let results = try await OCRJob.run(
+      data: bytes, pageIndexes: pageIndexes, languages: ["en-US"], level: .accurate,
+      recognizer: recognizer, onProgress: progress)
+    try Task.checkCancellation()
+    guard !isClosed, editSession.documentRevision == revision else {
+      throw PDFError(
+        .unsupported, "The document changed during OCR. Run recognition again on the current pages.")
+    }
+    let commands = results.compactMap { result -> AddSearchableTextLayerCommand? in
+      guard !result.lines.isEmpty, pageIDs.indices.contains(result.pageIndex) else { return nil }
+      let lines = result.lines.map {
+        SearchableTextLine(text: $0.text, rect: $0.rect, confidence: $0.confidence)
+      }
+      return AddSearchableTextLayerCommand(
+        pageID: pageIDs[result.pageIndex], lines: lines,
+        replacingExistingLayer: replacing.contains(result.pageIndex))
+    }
+    guard !commands.isEmpty else {
+      throw PDFError(.unsupported, "No text was recognized on the selected pages")
+    }
+    try editSession.apply(PDFTransaction(commands))
     noteUserEdit()
     refreshViewer(preservingPage: viewer?.pageNumber ?? 1)
   }
@@ -3678,7 +3747,10 @@ final class SPDFDocument: NSDocument {
     Task { @MainActor in
       defer { fontsModel.isBusy = false }
       do {
+        let job = try beginDocumentJob(title: "Preparing font installation", total: 1)
+        defer { jobCenter.finish(id: job) }
         let families = try await GoogleFontsCatalog.families()
+        try Task.checkCancellation()
         let matches = GoogleFontsCatalog.search(family, in: families)
         guard let match = matches.first else {
           fontsModel.message = nil
@@ -3691,6 +3763,7 @@ final class SPDFDocument: NSDocument {
         }
         fontsModel.message = "Downloading \(match.name)…"
         let package = try await GoogleFontsInstaller.prepare(family: match.name)
+        try Task.checkCancellation()
         let licenseAlert = NSAlert()
         licenseAlert.messageText = "Install \(match.name)?"
         licenseAlert.informativeText =
@@ -3702,10 +3775,13 @@ final class SPDFDocument: NSDocument {
           fontsModel.message = nil
           return
         }
+        try Task.checkCancellation()
         let directory = Self.fontsInstallDirectoryOverride
         let urls = try GoogleFontsInstaller.install(package, to: directory)
         refreshFonts()
         fontsModel.message = "Installed \(urls.count) file\(urls.count == 1 ? "" : "s") for \(match.name)."
+      } catch is CancellationError {
+        fontsModel.message = nil
       } catch {
         fontsModel.message = nil
         presentError(error)
@@ -3934,7 +4010,72 @@ final class SPDFDocument: NSDocument {
     snapshotRecoveryIfNeeded()
   }
 
+  private func beginDocumentJob(title: String, total: Int) throws -> UUID {
+    try Task.checkCancellation()
+    guard !isClosed else { throw CancellationError() }
+    let id = jobCenter.start(title: title, total: total)
+    // This handle is retained only while its producing task is alive: defer
+    // removes the canceller before the async method returns.
+    withUnsafeCurrentTask { task in jobCenter.attach(id: id) { task?.cancel() } }
+    return id
+  }
+
+  /// Flush all visible input before NSDocument evaluates whether to save.
+  /// A failed commit leaves the editor and dirty state available for retry.
+  func finishPendingEdits() -> Bool {
+    if viewer?.hasPendingInkGesture?() == true || viewer?.hasPendingGraphicGesture?() == true {
+      let alert = NSAlert()
+      alert.messageText = "Finish the current edit first"
+      alert.informativeText = "Release the drag or press Escape, then try quitting again."
+      alert.addButton(withTitle: "Keep Working")
+      alert.runModal()
+      return false
+    }
+    guard viewer?.pendingEditFinisher?() ?? true else { return false }
+    for (name, text) in formsModel.pendingText {
+      if editSession.formFields().first(where: { $0.name == name })?.stringValue == text {
+        formsModel.pendingText[name] = nil
+      } else if !fillFormText(fieldName: name, text: text) { return false }
+    }
+    for controller in windowControllers {
+      if let window = controller.window, !window.makeFirstResponder(nil) { return false }
+    }
+    // NSDocument's canClose machinery commits registered Cocoa editors; the
+    // app's native and SwiftUI editors are explicitly flushed above.
+    return true
+  }
+
+  override func canClose(
+    withDelegate delegate: Any, shouldClose shouldCloseSelector: Selector?,
+    contextInfo: UnsafeMutableRawPointer?
+  ) {
+    TerminationCoordinator.shared.prepareToClose(self) { [self] allowed in
+      if let selector = shouldCloseSelector, let receiver = delegate as? NSObject,
+        receiver.responds(to: selector), let implementation = receiver.method(for: selector)
+      {
+        // AppKit's documented canClose callback has three arguments. perform
+        // supports only two; invoke its exact Objective-C ABI, including the
+        // caller's context, to deliver the reviewed decision exactly once.
+        typealias Reply = @convention(c) (
+          AnyObject, Selector, NSDocument, Bool, UnsafeMutableRawPointer?
+        ) -> Void
+        unsafeBitCast(implementation, to: Reply.self)(receiver, selector, self, allowed, contextInfo)
+      }
+    }
+  }
+
+  /// The app-wide gate has already finished pending edits and jobs. Bypass
+  /// our per-window preparation while retaining AppKit's real save decision.
+  func reviewClose(
+    withDelegate delegate: Any, shouldClose selector: Selector?,
+    contextInfo: UnsafeMutableRawPointer?
+  ) {
+    super.canClose(withDelegate: delegate, shouldClose: selector, contextInfo: contextInfo)
+  }
+
   override func close() {
+    isClosed = true
+    for job in jobCenter.jobs { jobCenter.requestCancel(id: job.id) }
     if let viewer { saveViewState(viewer: viewer) }
     // An explicit close means the user decided; stale recovery state is not
     // offered again (P10-021).

@@ -123,6 +123,7 @@ struct WorkspaceView: View {
               Image(systemName: "xmark.circle")
             }
             .help("Cancel \(job.title)").accessibilityLabel("Cancel \(job.title)")
+            .disabled(!jobs.canCancel(id: job.id))
           }
         }
         Picker("Page layout", selection: $continuous) {
@@ -227,7 +228,8 @@ struct WorkspaceView: View {
             case .forms:
               FormsPanel(
                 fields: forms.fields, orphanedWidgetCount: forms.orphanedWidgetCount,
-                onSubmitText: onSubmitFormText, onToggle: onToggleForm,
+                onSubmitText: onSubmitFormText,
+                onDraftText: { forms.pendingText[$0] = $1 }, onToggle: onToggleForm,
                 onSelectChoice: onSelectFormChoice, onSelect: onSelectFormField)
             case .signatures:
               SignaturesPanel(entries: signatures.entries, onSelect: onSelectSignature)

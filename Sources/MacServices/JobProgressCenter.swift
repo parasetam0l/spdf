@@ -56,8 +56,12 @@ public final class JobProgressCenter: ObservableObject {
   /// Attach a canceller (usually the producing task's `cancel`). Replaces any
   /// previous canceller for the job.
   public func attach(id: UUID, cancel: @escaping () -> Void) {
+    objectWillChange.send()
     cancels[id] = cancel
   }
+
+  /// Atomic saves deliberately have no cancellation callback.
+  public func canCancel(id: UUID) -> Bool { cancels[id] != nil }
 
   /// Run the attached canceller, if any. Returns whether one was attached.
   /// The producer still calls `finish` when its task ends.

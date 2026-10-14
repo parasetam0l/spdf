@@ -19,6 +19,7 @@ struct GraphicSelectionOverlay: NSViewRepresentable {
   func makeNSView(context: Context) -> GraphicSelectionOverlayView {
     let view = GraphicSelectionOverlayView()
     view.viewer = viewer
+    viewer.hasPendingGraphicGesture = { [weak view] in view?.hasPendingGesture ?? false }
     return view
   }
 
@@ -43,6 +44,7 @@ final class GraphicSelectionOverlayView: NSView {
   }
 
   private var drag: Drag?
+  fileprivate var hasPendingGesture: Bool { drag != nil }
   private var pressGraphic: AddedGraphicTarget?
   private var pressPoint: NSPoint = .zero
 

@@ -278,4 +278,42 @@ struct OCRJobTests {
   {
     lhs.count == rhs.count && zip(lhs, rhs).allSatisfy { abs($0 - $1) < tolerance }
   }
+
+  @Test @MainActor func snapshotRecognitionLeavesTheUIExecutor() async throws {
+    struct Probe: TextRecognizing {
+      func recognize(image: CGImage, languages: [String], level: OCRRecognitionLevel) throws
+        -> [OCRObservation]
+      {
+        #expect(!Thread.isMainThread)
+        return [OCRObservation(
+          text: "Background snapshot", confidence: 1,
+          boundingBox: CGRect(x: 0.1, y: 0.5, width: 0.5, height: 0.1))]
+      }
+    }
+    let result = try await OCRJob.run(
+      data: PDFFixtures.onePage(), pageIndexes: [0], languages: [], recognizer: Probe())
+    #expect(result.count == 1)
+    #expect(result[0].lines.first?.text == "Background snapshot")
+  }
+
+  @Test func cancellationDuringTheLastRecognitionCannotReturnResults() async throws {
+    struct Probe: TextRecognizing {
+      func recognize(image: CGImage, languages: [String], level: OCRRecognitionLevel) throws
+        -> [OCRObservation]
+      {
+        withUnsafeCurrentTask { $0?.cancel() }
+        return [OCRObservation(
+          text: "Canceled result", confidence: 1,
+          boundingBox: CGRect(x: 0.1, y: 0.5, width: 0.5, height: 0.1))]
+      }
+    }
+    let bytes = try PDFFixtures.onePage()
+    let job = Task {
+      try await OCRJob.run(data: bytes, pageIndexes: [0], languages: [], recognizer: Probe())
+    }
+    switch await job.result {
+    case .success: Issue.record("Last-page cancellation returned an applicable result")
+    case .failure(let error): #expect(error is CancellationError)
+    }
+  }
 }
