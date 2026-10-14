@@ -1,6 +1,7 @@
 #if DEBUG
   import AppKit
   import CoreGraphics
+  import DocumentSession
   import Foundation
   import ImageIO
   import MacServices
@@ -56,6 +57,7 @@
         SPDFDocument.recoveryDirectoryOverride = output.appendingPathComponent("Recovery")
         let controller = NSDocumentController.shared
         try require(NSApp is DocumentApplication, "The custom application termination path is missing")
+        let controllerReview = NativeControllerReviewProbe()
 
         func open(_ fixture: String, as name: String) async throws -> SPDFDocument {
           let url = output.appendingPathComponent(name)
@@ -80,7 +82,10 @@
         let firstGraph = first.editSession.currentGraph
         let secondGraph = second.editSession.currentGraph
         let firstOriginal = try Data(contentsOf: output.appendingPathComponent("first.pdf"))
-        let canceled = await drive([.button("Don't Save"), .button("Cancel")]) { await request() }
+        UpdateRelaunchCoordinator.arm()
+        let canceled = await drive([.button("Don't Save"), .button("Cancel")]) {
+          await controllerReview.request(reviewUnsaved: false)
+        }
         FileHandle.standardError.write(Data("[termination] cancel: allowed=\(canceled), documents=\(controller.documents.map(\.displayName))\n".utf8))
         try require(!canceled && controller.documents.count == 2, "Cancel closed a reviewed document")
         try require(first.windowControllers.count == 2 && first.editSession.canUndo,
@@ -89,13 +94,26 @@
           "Cancel changed a dirty graph")
         try require(try Data(contentsOf: output.appendingPathComponent("first.pdf")) == firstOriginal,
           "Cancel wrote the first destination")
-        record("later-prompt cancellation preserves both dirty graphs, windows and Undo")
+        try require(controllerReview.receivedController && controllerReview.receivedContext,
+          "Document-controller callback lost its receiver or context")
+        try require(!FileManager.default.fileExists(atPath: SPDFDocument.makeUpdateRelaunchStore().pendingURL.path),
+          "Canceled document-controller review staged a relaunch")
+        record("document-controller close cancellation preserves both dirty graphs, windows and Undo")
 
-        let saved = await drive([.button("Save"), .button("Save")]) { await request() }
+        let saved = await drive([.button("Save"), .button("Save")]) {
+          await controllerReview.request(reviewUnsaved: true)
+        }
         try require(saved && controller.documents.isEmpty, "Saving multiple documents did not complete")
         try require(try rotation(output.appendingPathComponent("first.pdf")) == 90,
           "Independent reopen lost the first edit")
-        record("multiple-document save waits for verified writes and independently reopens")
+        let relaunch = try SPDFDocument.makeUpdateRelaunchStore().take(
+          bundleIdentifier: Bundle.main.bundleIdentifier ?? "com.parasetam0l.spdf")
+        try require(relaunch?.documents.count == 2,
+          "Document-controller review closed windows before relaunch capture")
+        try require(controllerReview.receivedController && controllerReview.receivedContext
+          && controllerReview.callbackCount == 2,
+          "Document-controller decisions were not delivered exactly once with their context")
+        record("document-controller review saves verified writes and captures two identities before closing")
 
         let recovered = try controller.makeUntitledDocument(ofType: "com.adobe.pdf") as! SPDFDocument
         try recovered.loadRecovered(Data(contentsOf: fixtures.appendingPathComponent("one-page.pdf")))
@@ -402,6 +420,48 @@
       semaphore.wait()
       return [OCRObservation(text: "Native lifecycle OCR", confidence: 1,
         boundingBox: CGRect(x: 0.1, y: 0.5, width: 0.8, height: 0.025))]
+    }
+  }
+
+  @MainActor
+  private final class NativeControllerReviewProbe: NSObject {
+    private var continuation: CheckedContinuation<Bool, Never>?
+    private var expectedContext: UnsafeMutableRawPointer?
+    private(set) var receivedController = false
+    private(set) var receivedContext = false
+    private(set) var callbackCount = 0
+
+    func request(reviewUnsaved: Bool) async -> Bool {
+      let context = UnsafeMutablePointer<Int>.allocate(capacity: 1)
+      context.initialize(to: 42)
+      defer { context.deinitialize(count: 1); context.deallocate() }
+      expectedContext = UnsafeMutableRawPointer(context)
+      let allowed = await withCheckedContinuation { continuation in
+        self.continuation = continuation
+        let controller = NSDocumentController.shared
+        if reviewUnsaved {
+          controller.reviewUnsavedDocuments(withAlertTitle: nil, cancellable: true, delegate: self,
+            didReviewAllSelector: #selector(documentController(_:didReview:contextInfo:)),
+            contextInfo: expectedContext)
+        } else {
+          controller.closeAllDocuments(withDelegate: self,
+            didCloseAllSelector: #selector(documentController(_:didReview:contextInfo:)),
+            contextInfo: expectedContext)
+        }
+      }
+      withExtendedLifetime(self) {}
+      return allowed
+    }
+
+    @objc private func documentController(
+      _ controller: NSDocumentController, didReview: Bool, contextInfo: UnsafeMutableRawPointer?
+    ) {
+      receivedController = controller === NSDocumentController.shared
+      receivedContext = contextInfo == expectedContext
+      callbackCount += 1
+      let pending = continuation
+      continuation = nil
+      pending?.resume(returning: didReview)
     }
   }
 

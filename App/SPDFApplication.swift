@@ -5,10 +5,12 @@ enum SPDFApplication {
   @MainActor
   static func main() {
     let application = DocumentApplication.shared
+    // Register the controller before the delegate asks for its shared instance.
+    let documents = DocumentController()
     let delegate = ApplicationDelegate()
     application.delegate = delegate
     application.setActivationPolicy(.regular)
-    withExtendedLifetime(delegate) { application.run() }
+    withExtendedLifetime((documents, delegate)) { application.run() }
   }
 }
 
