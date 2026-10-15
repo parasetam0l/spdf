@@ -60,16 +60,29 @@ public struct ChangeTextStyleCommand: PDFEditCommand, Equatable, Sendable {
     let graph = try PageContentCopy.makePrivate(pageID: pageID, in: graph, limits: limits)
     let target = try TextStyleSupport.resolveTarget(
       pageID: pageID, runIndex: runIndex, style: style, in: graph, limits: limits)
-    var ranges: [(range: Range<Int>, replacement: [UInt8])] = []
+    var prefix: [UInt8] = []
+    var suffix: [UInt8] = []
     if let tf = target.replacementTf {
-      ranges.append((range: target.tfRange, replacement: tf))
+      prefix.append(contentsOf: tf)
+      prefix.append(10)
+      suffix.append(contentsOf: try PDFWriter.serializedValue(.name(target.run.fontResource)))
+      suffix.append(
+        contentsOf: Array(" \(AnnotationSupport.number(target.run.fontSize)) Tf\n".utf8))
     }
     if let color = target.colorPrefix {
-      let start = TextStyleSupport.fullSpan(of: target.runInstruction).lowerBound
-      ranges.append((range: start..<start, replacement: color))
+      prefix.append(contentsOf: color)
+      let old = target.run.fillColor.map { AnnotationSupport.number($0) }.joined(separator: " ")
+      suffix.append(contentsOf: Array("\(old) rg\n".utf8))
     }
-    guard !ranges.isEmpty else { return graph }
-    return try target.content.replacing(ranges: ranges, in: graph, limits: limits)
+    guard !prefix.isEmpty else { return graph }
+    prefix.insert(10, at: 0)
+    suffix.insert(10, at: 0)
+    let full = TextStyleSupport.fullSpan(of: target.runInstruction)
+    return try target.content.replacing(
+      ranges: [
+        (full.lowerBound..<full.lowerBound, prefix),
+        (full.upperBound..<full.upperBound, suffix),
+      ], in: graph, limits: limits)
   }
 }
 
@@ -113,8 +126,14 @@ public struct MoveTextCommand: PDFEditCommand, Equatable, Sendable {
     let content = try PageContent.load(pageID: pageID, in: graph, limits: limits)
     let instruction = content.instructions[run.instructionIndex]
     let full = TextStyleSupport.fullSpan(of: instruction)
-    let before = Array("\n\(AnnotationSupport.number(dx)) \(AnnotationSupport.number(dy)) Td\n".utf8)
-    let after = Array("\n\(AnnotationSupport.number(-dx)) \(AnnotationSupport.number(-dy)) Td".utf8)
+    // Td resets the text pen to the line origin, corrupting later Tj shows
+    // in the same text object. An inverse pair of graphics translations
+    // preserves both text matrices and every original glyph advance.
+    let (tx, ty) = try TextCanvasSupport.localDelta(dx: dx, dy: dy, ctm: run.ctm)
+    let before = Array(
+      "\n1 0 0 1 \(AnnotationSupport.number(tx)) \(AnnotationSupport.number(ty)) cm\n".utf8)
+    let after = Array(
+      "\n1 0 0 1 \(AnnotationSupport.number(-tx)) \(AnnotationSupport.number(-ty)) cm\n".utf8)
     return try content.replacing(
       ranges: [
         (range: full.lowerBound..<full.lowerBound, replacement: before),
@@ -202,7 +221,8 @@ public struct ReplaceTextSpanCommand: PDFEditCommand, Equatable, Sendable {
     }
     staged = try PDFEditingEngine.commit(
       PDFTransaction([
-        ReplaceTextCommand(pageID: pageID, runIndex: plan.runIndices.first!, replacement: replacement)
+        ReplaceTextCommand(
+          pageID: pageID, runIndex: plan.runIndices.first!, replacement: replacement)
       ]), to: staged, limits: limits)
     _ = plan
     return staged
@@ -439,7 +459,9 @@ public enum TextLinkImpact {
   public static func affectedLinks(
     pageID: PDFObjectID, oldBounds: [Double], newBounds: [Double], in graph: PDFGraph
   ) -> Report {
-    guard oldBounds.count == 4, newBounds.count == 4 else { return Report(affectedIndices: [], affectedRects: []) }
+    guard oldBounds.count == 4, newBounds.count == 4 else {
+      return Report(affectedIndices: [], affectedRects: [])
+    }
     let annotations = (try? AnnotationInventory.annotations(in: graph, pageID: pageID)) ?? []
     var indices: [Int] = []
     var rects: [[Double]] = []
@@ -567,12 +589,14 @@ public enum TextEditabilityCheck {
       }
     } else if !font.isEditable {
       reasons.append(
-        "This Type 3 font has no readable glyph program for every character; the text is preserved, not rewritten")
+        "This Type 3 font has no readable glyph program for every character; the text is preserved, not rewritten"
+      )
     }
     if renderingMode(of: run, in: content) >= 4 {
       reasons.append("The text paints in a clipping mode; restyle it outside clipping first")
     } else if renderingMode(of: run, in: content) == 3 {
-      reasons.append("The text is invisible (rendering mode 3); it is searchable but not styled here")
+      reasons.append(
+        "The text is invisible (rendering mode 3); it is searchable but not styled here")
     }
     if run.operandPath.count == 2,
       let instruction = content.instructions[safe: run.instructionIndex],

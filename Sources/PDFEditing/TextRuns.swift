@@ -20,6 +20,8 @@ struct TextRun {
   let rise: Double
   let fillColor: [Double]
   let matrix: [Double]
+  /// Graphics transform at this show; kept separate from the text matrix.
+  let ctm: [Double]
   let baselineX: Double
   let baselineY: Double
   /// Advance accumulated inside the same TJ array before this run (text-space
@@ -43,6 +45,7 @@ enum TextRunIndexer {
     var rise = 0.0
     /// P19-010: the current non-stroking color, so reflow can preserve it.
     var fillColor = [0.0, 0.0, 0.0]
+    var ctm = [1.0, 0, 0, 1, 0, 0]
   }
 
   static func runs(
@@ -91,7 +94,7 @@ enum TextRunIndexer {
           charSpacing: state.charSpacing, wordSpacing: state.wordSpacing,
           horizontalScale: state.horizontalScale, leading: state.leading, rise: state.rise,
           fillColor: state.fillColor,
-          matrix: matrix, baselineX: matrix[4], baselineY: matrix[5],
+          matrix: matrix, ctm: state.ctm, baselineX: matrix[4], baselineY: matrix[5],
           textSpaceOffset: textSpaceOffset, hasKnownOffset: hasKnownOffset))
     }
 
@@ -110,6 +113,9 @@ enum TextRunIndexer {
         stateStack.append(state)
       case "Q":
         if let saved = stateStack.popLast() { state = saved }
+      case "cm":
+        let values = instruction.operands.compactMap { number($0) }
+        if values.count == 6 { state.ctm = TextCanvasSupport.concatenate(state.ctm, values) }
       case "Tf":
         guard case .name(let name)? = instruction.operands.first?.value,
           let size = number(instruction.operands.count > 1 ? instruction.operands[1] : nil)

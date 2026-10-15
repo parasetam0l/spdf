@@ -6,7 +6,8 @@ sPDF uses its own PDF core for parsing, edits, and verified saves. Apple's frame
 
 ## Features
 
-- Edit supported existing text and image placements, with undo and redo.
+- Edit supported text directly on the page, drag text blocks, adjust size/color, and undo or redo changes.
+- Edit supported image placements.
 - Organize pages: rotate, reorder, import, extract, insert, and delete.
 - Add text, graphics, annotations, comments, and drawn signatures.
 - Fill and author common AcroForm fields.

@@ -50,8 +50,12 @@ struct WorkspaceView: View {
         toolButton("Comments", image: "text.bubble", tool: .annotate)
         toolButton("Pages", image: "square.grid.2x2", tool: .page)
         Spacer(minLength: 12)
-        Button { viewer.showSearch() } label: { Label("Find", systemImage: "magnifyingglass") }
-          .help("Find text (⌘F)")
+        Button {
+          viewer.showSearch()
+        } label: {
+          Label("Find", systemImage: "magnifyingglass")
+        }
+        .help("Find text (⌘F)")
       }
       .buttonStyle(.plain)
       .padding(.horizontal, 14).padding(.vertical, 8)
@@ -72,6 +76,40 @@ struct WorkspaceView: View {
             .disabled(viewer.view.currentSelection == nil || !canEdit)
           Button(viewer.isInkToolActive ? "Stop Drawing" : "Draw") { viewer.toggleInkTool() }
             .disabled(!canEdit)
+        } else if viewer.activeTool == .textEdit || viewer.activeTool == .addText {
+          Text(viewer.pageTextStyle.fontFamily).lineLimit(1).frame(maxWidth: 110)
+            .help("The document's font is retained")
+          TextField(
+            "Text size",
+            value: Binding(
+              get: { viewer.pageTextStyle.fontSize },
+              set: { value in
+                guard value.isFinite, (2...144).contains(value) else { return }
+                viewer.pageTextStyle.fontSize = value
+                viewer.pageTextStyleApplier?(viewer.pageTextStyle)
+              }), format: .number.precision(.fractionLength(0...1))
+          )
+          .frame(width: 46).accessibilityLabel("Text size")
+          Text("pt").foregroundStyle(.secondary)
+          Menu {
+            Button("Black") { setTextColor([0, 0, 0]) }
+            Button("Dark Gray") { setTextColor([0.35, 0.35, 0.35]) }
+            Button("Red") { setTextColor([0.8, 0.12, 0.12]) }
+            Button("Blue") { setTextColor([0.08, 0.25, 0.8]) }
+            Button("Green") { setTextColor([0.05, 0.45, 0.2]) }
+            Divider()
+            Button("Custom Color…") { PageTextColorPanelController.shared.show(for: viewer) }
+          } label: {
+            let rgb = viewer.pageTextStyle.color
+            Image(nsImage: textColorSwatch(rgb)).renderingMode(.original)
+              .frame(width: 26, height: 24)
+          }
+          .menuStyle(.borderlessButton).fixedSize()
+          .accessibilityLabel("Text color").help("Text color")
+          if viewer.isEditingPageText {
+            Button("Done") { _ = viewer.pendingEditFinisher?() }
+              .keyboardShortcut(.return, modifiers: .command)
+          }
         }
       }
       .font(.callout)
@@ -168,9 +206,12 @@ struct WorkspaceView: View {
             .disabled(!jobs.canCancel(id: job.id))
           }
         }
-        Picker("Page layout", selection: Binding(
-          get: { viewer.view.displayMode == .singlePageContinuous },
-          set: { viewer.setContinuous($0) })) {
+        Picker(
+          "Page layout",
+          selection: Binding(
+            get: { viewer.view.displayMode == .singlePageContinuous },
+            set: { viewer.setContinuous($0) })
+        ) {
           Text("Continuous").tag(true)
           Text("Single Page").tag(false)
         }
@@ -255,44 +296,45 @@ struct WorkspaceView: View {
         HSplitView {
           if viewer.isSidebarVisible {
             Group {
-            switch viewer.sidebarMode {
-            case .pages:
-              NativeView(view: viewer.thumbnails)
-                .frame(
-                  minWidth: 144,
-                  idealWidth: viewer.sidebarWidth > 0 ? viewer.sidebarWidth : 168,
-                  maxWidth: 320)
-                .accessibilityLabel("Page thumbnails")
-            case .comments:
-              CommentsPanel(
-                comments: comments.comments, pageCount: viewer.pageCount,
-                onSelect: onSelectComment, onDelete: onDeleteComment,
-                onReply: onReplyComment, onSetState: onSetStateComment)
-            case .forms:
-              FormsPanel(
-                fields: forms.fields, orphanedWidgetCount: forms.orphanedWidgetCount,
-                onSubmitText: onSubmitFormText,
-                onDraftText: { forms.pendingText[$0] = $1 }, onToggle: onToggleForm,
-                onSelectChoice: onSelectFormChoice, onSelect: onSelectFormField)
-            case .signatures:
-              SignaturesPanel(entries: signatures.entries, onSelect: onSelectSignature)
-            case .fonts:
-              FontsPanel(model: fonts, onProvision: onProvisionFont)
-            case .inspector:
-              SelectionInspectorPanel(viewer: viewer)
-            case .info:
-              DocumentInfoPanel(viewer: viewer)
-            case .structure:
-              StructurePanel(
-                model: structure, onSelect: onSelectStructurePage,
-                onEditRole: onEditStructureRole, onEditAltText: onEditStructureAltText,
-                onMarkArtifact: onMarkStructureArtifact,
-                onSuggestTags: onSuggestStructureTags,
-                onAcceptSuggestion: onAcceptStructureSuggestion,
-                onRejectSuggestion: onRejectStructureSuggestion,
-                onApplySuggestions: onApplyStructureSuggestions,
-                onDiscardSuggestions: onDiscardStructureSuggestions)
-            }
+              switch viewer.sidebarMode {
+              case .pages:
+                NativeView(view: viewer.thumbnails)
+                  .frame(
+                    minWidth: 144,
+                    idealWidth: viewer.sidebarWidth > 0 ? viewer.sidebarWidth : 168,
+                    maxWidth: 320
+                  )
+                  .accessibilityLabel("Page thumbnails")
+              case .comments:
+                CommentsPanel(
+                  comments: comments.comments, pageCount: viewer.pageCount,
+                  onSelect: onSelectComment, onDelete: onDeleteComment,
+                  onReply: onReplyComment, onSetState: onSetStateComment)
+              case .forms:
+                FormsPanel(
+                  fields: forms.fields, orphanedWidgetCount: forms.orphanedWidgetCount,
+                  onSubmitText: onSubmitFormText,
+                  onDraftText: { forms.pendingText[$0] = $1 }, onToggle: onToggleForm,
+                  onSelectChoice: onSelectFormChoice, onSelect: onSelectFormField)
+              case .signatures:
+                SignaturesPanel(entries: signatures.entries, onSelect: onSelectSignature)
+              case .fonts:
+                FontsPanel(model: fonts, onProvision: onProvisionFont)
+              case .inspector:
+                SelectionInspectorPanel(viewer: viewer)
+              case .info:
+                DocumentInfoPanel(viewer: viewer)
+              case .structure:
+                StructurePanel(
+                  model: structure, onSelect: onSelectStructurePage,
+                  onEditRole: onEditStructureRole, onEditAltText: onEditStructureAltText,
+                  onMarkArtifact: onMarkStructureArtifact,
+                  onSuggestTags: onSuggestStructureTags,
+                  onAcceptSuggestion: onAcceptStructureSuggestion,
+                  onRejectSuggestion: onRejectStructureSuggestion,
+                  onApplySuggestions: onApplyStructureSuggestions,
+                  onDiscardSuggestions: onDiscardStructureSuggestions)
+              }
             }
             .frame(maxHeight: .infinity, alignment: .top)
           }
@@ -328,7 +370,8 @@ struct WorkspaceView: View {
                   .accessibilityElement(children: .ignore)
                   .accessibilityLabel("Alignment guides")
                 }
-                if viewer.isInkToolActive {              InkOverlay(viewer: viewer)
+                if viewer.isInkToolActive {
+                  InkOverlay(viewer: viewer)
                 }
               }
             }
@@ -355,14 +398,21 @@ struct WorkspaceView: View {
     Button {
       guard viewer.activateTool(tool) else { return }
       viewer.isInkToolActive = false
-      if tool == .annotate { viewer.showComments(); viewer.isSidebarVisible = true }
-      if tool == .page { viewer.showPages(); viewer.isSidebarVisible = true }
+      if tool == .annotate {
+        viewer.showComments()
+        viewer.isSidebarVisible = true
+      }
+      if tool == .page {
+        viewer.showPages()
+        viewer.isSidebarVisible = true
+      }
     } label: {
       Label(title, systemImage: image)
         .font(.system(size: 12, weight: viewer.activeTool == tool ? .semibold : .regular))
         .padding(.horizontal, 10).frame(height: 34)
         .foregroundStyle(viewer.activeTool == tool ? Color.white : Color.primary)
-        .background(viewer.activeTool == tool ? Color.accentColor : Color.clear,
+        .background(
+          viewer.activeTool == tool ? Color.accentColor : Color.clear,
           in: RoundedRectangle(cornerRadius: 7))
     }
     .disabled(tool != .select && tool != .annotate && !canEdit)
@@ -373,12 +423,27 @@ struct WorkspaceView: View {
   private var toolHint: String {
     switch viewer.activeTool {
     case .select: return "Select text to copy, highlight or add a comment."
-    case .textEdit: return "Click existing text to edit. Return saves the change; Escape cancels."
-    case .addText: return "Click a page and type. Return adds the text; Escape cancels."
+    case .textEdit: return "Click to type. Drag text or its handle to move. Escape cancels."
+    case .addText: return "Type on the page. Return starts a line; Done finishes."
     case .imageEdit: return "Select an image to move it. Right-click for image actions."
     case .annotate: return "Select text for markup, or draw on the page."
     case .page: return "Reorder, insert, rotate or extract pages."
     }
+  }
+
+  private func setTextColor(_ color: [Double]) {
+    viewer.pageTextStyle.color = color
+    viewer.pageTextStyleApplier?(viewer.pageTextStyle)
+  }
+
+  private func textColorSwatch(_ rgb: [Double]) -> NSImage {
+    let color = NSColor(srgbRed: rgb[0], green: rgb[1], blue: rgb[2], alpha: 1)
+    let image =
+      NSImage(systemSymbolName: "circle.fill", accessibilityDescription: nil)?
+      .withSymbolConfiguration(.init(paletteColors: [color]))
+      ?? NSImage(size: NSSize(width: 14, height: 14))
+    image.isTemplate = false
+    return image
   }
 
   private var modeTitle: String {

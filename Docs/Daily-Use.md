@@ -2,7 +2,7 @@
 
 ## Create, open and read
 
-Choose **New PDF** in the Welcome window or File menu (Command-N) to create an untitled blank PDF. **Add Text** starts active: click the page, type and press Return to add real page content. Escape cancels the input. Save (Command-S) names and writes the new document. Settings (Command-comma) selects A4 or US Letter, portrait or landscape, and the default page layout.
+Choose **New PDF** in the Welcome window or File menu (Command-N) to create an untitled blank PDF. **Add Text** starts active: click the page and type directly on it. Return starts another line; **Done** or Command-Return adds the real page content. Escape cancels the pending text. Save (Command-S) names and writes the new document. Settings (Command-comma) selects A4 or US Letter, portrait or landscape, and the default page layout.
 
 Open a PDF with File → Open or Finder. Use the View menu for fit-page, fit-width, actual size and page navigation. Locked documents remain restricted until you use Tools → Security → Unlock Document. Sidebar panels share the resizable document workspace; switching panels preserves the window size.
 
@@ -10,7 +10,11 @@ Use Command-F to open Find. Enter a phrase and press Return to search, then use 
 
 ## Edit text and images
 
-Click **Edit PDF** in the toolbar (or Control-Command-2), then click a supported text run to edit its actual content. Return commits the edit; Escape cancels it. Undo and redo use Command-Z and Shift-Command-Z. The active tool and its instructions stay visible. Reflow Paragraph supports longer replacements within its stated font and region limits. Image-only scans need OCR before text can be selected; complex fonts and unsupported content may remain read-only.
+Click **Edit PDF** in the toolbar (or Control-Command-2). Drag a supported text block to move it. Click it to place a caret directly on the page, then type or select characters as usual. While editing, drag the blue move grip beside the text to reposition the whole block; arrow keys on the grip move one point, or ten with Shift. The toolbar shows the source font, text size and color. Changes appear on the page before you commit.
+
+**Done**, Return or Command-Return commits an existing block. Escape discards its pending changes. Save commits pending text before writing; closing with changed text prompts to save. Command-Z first undoes typing while the caret is active; committed text and movement use document Undo/Redo. Zooming, scrolling and resizing keep the editor attached to the page.
+
+Direct editing currently supports simple-font, horizontal text with ordinary character spacing on unrotated pages, one PDF text-show block at a time. It preserves surrounding page content and does not reflow neighboring blocks. Rotated, skewed, specially spaced or otherwise unsupported text produces a refusal. Reflow Paragraph remains available for longer replacements within its font and region limits. Image-only scans need OCR before text can be selected; complex fonts may remain read-only.
 
 Switch back with **Select** (Control-Command-1). In Select mode, dragging a graphic only selects it and never dirties the document. Click **Images** (Control-Command-4) to move or resize supported app-created graphics; handles and keyboard nudging work only there. For supported images already in the PDF, right-click the image to rotate, scale, or replace it. Shared resources and unsupported content produce explicit choices or refusal reasons.
 

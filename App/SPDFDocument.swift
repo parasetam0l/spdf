@@ -55,6 +55,9 @@ final class SPDFDocument: NSDocument {
   private var isRunningOCR = false
   private var restoredFileAccess: URL?
   private var pendingUnlockedViewState: ViewState?
+  private var textBlockCacheRevision: UInt64?
+  private var textBlockCache: [Int: [PageTextTarget]] = [:]
+  private nonisolated let pendingPageText = PendingPageTextState()
 
   // AppKit constructs concurrent-reading documents on its worker queue.
   // No views or other main-actor objects are created until makeWindowControllers().
@@ -62,7 +65,7 @@ final class SPDFDocument: NSDocument {
 
   override class var autosavesInPlace: Bool { false }
   nonisolated override var isDocumentEdited: Bool {
-    super.isDocumentEdited || editSession.isDirty
+    super.isDocumentEdited || editSession.isDirty || pendingPageText.hasChanges
   }
   nonisolated override class func canConcurrentlyReadDocuments(ofType typeName: String) -> Bool {
     true
@@ -116,7 +119,8 @@ final class SPDFDocument: NSDocument {
 
   static func makeUpdateRelaunchStore() -> UpdateRelaunchStore {
     UpdateRelaunchStore(
-      directory: recoveryBaseDirectory().appendingPathComponent("UpdateRelaunch", isDirectory: true))
+      directory: recoveryBaseDirectory().appendingPathComponent("UpdateRelaunch", isDirectory: true)
+    )
   }
 
   private static func recoveryBaseDirectory() -> URL {
@@ -133,7 +137,8 @@ final class SPDFDocument: NSDocument {
 
   /// P10-022: the key follows the file's identity across moves and renames.
   var recoveryKey: String {
-    recoveredRecoveryKey ?? (fileURL == nil ? untitledRecoveryKey : RecoveryStore.documentKey(for: fileURL))
+    recoveredRecoveryKey
+      ?? (fileURL == nil ? untitledRecoveryKey : RecoveryStore.documentKey(for: fileURL))
   }
 
   /// P10-016: bounded autosave — snapshot a dirty session at most once per
@@ -193,11 +198,11 @@ final class SPDFDocument: NSDocument {
     let sidebarWidth =
       viewer.isSidebarVisible ? Double(viewer.thumbnails.frame.width) : viewer.sidebarWidth
     return ViewState(
-        windowFrame: [frame.origin.x, frame.origin.y, frame.size.width, frame.size.height],
-        pageNumber: viewer.pageNumber, scale: viewer.scale,
-        sidebarVisible: viewer.isSidebarVisible, sidebarMode: mode,
-        sidebarWidth: sidebarWidth > 1 ? sidebarWidth : 0,
-        continuous: viewer.view.displayMode == .singlePageContinuous)
+      windowFrame: [frame.origin.x, frame.origin.y, frame.size.width, frame.size.height],
+      pageNumber: viewer.pageNumber, scale: viewer.scale,
+      sidebarVisible: viewer.isSidebarVisible, sidebarMode: mode,
+      sidebarWidth: sidebarWidth > 1 ? sidebarWidth : 0,
+      continuous: viewer.view.displayMode == .singlePageContinuous)
   }
 
   func saveViewState(viewer: PDFViewingSession) {
@@ -207,8 +212,11 @@ final class SPDFDocument: NSDocument {
 
   func adoptRestoredFileAccess(_ url: URL, accessing: Bool) {
     guard accessing else { return }
-    if restoredFileAccess == nil { restoredFileAccess = url }
-    else { url.stopAccessingSecurityScopedResource() }
+    if restoredFileAccess == nil {
+      restoredFileAccess = url
+    } else {
+      url.stopAccessingSecurityScopedResource()
+    }
   }
 
   /// P10-023: restore window and navigation state without replaying edits.
@@ -237,7 +245,8 @@ final class SPDFDocument: NSDocument {
         viewer.view.minScaleFactor, min(viewer.view.maxScaleFactor, state.scale))
     }
     if state.windowFrame.count == 4, state.windowFrame.allSatisfy(\.isFinite),
-      let window = windowControllers.first?.window {
+      let window = windowControllers.first?.window
+    {
       let frame = NSRect(
         x: state.windowFrame[0], y: state.windowFrame[1], width: state.windowFrame[2],
         height: state.windowFrame[3])
@@ -387,6 +396,27 @@ final class SPDFDocument: NSDocument {
     viewer.onAddPageText = { [weak self] pageIndex, rect, text in
       self?.addPageText(pageIndex: pageIndex, rect: rect, text: text) ?? false
     }
+    viewer.onTextBlockPreview = { [weak self] target in
+      guard let self, self.editSession.canEdit, let graph = self.editSession.currentGraph,
+        self.editSession.pageIDs.indices.contains(target.pageIndex)
+      else { return nil }
+      return try? PDFWriter.write(
+        PageTextEditing.hidingBlock(
+          pageID: self.editSession.pageIDs[target.pageIndex], runIndex: target.runIndex, in: graph))
+    }
+    viewer.onTextBlockCommit = { [weak self] target, text, style, dx, dy in
+      self?.commitTextBlock(target, text: text, style: style, dx: dx, dy: dy) ?? false
+    }
+    viewer.onNewTextBlockCommit = { [weak self] pageIndex, rect, text, style in
+      self?.addPageText(pageIndex: pageIndex, rect: rect, text: text, style: style) ?? false
+    }
+    viewer.onPendingPageTextChange = { [weak self] changed in
+      guard let self else { return }
+      self.pendingPageText.hasChanges = changed
+      for controller in self.windowControllers {
+        controller.window?.isDocumentEdited = self.isDocumentEdited
+      }
+    }
     viewer.setContinuous(WorkspacePreferences.continuous)
     viewer.graphicTargetProvider = { [weak self] pageIndex, pagePoint in
       self?.graphicTarget(pageIndex: pageIndex, pagePoint: pagePoint)
@@ -420,7 +450,8 @@ final class SPDFDocument: NSDocument {
         onSubmitFormText: { [weak self] name, text in
           self?.fillFormText(fieldName: name, text: text)
         },
-        onToggleForm: { [weak self] name, isOn in self?.setFormButton(fieldName: name, isOn: isOn) },
+        onToggleForm: { [weak self] name, isOn in self?.setFormButton(fieldName: name, isOn: isOn)
+        },
         onSelectFormChoice: { [weak self] name, exportValue in
           self?.setFormChoice(fieldName: name, exportValue: exportValue)
         },
@@ -583,7 +614,10 @@ final class SPDFDocument: NSDocument {
   private func noteUserEdit() {
     // NSDocument observes this manager's groups and updates its change count
     // itself. Explicitly incrementing as well counts each native edit twice.
-    guard let undoManager else { updateChangeCount(.changeDone); return }
+    guard let undoManager else {
+      updateChangeCount(.changeDone)
+      return
+    }
     // Each closure performs exactly one session step and only when the
     // session is still at the revision it was registered for: if AppKit's
     // event grouping coalesces several registrations into one action, the
@@ -626,6 +660,7 @@ final class SPDFDocument: NSDocument {
 
   @discardableResult
   func undoEdit() -> Bool {
+    if viewer?.isEditingPageText == true, !(viewer?.pendingEditFinisher?() ?? true) { return false }
     // The manager is the app's undo surface; each of its actions performs
     // exactly one session step. An entry that no longer matches live history
     // (for example after a reload discarded the stack) no-ops, and the
@@ -643,6 +678,7 @@ final class SPDFDocument: NSDocument {
 
   @discardableResult
   func redoEdit() -> Bool {
+    if viewer?.isEditingPageText == true, !(viewer?.pendingEditFinisher?() ?? true) { return false }
     if let undoManager, undoManager.canRedo {
       let before = editSession.documentRevision
       undoManager.redo()
@@ -675,9 +711,11 @@ final class SPDFDocument: NSDocument {
     let bounds = selection.bounds(for: page)
     guard bounds.width > 0.5, bounds.height > 0.5 else { return }
     let pageID = editSession.pageIDs[index]
-    let quads = AddHighlightCommand.quads(forClusterBounds: [[
-      bounds.minX, bounds.minY, bounds.maxX, bounds.maxY,
-    ]])
+    let quads = AddHighlightCommand.quads(forClusterBounds: [
+      [
+        bounds.minX, bounds.minY, bounds.maxX, bounds.maxY,
+      ]
+    ])
     let modified = Self.pdfDateString(Date())
     let contents = selection.string
     let command: any PDFEditCommand
@@ -1238,7 +1276,8 @@ final class SPDFDocument: NSDocument {
   }
 
   /// P24-013: resolve an editable text widget under a page point.
-  private func formFieldTarget(pageIndex: Int, pagePoint: [Double]) -> FormFieldTarget? {    guard pageIndex >= 0, pagePoint.count == 2 else { return nil }
+  private func formFieldTarget(pageIndex: Int, pagePoint: [Double]) -> FormFieldTarget? {
+    guard pageIndex >= 0, pagePoint.count == 2 else { return nil }
     for field in editSession.formFields() where field.kind == .text && !field.isReadOnly {
       for widget in field.widgets where widget.pageIndex == pageIndex {
         guard let rect = widget.rect, rect.count == 4,
@@ -1258,14 +1297,49 @@ final class SPDFDocument: NSDocument {
     guard pageIndex >= 0, pageIndex < editSession.pageIDs.count,
       let graph = editSession.currentGraph
     else { return nil }
-    guard
-      let target = try? TextEditTargeting.runTarget(
-        atPoint: pagePoint, in: graph, pageID: editSession.pageIDs[pageIndex]),
-      let rect = target.rect
-    else { return nil }
-    return PageTextTarget(
-      pageIndex: pageIndex, runIndex: target.runIndex, rect: rect, text: target.text,
-      style: target.style)
+    if textBlockCacheRevision != editSession.documentRevision {
+      textBlockCache.removeAll()
+      textBlockCacheRevision = editSession.documentRevision
+    }
+    if textBlockCache[pageIndex] == nil,
+      let page = viewer?.view.document?.page(at: pageIndex), let pageText = page.string
+    {
+      let string = pageText as NSString
+      var used = Set<Int>()
+      textBlockCache[pageIndex] =
+        (try? PageTextEditing.blocks(
+          pageID: editSession.pageIDs[pageIndex], in: graph))?.compactMap { block in
+          var remaining = NSRange(location: 0, length: string.length)
+          var matches: [(NSRange, CGRect)] = []
+          while remaining.length > 0 {
+            let found = string.range(of: block.text, range: remaining)
+            guard found.location != NSNotFound else { break }
+            if !used.contains(found.location), let selection = page.selection(for: found) {
+              matches.append((found, selection.bounds(for: page)))
+            }
+            let next = NSMaxRange(found)
+            remaining = NSRange(location: next, length: string.length - next)
+          }
+          let x = (block.rect[0] + block.rect[2]) / 2
+          let y = (block.rect[1] + block.rect[3]) / 2
+          guard
+            let match = matches.min(by: {
+              hypot($0.1.midX - x, $0.1.midY - y) < hypot($1.1.midX - x, $1.1.midY - y)
+            }), let first = block.runIndices.first
+          else { return nil }
+          used.insert(match.0.location)
+          let rect = match.1
+          return PageTextTarget(
+            pageIndex: pageIndex, runIndex: first,
+            rect: [rect.minX, rect.minY, rect.maxX, rect.maxY], text: block.text,
+            style: block.style, runIndices: block.runIndices)
+        } ?? []
+    }
+    return textBlockCache[pageIndex]?.first { target in
+      let r = target.rect
+      return pagePoint[0] >= r[0] - 2 && pagePoint[0] <= r[2] + 2
+        && pagePoint[1] >= r[1] - 2 && pagePoint[1] <= r[3] + 2
+    }
   }
 
   /// P24-014: toggle a checkbox using its actual on-state name.
@@ -1351,7 +1425,8 @@ final class SPDFDocument: NSDocument {
     encodingPopup.addItems(withTitles: ["UTF-8", "UTF-16"])
     let endingPopup = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 160, height: 24))
     endingPopup.addItems(withTitles: ["LF (\n)", "CRLF (\r\n)"])
-    let selectionCheckbox = NSButton(checkboxWithTitle: "Only the current selection", target: nil, action: nil)
+    let selectionCheckbox = NSButton(
+      checkboxWithTitle: "Only the current selection", target: nil, action: nil)
     let hasSelection = viewer?.view.currentSelection != nil
     selectionCheckbox.state = hasSelection ? .on : .off
     selectionCheckbox.isEnabled = hasSelection
@@ -1379,7 +1454,8 @@ final class SPDFDocument: NSDocument {
       {
         data = PDFTextExport.encoded(string, options: options)
       } else {
-        data = try PDFTextExport.plainText(pageIDs: editSession.pageIDs, in: graph, options: options)
+        data = try PDFTextExport.plainText(
+          pageIDs: editSession.pageIDs, in: graph, options: options)
       }
     } catch {
       presentError(error)
@@ -1403,7 +1479,8 @@ final class SPDFDocument: NSDocument {
     guard let graph = editSession.currentGraph else {
       throw PDFError(.malformed, "There is no document to export")
     }
-    let data = try PDFTextExport.plainText(pageIDs: editSession.pageIDs, in: graph, options: options)
+    let data = try PDFTextExport.plainText(
+      pageIDs: editSession.pageIDs, in: graph, options: options)
     try data.write(to: url, options: .atomic)
   }
 
@@ -1436,7 +1513,8 @@ final class SPDFDocument: NSDocument {
     alert.addButton(withTitle: "Cancel")
     guard alert.runModal() == .alertFirstButtonReturn else { return }
     let format: PageImageExportOptions.Format =
-      formatPopup.indexOfSelectedItem == 1 ? .jpeg : (formatPopup.indexOfSelectedItem == 2 ? .tiff : .png)
+      formatPopup.indexOfSelectedItem == 1
+      ? .jpeg : (formatPopup.indexOfSelectedItem == 2 ? .tiff : .png)
     let dpi = [72.0, 144.0, 300.0][max(0, resolutionPopup.indexOfSelectedItem)]
     let options = PageImageExportOptions(
       format: format, dpi: dpi, includeAlpha: alphaCheckbox.state == .on,
@@ -1477,8 +1555,10 @@ final class SPDFDocument: NSDocument {
     // on the progress control. Captured up front on the caller's executor.
     let window = windowControllers.first?.window
     let pageView = viewer?.view
-    let job = try job ?? beginDocumentJob(
-      title: "Exporting page images", total: editSession.pageIDs.count)
+    let job =
+      try job
+      ?? beginDocumentJob(
+        title: "Exporting page images", total: editSession.pageIDs.count)
     defer {
       jobCenter.finish(id: job)
       Task { @MainActor [weak window, weak pageView] in
@@ -1636,7 +1716,8 @@ final class SPDFDocument: NSDocument {
       let snippet = candidate.text.replacingOccurrences(of: "\n", with: " ")
       popup.addItem(withTitle: String(snippet.prefix(48)))
     }
-    let replacementField = NSTextField(string: editable[0].text.replacingOccurrences(of: "\n", with: " "))
+    let replacementField = NSTextField(
+      string: editable[0].text.replacingOccurrences(of: "\n", with: " "))
     let overflowPopup = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 200, height: 24))
     overflowPopup.addItems(withTitles: ["Allow overflow", "Clip (refuse)", "Shrink to fit"])
     let alignmentPopup = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 200, height: 24))
@@ -1649,10 +1730,13 @@ final class SPDFDocument: NSDocument {
     ])
     grid.column(at: 0).xPlacement = .trailing
     grid.frame = NSRect(x: 0, y: 0, width: 460, height: 100)
-    guard runFormDialog(
-      title: "Reflow Paragraph",
-      message: "The paragraph's own lines are rewritten; other content is checked for collisions.",
-      accessory: grid) else { return }
+    guard
+      runFormDialog(
+        title: "Reflow Paragraph",
+        message:
+          "The paragraph's own lines are rewritten; other content is checked for collisions.",
+        accessory: grid)
+    else { return }
     let index = max(0, min(popup.indexOfSelectedItem, editable.count - 1))
     let options = ParagraphReflowOptions(
       alignment: alignmentPopup.indexOfSelectedItem == 0
@@ -1761,10 +1845,12 @@ final class SPDFDocument: NSDocument {
     ])
     grid.column(at: 0).xPlacement = .trailing
     grid.frame = NSRect(x: 0, y: 0, width: 360, height: 124)
-    guard runFormDialog(
-      title: "Add Text Field",
-      message: "Placed at the center of the current page; move or resize it afterwards.",
-      accessory: grid) else { return }
+    guard
+      runFormDialog(
+        title: "Add Text Field",
+        message: "Placed at the center of the current page; move or resize it afterwards.",
+        accessory: grid)
+    else { return }
     _ = applyFormAuthoring(
       AddTextFieldCommand(
         pageID: pageID, rect: rect, name: nameField.stringValue,
@@ -1787,10 +1873,12 @@ final class SPDFDocument: NSDocument {
     ])
     grid.column(at: 0).xPlacement = .trailing
     grid.frame = NSRect(x: 0, y: 0, width: 360, height: 76)
-    guard runFormDialog(
-      title: "Add Checkbox",
-      message: "Placed at the center of the current page.",
-      accessory: grid) else { return }
+    guard
+      runFormDialog(
+        title: "Add Checkbox",
+        message: "Placed at the center of the current page.",
+        accessory: grid)
+    else { return }
     _ = applyFormAuthoring(
       AddCheckboxCommand(
         pageID: pageID, rect: rect, name: nameField.stringValue,
@@ -1809,10 +1897,12 @@ final class SPDFDocument: NSDocument {
     ])
     grid.column(at: 0).xPlacement = .trailing
     grid.frame = NSRect(x: 0, y: 0, width: 400, height: 52)
-    guard runFormDialog(
-      title: "Add Radio Group",
-      message: "Comma-separated export values; placed at the center of the page.",
-      accessory: grid) else { return }
+    guard
+      runFormDialog(
+        title: "Add Radio Group",
+        message: "Comma-separated export values; placed at the center of the page.",
+        accessory: grid)
+    else { return }
     let values = valuesField.stringValue
       .split(separator: ",")
       .map { $0.trimmingCharacters(in: .whitespaces) }
@@ -1834,7 +1924,8 @@ final class SPDFDocument: NSDocument {
     else { return }
     let nameField = NSTextField(string: "Choice1")
     let optionsField = NSTextField(string: "First, Second, Third")
-    let comboBox = NSButton(checkboxWithTitle: "Combo box (otherwise a list)", target: nil, action: nil)
+    let comboBox = NSButton(
+      checkboxWithTitle: "Combo box (otherwise a list)", target: nil, action: nil)
     comboBox.state = .on
     let grid = NSGridView(views: [
       [NSTextField(labelWithString: "Name:"), nameField],
@@ -1843,10 +1934,12 @@ final class SPDFDocument: NSDocument {
     ])
     grid.column(at: 0).xPlacement = .trailing
     grid.frame = NSRect(x: 0, y: 0, width: 400, height: 76)
-    guard runFormDialog(
-      title: "Add Choice Field",
-      message: "Comma-separated options; placed at the center of the page.",
-      accessory: grid) else { return }
+    guard
+      runFormDialog(
+        title: "Add Choice Field",
+        message: "Comma-separated options; placed at the center of the page.",
+        accessory: grid)
+    else { return }
     let options = optionsField.stringValue
       .split(separator: ",")
       .map { $0.trimmingCharacters(in: .whitespaces) }
@@ -1874,10 +1967,13 @@ final class SPDFDocument: NSDocument {
     ])
     grid.column(at: 0).xPlacement = .trailing
     grid.frame = NSRect(x: 0, y: 0, width: 400, height: 76)
-    guard runFormDialog(
-      title: "Add Push Button",
-      message: "Only http, https, and mailto links are accepted; leave empty for an inert button.",
-      accessory: grid) else { return }
+    guard
+      runFormDialog(
+        title: "Add Push Button",
+        message:
+          "Only http, https, and mailto links are accepted; leave empty for an inert button.",
+        accessory: grid)
+    else { return }
     _ = applyFormAuthoring(
       AddPushButtonCommand(
         pageID: pageID, rect: rect, name: nameField.stringValue,
@@ -1893,10 +1989,12 @@ final class SPDFDocument: NSDocument {
     let grid = NSGridView(views: [[NSTextField(labelWithString: "Name:"), nameField]])
     grid.column(at: 0).xPlacement = .trailing
     grid.frame = NSRect(x: 0, y: 0, width: 320, height: 28)
-    guard runFormDialog(
-      title: "Add Signature Field",
-      message: "An empty signature field; signing is a separate, explicit action.",
-      accessory: grid) else { return }
+    guard
+      runFormDialog(
+        title: "Add Signature Field",
+        message: "An empty signature field; signing is a separate, explicit action.",
+        accessory: grid)
+    else { return }
     _ = applyFormAuthoring(
       AddSignatureFieldCommand(pageID: pageID, rect: rect, name: nameField.stringValue))
   }
@@ -1913,9 +2011,11 @@ final class SPDFDocument: NSDocument {
     ])
     grid.column(at: 0).xPlacement = .trailing
     grid.frame = NSRect(x: 0, y: 0, width: 400, height: 52)
-    guard runFormDialog(
-      title: "Rename Form Field", message: "Dotted names create or move within a parent group.",
-      accessory: grid) else { return }
+    guard
+      runFormDialog(
+        title: "Rename Form Field", message: "Dotted names create or move within a parent group.",
+        accessory: grid)
+    else { return }
     _ = applyFormAuthoring(
       RenameFormFieldCommand(
         fieldName: popup.titleOfSelectedItem ?? names[0], newName: nameField.stringValue))
@@ -1929,10 +2029,12 @@ final class SPDFDocument: NSDocument {
     let grid = NSGridView(views: [[NSTextField(labelWithString: "Field:"), popup]])
     grid.column(at: 0).xPlacement = .trailing
     grid.frame = NSRect(x: 0, y: 0, width: 320, height: 28)
-    guard runFormDialog(
-      title: "Delete Form Field",
-      message: "The field, its widgets, and its page annotations are removed.",
-      accessory: grid) else { return }
+    guard
+      runFormDialog(
+        title: "Delete Form Field",
+        message: "The field, its widgets, and its page annotations are removed.",
+        accessory: grid)
+    else { return }
     _ = applyFormAuthoring(
       RemoveFormFieldCommand(fieldName: popup.titleOfSelectedItem ?? names[0]))
   }
@@ -1947,9 +2049,10 @@ final class SPDFDocument: NSDocument {
     let grid = NSGridView(views: [[NSTextField(labelWithString: "Field:"), popup]])
     grid.column(at: 0).xPlacement = .trailing
     grid.frame = NSRect(x: 0, y: 0, width: 340, height: 28)
-    guard runFormDialog(
-      title: "Field Properties",
-      message: "Choose a field to inspect and edit.", accessory: grid),
+    guard
+      runFormDialog(
+        title: "Field Properties",
+        message: "Choose a field to inspect and edit.", accessory: grid),
       let graph = editSession.currentGraph
     else { return }
     let name = popup.titleOfSelectedItem ?? names[0]
@@ -1966,7 +2069,8 @@ final class SPDFDocument: NSDocument {
     let passwordBox = NSButton(checkboxWithTitle: "Password", target: nil, action: nil)
     passwordBox.state = properties.isPassword ? .on : .off
     passwordBox.isEnabled = properties.kind == .text
-    let fontSizeField = NSTextField(string: properties.fontSize.map { String(format: "%g", $0) } ?? "12")
+    let fontSizeField = NSTextField(
+      string: properties.fontSize.map { String(format: "%g", $0) } ?? "12")
     let alignmentPopup = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 140, height: 24))
     alignmentPopup.addItems(withTitles: ["Left", "Center", "Right"])
     alignmentPopup.selectItem(at: properties.alignment ?? 0)
@@ -2005,10 +2109,12 @@ final class SPDFDocument: NSDocument {
     ])
     grid2.column(at: 0).xPlacement = .trailing
     grid2.frame = NSRect(x: 0, y: 0, width: 420, height: 300)
-    guard runFormDialog(
-      title: "Properties — \(name)",
-      message: "Formats and calculations are declarative; no document scripts run.",
-      accessory: grid2) else { return }
+    guard
+      runFormDialog(
+        title: "Properties — \(name)",
+        message: "Formats and calculations are declarative; no document scripts run.",
+        accessory: grid2)
+    else { return }
 
     let flags = SetFormFieldFlagsCommand(
       fieldName: name, required: requiredBox.state == .on, readOnly: readOnlyBox.state == .on,
@@ -2102,10 +2208,12 @@ final class SPDFDocument: NSDocument {
     ])
     grid.column(at: 0).xPlacement = .trailing
     grid.frame = NSRect(x: 0, y: 0, width: 400, height: 76)
-    guard runFormDialog(
-      title: "Duplicate Field",
-      message: "A shared value adds a widget to the same field; an independent copy owns its value.",
-      accessory: grid),
+    guard
+      runFormDialog(
+        title: "Duplicate Field",
+        message:
+          "A shared value adds a widget to the same field; an independent copy owns its value.",
+        accessory: grid),
       let pageID = editSession.currentGraph.flatMap(currentPageID(in:))
     else { return }
     _ = applyFormAuthoring(
@@ -2129,9 +2237,11 @@ final class SPDFDocument: NSDocument {
     ])
     grid.column(at: 0).xPlacement = .trailing
     grid.frame = NSRect(x: 0, y: 0, width: 420, height: 52)
-    guard runFormDialog(
-      title: "Align Fields", message: "Comma-separated field names.",
-      accessory: grid) else { return }
+    guard
+      runFormDialog(
+        title: "Align Fields", message: "Comma-separated field names.",
+        accessory: grid)
+    else { return }
     let selected = namesField.stringValue
       .split(separator: ",")
       .map { $0.trimmingCharacters(in: .whitespaces) }
@@ -2154,9 +2264,11 @@ final class SPDFDocument: NSDocument {
     ])
     grid.column(at: 0).xPlacement = .trailing
     grid.frame = NSRect(x: 0, y: 0, width: 420, height: 52)
-    guard runFormDialog(
-      title: "Distribute Fields", message: "Even spacing between the first and last widget.",
-      accessory: grid) else { return }
+    guard
+      runFormDialog(
+        title: "Distribute Fields", message: "Even spacing between the first and last widget.",
+        accessory: grid)
+    else { return }
     let selected = namesField.stringValue
       .split(separator: ",")
       .map { $0.trimmingCharacters(in: .whitespaces) }
@@ -2174,10 +2286,12 @@ final class SPDFDocument: NSDocument {
     let grid = NSGridView(views: [[NSTextField(labelWithString: "Order:"), namesField]])
     grid.column(at: 0).xPlacement = .trailing
     grid.frame = NSRect(x: 0, y: 0, width: 460, height: 28)
-    guard runFormDialog(
-      title: "Field Tab Order",
-      message: "Comma-separated field names in the order readers should tab through them.",
-      accessory: grid) else { return }
+    guard
+      runFormDialog(
+        title: "Field Tab Order",
+        message: "Comma-separated field names in the order readers should tab through them.",
+        accessory: grid)
+    else { return }
     let order = namesField.stringValue
       .split(separator: ",")
       .map { $0.trimmingCharacters(in: .whitespaces) }
@@ -2553,7 +2667,8 @@ final class SPDFDocument: NSDocument {
     let metadata = facts.metadata
     if !metadata.isEmpty {
       inventoryLines.append(
-        "  Metadata: title \(metadata.title ?? "—"), author \(metadata.author ?? "—"), language \(metadata.language ?? "—")")
+        "  Metadata: title \(metadata.title ?? "—"), author \(metadata.author ?? "—"), language \(metadata.language ?? "—")"
+      )
     }
     if !facts.activeContent.summary.isEmpty {
       inventoryLines.append(
@@ -2563,11 +2678,13 @@ final class SPDFDocument: NSDocument {
       in: graph, pageIDs: editSession.pageIDs)
     if graphicalSignatures > 0 {
       inventoryLines.append(
-        "  Graphical signatures: \(graphicalSignatures) placed mark\(graphicalSignatures == 1 ? "" : "s") (visual only; not digital signatures)")
+        "  Graphical signatures: \(graphicalSignatures) placed mark\(graphicalSignatures == 1 ? "" : "s") (visual only; not digital signatures)"
+      )
     }
     if !facts.optionalContent.groups.isEmpty {
       inventoryLines.append(
-        "  Optional content: \(facts.optionalContent.groups.count) group\(facts.optionalContent.groups.count == 1 ? "" : "s")")
+        "  Optional content: \(facts.optionalContent.groups.count) group\(facts.optionalContent.groups.count == 1 ? "" : "s")"
+      )
     }
     let report = [
       inventoryLines.joined(separator: "\n"), "", audit.report(), "", archival.report(), "",
@@ -2655,8 +2772,9 @@ final class SPDFDocument: NSDocument {
     choice.addButton(withTitle: "Cancel")
     guard choice.runModal() == .alertFirstButtonReturn else { return }
     let target: ColorConversion.Target = popup.indexOfSelectedItem == 0 ? .gray : .rgb
-    guard let converted = try? ColorConversion.convert(
-      graph, pageIDs: editSession.pageIDs, to: target)
+    guard
+      let converted = try? ColorConversion.convert(
+        graph, pageIDs: editSession.pageIDs, to: target)
     else { return }
     guard converted.report.convertedImages > 0 else {
       let alert = NSAlert()
@@ -2667,8 +2785,9 @@ final class SPDFDocument: NSDocument {
       return
     }
     // Before/after previews of the first page that has an image.
-    let images = (try? PDFImageInventory.images(
-      in: graph, pageIDs: editSession.pageIDs)) ?? []
+    let images =
+      (try? PDFImageInventory.images(
+        in: graph, pageIDs: editSession.pageIDs)) ?? []
     let pageIndex = images.first?.pageIndex ?? 0
     let preview = NSStackView()
     preview.orientation = .horizontal
@@ -2682,7 +2801,8 @@ final class SPDFDocument: NSDocument {
       column.addArrangedSubview(title)
       if pageIndex < editSession.pageIDs.count,
         let data = try? PageImageExport.regionImageData(
-          pageID: editSession.pageIDs[pageIndex], in: graph, region: pageBox(of: editSession.pageIDs[pageIndex], in: graph),
+          pageID: editSession.pageIDs[pageIndex], in: graph,
+          region: pageBox(of: editSession.pageIDs[pageIndex], in: graph),
           options: PageImageExportOptions(format: .png, dpi: 72)),
         let image = NSImage(data: data)
       {
@@ -3115,22 +3235,18 @@ final class SPDFDocument: NSDocument {
     return (index, target)
   }
 
-  /// P12-012 text-edit slice: prompt for replacement text with native input
-  /// and commit a whole-run replacement.
+  /// Use the same on-page caret for the menu and pointer editing paths.
   func editSelectedText() {
-    guard let (pageIndex, target) = selectedTextTarget() else { return }
-    let alert = NSAlert()
-    alert.messageText = "Edit Text"
-    alert.informativeText =
-      "Replace this text run on page \(pageIndex + 1). Neighboring content stays unchanged, "
-      + "and the edit can be undone."
-    let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 320, height: 24))
-    field.stringValue = target.text
-    alert.accessoryView = field
-    alert.addButton(withTitle: "Replace")
-    alert.addButton(withTitle: "Cancel")
-    guard alert.runModal() == .alertFirstButtonReturn else { return }
-    replaceText(pageIndex: pageIndex, runIndex: target.runIndex, with: field.stringValue)
+    guard let viewer, let selection = viewer.view.currentSelection,
+      let page = selection.pages.first, let document = viewer.view.document
+    else { return }
+    let bounds = selection.bounds(for: page)
+    guard
+      let target = textRunTarget(
+        pageIndex: document.index(for: page),
+        pagePoint: [bounds.midX, bounds.midY]), viewer.activateTool(.textEdit)
+    else { return }
+    viewer.textBlockEditStarter?(target)
   }
 
   // MARK: - Page import (P17-021)
@@ -3173,14 +3289,20 @@ final class SPDFDocument: NSDocument {
     field.placeholderString = "for example 1-3,5"
     let grid = NSGridView(views: [
       [NSTextField(labelWithString: "Pages:"), field],
-      [NSTextField(labelWithString: "Document:"), NSTextField(labelWithString: url.lastPathComponent)],
+      [
+        NSTextField(labelWithString: "Document:"),
+        NSTextField(labelWithString: url.lastPathComponent),
+      ],
     ])
     grid.column(at: 0).xPlacement = .trailing
     grid.frame = NSRect(x: 0, y: 0, width: 420, height: 56)
-    guard runFormDialog(
-      title: "Import Pages",
-      message: "\(parsed.pageIDs.count) page(s) available. The pages are appended and resources are remapped.",
-      accessory: grid) else { return }
+    guard
+      runFormDialog(
+        title: "Import Pages",
+        message:
+          "\(parsed.pageIDs.count) page(s) available. The pages are appended and resources are remapped.",
+        accessory: grid)
+    else { return }
     let indices = PageRange.parse(field.stringValue, pageCount: parsed.pageIDs.count)
     guard !indices.isEmpty else {
       presentError(PDFError(.malformed, "The page range is empty; use forms such as 1-3,5"))
@@ -3191,16 +3313,60 @@ final class SPDFDocument: NSDocument {
   }
 
   @discardableResult
-  func addPageText(pageIndex: Int, rect: [Double], text: String) -> Bool {
+  func addPageText(pageIndex: Int, rect: [Double], text: String, style: PageTextStyle = .init())
+    -> Bool
+  {
     guard editSession.canEdit, pageIndex >= 0, pageIndex < editSession.pageIDs.count else {
       return false
     }
     do {
-      try editSession.apply(PDFTransaction([
-        AddTextObjectCommand(pageID: editSession.pageIDs[pageIndex], rect: rect, text: text)
-      ]))
+      try editSession.apply(
+        PDFTransaction([
+          AddTextObjectCommand(
+            pageID: editSession.pageIDs[pageIndex], rect: rect, text: text,
+            style: AddedTextStyle(size: style.fontSize, color: style.color))
+        ]))
       noteUserEdit()
       refreshViewer(preservingPage: pageIndex + 1)
+      return true
+    } catch {
+      presentError(error)
+      return false
+    }
+  }
+
+  @discardableResult
+  func commitTextBlock(
+    _ target: PageTextTarget, text: String, style: PageTextStyle,
+    dx: Double, dy: Double
+  ) -> Bool {
+    guard editSession.canEdit, editSession.pageIDs.indices.contains(target.pageIndex),
+      !text.contains("\n"), !text.contains("\r")
+    else { return false }
+    let page = editSession.pageIDs[target.pageIndex]
+    var commands: [any PDFEditCommand] = []
+    if text != target.text, let first = target.runIndices.first, let last = target.runIndices.last {
+      commands.append(
+        ReplaceTextSpanCommand(pageID: page, runRange: first..<(last + 1), replacement: text))
+    }
+    if let original = target.style,
+      original.fontSize != style.fontSize || original.fillColor != style.color
+    {
+      commands.append(
+        ChangeTextStyleCommand(
+          pageID: page, runIndex: target.runIndex,
+          style: TextStyleChange(
+            fontSize: original.fontSize == style.fontSize ? nil : style.fontSize,
+            fillColor: original.fillColor == style.color ? nil : style.color)))
+    }
+    if dx != 0 || dy != 0 {
+      commands.append(MoveTextCommand(pageID: page, runIndex: target.runIndex, dx: dx, dy: dy))
+    }
+    guard !commands.isEmpty else { return true }
+    do {
+      try editSession.apply(PDFTransaction(commands))
+      noteUserEdit()
+      refreshViewer(preservingPage: target.pageIndex + 1)
       return true
     } catch {
       presentError(error)
@@ -3419,7 +3585,8 @@ final class SPDFDocument: NSDocument {
     guard pageIndex >= 0, pageIndex < editSession.pageIDs.count,
       let graph = editSession.currentGraph
     else { return nil }
-    if let placements = try? ImageInventory.placements(in: graph, pageID: editSession.pageIDs[pageIndex]),
+    if let placements = try? ImageInventory.placements(
+      in: graph, pageID: editSession.pageIDs[pageIndex]),
       let placementIndex = try? ImageInventory.placementIndex(
         at: pagePoint, in: graph, pageID: editSession.pageIDs[pageIndex]),
       placementIndex < placements.count, placements[placementIndex].isDirectlyEditable
@@ -3508,7 +3675,8 @@ final class SPDFDocument: NSDocument {
       presentError(PDFError(.unsupported, "This image could not be imported"))
       return false
     }
-    let command: any PDFEditCommand = shared
+    let command: any PDFEditCommand =
+      shared
       ? ReplaceSharedImageCommand(
         pageID: pageID, placementIndex: placementIndex, width: raster.width,
         height: raster.height, rgb8: raster.rgb8)
@@ -3683,7 +3851,10 @@ final class SPDFDocument: NSDocument {
     let bytes = try PDFWriter.write(snapshot)
     let job = try beginDocumentJob(title: "Recognizing text", total: pageIndexes.count)
     isRunningOCR = true
-    defer { isRunningOCR = false; jobCenter.finish(id: job) }
+    defer {
+      isRunningOCR = false
+      jobCenter.finish(id: job)
+    }
     let relay = JobProgressRelay(center: jobCenter)
     let progress: @Sendable (Int, Int) -> Void = { [relay, job] done, _ in
       relay.update(id: job, completed: done)
@@ -3694,7 +3865,8 @@ final class SPDFDocument: NSDocument {
     try Task.checkCancellation()
     guard !isClosed, editSession.documentRevision == revision else {
       throw PDFError(
-        .unsupported, "The document changed during OCR. Run recognition again on the current pages.")
+        .unsupported, "The document changed during OCR. Run recognition again on the current pages."
+      )
     }
     let commands = results.compactMap { result -> AddSearchableTextLayerCommand? in
       guard !result.lines.isEmpty, pageIDs.indices.contains(result.pageIndex) else { return nil }
@@ -3861,7 +4033,8 @@ final class SPDFDocument: NSDocument {
         let directory = Self.fontsInstallDirectoryOverride
         let urls = try GoogleFontsInstaller.install(package, to: directory)
         refreshFonts()
-        fontsModel.message = "Installed \(urls.count) file\(urls.count == 1 ? "" : "s") for \(match.name)."
+        fontsModel.message =
+          "Installed \(urls.count) file\(urls.count == 1 ? "" : "s") for \(match.name)."
       } catch is CancellationError {
         fontsModel.message = nil
       } catch {
@@ -4063,9 +4236,10 @@ final class SPDFDocument: NSDocument {
         formsModel.orphanedWidgetCount = 0
         return
       }
-      formsModel.orphanedWidgetCount = FormInventory.orphanedWidgets(
-        in: graph, pageIDs: editSession.pageIDs
-      ).count
+      formsModel.orphanedWidgetCount =
+        FormInventory.orphanedWidgets(
+          in: graph, pageIDs: editSession.pageIDs
+        ).count
     }
   }
 
@@ -4079,9 +4253,12 @@ final class SPDFDocument: NSDocument {
   }
 
   private func refreshViewer(preservingPage page: Int) {
-    guard let data = try? WorkspacePerformance.profile("serialize-for-viewer", operation: {
-      try editSession.bytesForSave()
-    }),
+    guard
+      let data = try? WorkspacePerformance.profile(
+        "serialize-for-viewer",
+        operation: {
+          try editSession.bytesForSave()
+        }),
       let source = try? PDFSource(data: data)
     else { return }
     let tool = viewer?.activeTool ?? .select
@@ -4112,7 +4289,9 @@ final class SPDFDocument: NSDocument {
   /// Flush all visible input before NSDocument evaluates whether to save.
   /// A failed commit leaves the editor and dirty state available for retry.
   func finishPendingEdits() -> Bool {
-    if viewer?.hasPendingInkGesture?() == true || viewer?.hasPendingGraphicGesture?() == true {
+    if viewer?.hasPendingInkGesture?() == true || viewer?.hasPendingGraphicGesture?() == true
+      || viewer?.hasPendingTextGesture?() == true
+    {
       let alert = NSAlert()
       alert.messageText = "Finish the current edit first"
       alert.informativeText = "Release the drag or press Escape, then try quitting again."
@@ -4124,7 +4303,9 @@ final class SPDFDocument: NSDocument {
     for (name, text) in formsModel.pendingText {
       if editSession.formFields().first(where: { $0.name == name })?.stringValue == text {
         formsModel.pendingText[name] = nil
-      } else if !fillFormText(fieldName: name, text: text) { return false }
+      } else if !fillFormText(fieldName: name, text: text) {
+        return false
+      }
     }
     for controller in windowControllers {
       if let window = controller.window, !window.makeFirstResponder(nil) { return false }
@@ -4145,10 +4326,12 @@ final class SPDFDocument: NSDocument {
         // AppKit's documented canClose callback has three arguments. perform
         // supports only two; invoke its exact Objective-C ABI, including the
         // caller's context, to deliver the reviewed decision exactly once.
-        typealias Reply = @convention(c) (
-          AnyObject, Selector, NSDocument, Bool, UnsafeMutableRawPointer?
-        ) -> Void
-        unsafeBitCast(implementation, to: Reply.self)(receiver, selector, self, allowed, contextInfo)
+        typealias Reply =
+          @convention(c) (
+            AnyObject, Selector, NSDocument, Bool, UnsafeMutableRawPointer?
+          ) -> Void
+        unsafeBitCast(implementation, to: Reply.self)(
+          receiver, selector, self, allowed, contextInfo)
       }
     }
   }

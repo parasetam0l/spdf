@@ -5,7 +5,7 @@ Rendering a PDF does not imply that every element can be edited. sPDF preserves 
 | Area | Supported behavior | Limits |
 | --- | --- | --- |
 | Reading | Native rendering, navigation, outlines, search, and selection | Owned extraction and selection do not cover every font or nested content stream |
-| Existing text | Actual content edits for supported fonts and runs; paragraph reflow within supported regions | Arbitrary document reflow, composite-font geometry, and vertical text layout are not supported |
+| Existing text | Direct page caret, block dragging, size/color changes and actual content edits for supported simple-font horizontal text; paragraph reflow within supported regions | Direct editing refuses rotated pages, skewed/rotated text and special character spacing. Arbitrary document reflow, composite-font geometry and vertical layout are not supported |
 | Images and graphics | Placement edits, replacement/import, supported masks and transformations, added text and shapes | Uninspectable paint, unsupported codecs, and ambiguous shared resources can restrict an operation |
 | Pages | Rotation, reorder, insertion, import, extraction, and deletion with reference checks | Complex destinations, forms, tags, and signed input may require refusal or explicit conflict handling |
 | Review | Markup, notes, free text, shapes, ink, stamps, replies, and review state | Unsupported actions remain inert; drawn signatures are visible marks, not cryptographic signatures |

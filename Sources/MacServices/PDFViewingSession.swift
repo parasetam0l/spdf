@@ -36,16 +36,32 @@ public struct PageTextTarget: Sendable, Equatable {
   /// P15-024: the run's input style for the native editor; nil for callers
   /// that predate style resolution (the overlay then uses system defaults).
   public let style: TextInputStyle?
+  public let runIndices: [Int]
 
   public init(
     pageIndex: Int, runIndex: Int, rect: [Double], text: String,
-    style: TextInputStyle? = nil
+    style: TextInputStyle? = nil, runIndices: [Int]? = nil
   ) {
     self.pageIndex = pageIndex
     self.runIndex = runIndex
     self.rect = rect
     self.text = text
     self.style = style
+    self.runIndices = runIndices ?? [runIndex]
+  }
+}
+
+/// Whole-block formatting; the existing font is retained for imported text.
+public struct PageTextStyle: Sendable, Equatable {
+  public var fontFamily: String
+  public var fontSize: Double
+  public var color: [Double]
+
+  public init(fontFamily: String = "Helvetica", fontSize: Double = 12, color: [Double] = [0, 0, 0])
+  {
+    self.fontFamily = fontFamily
+    self.fontSize = fontSize
+    self.color = color
   }
 }
 
@@ -211,6 +227,16 @@ public final class PDFViewingSession: NSObject, ObservableObject, PDFViewDelegat
   /// edit before the active tool changes. Returning false vetoes the switch
   /// and keeps the current tool.
   public var pendingEditFinisher: (() -> Bool)?
+  @Published public var pageTextStyle = PageTextStyle()
+  @Published public var isEditingPageText = false
+  public var pageTextStyleApplier: ((PageTextStyle) -> Void)?
+  public var hasPendingTextGesture: (() -> Bool)?
+  public var onTextBlockPreview: ((PageTextTarget) -> Data?)?
+  /// A single atomic content transaction: replacement, formatting and movement.
+  public var onTextBlockCommit: ((PageTextTarget, String, PageTextStyle, Double, Double) -> Bool)?
+  public var onNewTextBlockCommit: ((Int, [Double], String, PageTextStyle) -> Bool)?
+  public var onPendingPageTextChange: ((Bool) -> Void)?
+  public var textBlockEditStarter: ((PageTextTarget) -> Void)?
   /// A pointer transaction cannot be abandoned by an update mid-drag.
   public var hasPendingInkGesture: (() -> Bool)?
   public var hasPendingGraphicGesture: (() -> Bool)?
@@ -274,9 +300,10 @@ public final class PDFViewingSession: NSObject, ObservableObject, PDFViewDelegat
   /// Moves and resizes arrive batched so a multi-selection drag commits as
   /// one transaction with one undo step.
   public var onMoveGraphics: (([(streamID: PDFObjectID, dx: Double, dy: Double)]) -> Void)?
-  public var onResizeGraphics: (
-    ([(streamID: PDFObjectID, dx: Double, dy: Double, scaleX: Double, scaleY: Double)]) -> Void
-  )?
+  public var onResizeGraphics:
+    (
+      ([(streamID: PDFObjectID, dx: Double, dy: Double, scaleX: Double, scaleY: Double)]) -> Void
+    )?
   public var onRotateGraphic: ((PDFObjectID) -> Void)?
   private var searchMatches: [PDFSelection] = []
   private var observations: Set<AnyCancellable> = []
@@ -371,6 +398,9 @@ public final class PDFViewingSession: NSObject, ObservableObject, PDFViewDelegat
 
   /// P12-022: close the viewed document without destroying the session.
   public func closeDocument() {
+    onPendingPageTextChange?(false)
+    isEditingPageText = false
+    pageTextStyleApplier = nil
     selectedObjectSummary = nil
     selectionDetails = nil
     selectedGraphics = []
@@ -685,8 +715,11 @@ public final class PDFViewingSession: NSObject, ObservableObject, PDFViewDelegat
     selectionDetails = SelectionDetails(
       pageNumber: index, text: short,
       bounds: box.isNull
-        ? nil : [Double(box.origin.x), Double(box.origin.y),
-                 Double(box.maxX), Double(box.maxY)])
+        ? nil
+        : [
+          Double(box.origin.x), Double(box.origin.y),
+          Double(box.maxX), Double(box.maxY),
+        ])
   }
 
   /// P12-017: replace the graphics selection and publish its summary for

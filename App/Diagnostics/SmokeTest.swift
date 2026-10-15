@@ -146,9 +146,10 @@
 
         // P43-002/P43-004: the font inspector surfaces installed, embedded,
         // and missing fonts with concrete fallbacks and paid-font warnings.
-        guard taggedDocument.fontsModel.entries.contains(where: {
-          $0.font.familyName == "F1" && !$0.font.isEmbedded && $0.needsProvisioning
-        }),
+        guard
+          taggedDocument.fontsModel.entries.contains(where: {
+            $0.font.familyName == "F1" && !$0.font.isEmbedded && $0.needsProvisioning
+          }),
           taggedDocument.fontsModel.entries.contains(where: {
             $0.warning?.contains("neither embedded nor installed") == true
           }),
@@ -164,7 +165,8 @@
         try await Task.sleep(for: .milliseconds(250))
         taggedContent.layoutSubtreeIfNeeded()
         taggedContent.displayIfNeeded()
-        if let fontsBitmap = taggedContent.bitmapImageRepForCachingDisplay(in: taggedContent.bounds) {
+        if let fontsBitmap = taggedContent.bitmapImageRepForCachingDisplay(in: taggedContent.bounds)
+        {
           taggedContent.cacheDisplay(in: taggedContent.bounds, to: fontsBitmap)
           if let png = fontsBitmap.representation(using: .png, properties: [:]) {
             try png.write(to: output.appendingPathComponent("fonts.png"), options: .atomic)
@@ -185,8 +187,9 @@
             == .number(decimals: 1, prefix: nil, suffix: nil)
         else { throw PDFError(.malformed, "Field properties did not apply through the document") }
         taggedDocument.fillFormText(fieldName: "AuthoredNote", text: "42")
-        guard taggedDocument.formsModel.fields.first(where: { $0.name == "AuthoredNote" })?
-          .stringValue == "42.0",
+        guard
+          taggedDocument.formsModel.fields.first(where: { $0.name == "AuthoredNote" })?
+            .stringValue == "42.0",
           taggedDocument.renameAuthoredFormField(from: "AuthoredNote", to: "Notes.Body"),
           taggedDocument.formFieldNames().contains("Notes.Body"),
           // P25-010: duplication with an independent value.
@@ -269,8 +272,9 @@
           (try? PDFParser.parse(protectedSave)) == nil
         else { throw PDFError(.malformed, "The protected save did not stay encrypted") }
         let protectedReparsed = try PDFParser.unlock(protectedSave, password: "abc")
-        guard case .dictionary(let protectedPage)? =
-          protectedReparsed.parsed.graph.objects[protectedReparsed.parsed.pageIDs[0]],
+        guard
+          case .dictionary(let protectedPage)? =
+            protectedReparsed.parsed.graph.objects[protectedReparsed.parsed.pageIDs[0]],
           case .integer(let protectedRotation)? = protectedPage[PDFName("Rotate")],
           protectedRotation == 90
         else { throw PDFError(.malformed, "The protected save lost the edit") }
@@ -308,7 +312,8 @@
         guard viewer.scale > 0.25, viewer.pageNumber == 1 else {
           throw PDFError(
             .malformed,
-            "Fit Page did not produce a readable first-page layout (scale \(viewer.scale), page \(viewer.pageNumber), bounds \(viewer.view.bounds))")
+            "Fit Page did not produce a readable first-page layout (scale \(viewer.scale), page \(viewer.pageNumber), bounds \(viewer.view.bounds))"
+          )
         }
         // P12-016: view/page coordinate round-trips hold no drift across
         // zoom (trackpad gestures are PDFKit-owned; the app asserts the
@@ -368,9 +373,11 @@
               to: output.appendingPathComponent("structure-suggestions.png"), options: .atomic)
           }
         }
-        guard let headingSuggestion = review.suggestions.first(where: {
-          if case .heading = $0.kind { return true } else { return false }
-        }) else { throw PDFError(.malformed, "No heading suggestion to review") }
+        guard
+          let headingSuggestion = review.suggestions.first(where: {
+            if case .heading = $0.kind { return true } else { return false }
+          })
+        else { throw PDFError(.malformed, "No heading suggestion to review") }
         first.structureModel.review?.accept(headingSuggestion.id)
         first.applyAcceptedStructureSuggestions()
         guard first.structureModel.isTagged,
@@ -422,7 +429,8 @@
         else {
           throw PDFError(
             .malformed,
-            "Accessibility audit failed (windows \(accessibility.windowsAudited), interactive \(accessibility.interactiveCount), unlabeled \(accessibility.unlabeled), missing \(requiredLabels.subtracting(accessibility.labels).sorted()))")
+            "Accessibility audit failed (windows \(accessibility.windowsAudited), interactive \(accessibility.interactiveCount), unlabeled \(accessibility.unlabeled), missing \(requiredLabels.subtracting(accessibility.labels).sorted()))"
+          )
         }
 
         let keyboard = KeyboardAudit.verify([
@@ -453,7 +461,8 @@
         guard keyboard.missing.isEmpty, keyboard.shortcutCount >= 30 else {
           throw PDFError(
             .malformed,
-            "Keyboard audit failed (missing \(keyboard.missing), \(keyboard.shortcutCount) shortcuts)")
+            "Keyboard audit failed (missing \(keyboard.missing), \(keyboard.shortcutCount) shortcuts)"
+          )
         }
         NSApp.activate(ignoringOtherApps: true)
         firstWindow.makeKeyAndOrderFront(nil)
@@ -488,7 +497,8 @@
             let screen = NSScreen.screens.first
           else { throw PDFError(.malformed, "Pointer target \(label) has no AX position") }
           // Aim at the content center: it always lies inside the button.
-          let center = NSPoint(x: position.x + reported.width / 2, y: position.y + reported.height / 2)
+          let center = NSPoint(
+            x: position.x + reported.width / 2, y: position.y + reported.height / 2)
           let flipped = NSPoint(x: center.x, y: screen.frame.height - center.y)
           let windowPoint = firstWindow.convertPoint(fromScreen: flipped)
           // AppKit hit-testing does not descend into SwiftUI containers,
@@ -547,12 +557,13 @@
         // input. Navigation, annotation, and saving use menu key equivalents.
         func postKey(_ characters: String, keyCode: UInt16, to window: NSWindow) {
           for type in [NSEvent.EventType.keyDown, .keyUp] {
-            guard let event = NSEvent.keyEvent(
-              with: type, location: .zero, modifierFlags: [],
-              timestamp: ProcessInfo.processInfo.systemUptime,
-              windowNumber: window.windowNumber, context: nil,
-              characters: characters, charactersIgnoringModifiers: characters,
-              isARepeat: false, keyCode: keyCode)
+            guard
+              let event = NSEvent.keyEvent(
+                with: type, location: .zero, modifierFlags: [],
+                timestamp: ProcessInfo.processInfo.systemUptime,
+                windowNumber: window.windowNumber, context: nil,
+                characters: characters, charactersIgnoringModifiers: characters,
+                isARepeat: false, keyCode: keyCode)
             else { continue }
             window.sendEvent(event)
           }
@@ -581,8 +592,9 @@
           throw PDFError(.malformed, "Find did not open over the keyboard")
         }
         try await Task.sleep(for: .milliseconds(300))
-        guard keyboardWindow.firstResponder is NSTextField
-          || keyboardWindow.firstResponder is NSTextView
+        guard
+          keyboardWindow.firstResponder is NSTextField
+            || keyboardWindow.firstResponder is NSTextView
         else {
           throw PDFError(
             .malformed, "The find field did not take focus (no keyboard entry point)")
@@ -633,10 +645,11 @@
         guard let savedDocument else {
           throw PDFError(.malformed, "The saved highlight did not reopen within three seconds")
         }
-        guard savedDocument.page(at: 1)?.annotations.filter({
-          // PDFAnnotation.type omits the subtype's leading slash.
-          $0.type == "Highlight"
-        }).count == 1
+        guard
+          savedDocument.page(at: 1)?.annotations.filter({
+            // PDFAnnotation.type omits the subtype's leading slash.
+            $0.type == "Highlight"
+          }).count == 1
         else { throw PDFError(.malformed, "The saved copy lacks the keyboard-made highlight") }
         checkpoint("closing keyboard workflow document")
         keyboardDocument.close()
@@ -645,9 +658,10 @@
         let documentsBefore = controller.documents.count
         guard KeyboardAudit.invoke("Duplicate"),
           controller.documents.count == documentsBefore + 1,
-          let duplicate = (controller.documents.first {
-            $0 !== first && ($0 as? SPDFDocument)?.fileURL == nil
-          } as? SPDFDocument),
+          let duplicate =
+            (controller.documents.first {
+              $0 !== first && ($0 as? SPDFDocument)?.fileURL == nil
+            } as? SPDFDocument),
           duplicate.viewer?.pageCount == viewer.pageCount,
           first.fileURL != nil
         else { throw PDFError(.malformed, "Duplicate did not copy the document cleanly") }
@@ -671,7 +685,8 @@
         if let rulersBitmap = content.bitmapImageRepForCachingDisplay(in: content.bounds) {
           content.cacheDisplay(in: content.bounds, to: rulersBitmap)
           if let png = rulersBitmap.representation(using: .png, properties: [:]) {
-            try png.write(to: output.appendingPathComponent("workspace-rulers.png"), options: .atomic)
+            try png.write(
+              to: output.appendingPathComponent("workspace-rulers.png"), options: .atomic)
           }
         }
         // Drag text selection passes through the overlay stack in the
@@ -684,16 +699,17 @@
           viewer.view.convert(viewPoint, to: nil)
         }
         func postMouse(_ type: NSEvent.EventType, at point: NSPoint) {
-          guard let event = NSEvent.mouseEvent(
-            with: type, location: point, modifierFlags: [],
-            timestamp: ProcessInfo.processInfo.systemUptime,
-            windowNumber: firstWindow.windowNumber, context: nil,
-            eventNumber: 0, clickCount: 1, pressure: type == .leftMouseUp ? 0 : 1)
+          guard
+            let event = NSEvent.mouseEvent(
+              with: type, location: point, modifierFlags: [],
+              timestamp: ProcessInfo.processInfo.systemUptime,
+              windowNumber: firstWindow.windowNumber, context: nil,
+              eventNumber: 0, clickCount: 1, pressure: type == .leftMouseUp ? 0 : 1)
           else { return }
           NSApp.postEvent(event, atStart: false)
         }
         func hasOverlayEditor(in root: NSView) -> Bool {
-          if let field = root as? NSTextField,
+          if let field = root as? InlinePageTextView,
             field.identifier?.rawValue == "spdf-text-editor"
           {
             return true
@@ -764,14 +780,18 @@
           exportedText.components(separatedBy: "\u{0C}").count == 3,
           exportedText.range(of: "page 1")!.lowerBound
             < exportedText.range(of: "page 3")!.lowerBound as String.Index
-        else { throw PDFError(.malformed, "Text export did not contain the expected reading order") }
+        else {
+          throw PDFError(.malformed, "Text export did not contain the expected reading order")
+        }
         let imageDirectory = output.appendingPathComponent("exported-images")
         try? FileManager.default.removeItem(at: imageDirectory)
         let exportedImages = try await first.exportPageImages(
           to: imageDirectory, baseName: "page",
           options: PageImageExportOptions(format: .png, dpi: 72))
         guard exportedImages.count == 3,
-          exportedImages.map { $0.url.lastPathComponent } == ["page-0001.png", "page-0002.png", "page-0003.png"],
+          exportedImages.map { $0.url.lastPathComponent } == [
+            "page-0001.png", "page-0002.png", "page-0003.png",
+          ],
           exportedImages.allSatisfy { FileManager.default.fileExists(atPath: $0.url.path) },
           exportedImages[0].pixelWidth == 612, exportedImages[0].pixelHeight == 792
         else { throw PDFError(.malformed, "Page image export did not produce the expected files") }
@@ -791,7 +811,8 @@
         try first.exportHTML(
           to: appearanceHTMLURL,
           options: PDFHTMLExportOptions(mode: .appearance, imagePolicy: .package, imageDPI: 72))
-        let appearanceHTML = String(decoding: try Data(contentsOf: appearanceHTMLURL), as: UTF8.self)
+        let appearanceHTML = String(
+          decoding: try Data(contentsOf: appearanceHTMLURL), as: UTF8.self)
         guard appearanceHTML.contains("images/page-0001.png"),
           appearanceHTML.contains("images/page-0003.png"),
           FileManager.default.fileExists(
@@ -818,7 +839,8 @@
         guard attachmentURLs.count == 2,
           attachmentURLs.contains(where: { $0.lastPathComponent == "unsafe name.txt" }),
           !attachmentURLs.contains(where: { $0.path.contains("..") }),
-          try String(contentsOf: attachmentDirectory.appendingPathComponent("notes.txt"), encoding: .utf8)
+          try String(
+            contentsOf: attachmentDirectory.appendingPathComponent("notes.txt"), encoding: .utf8)
             == "Attachment payload one.\n"
         else { throw PDFError(.malformed, "Attachment extraction did not preserve bytes safely") }
 
@@ -828,7 +850,8 @@
         try first.exportPrintPDF(to: printURL)
         guard let printedDocument = PDFDocument(data: try Data(contentsOf: printURL)),
           printedDocument.pageCount == 3,
-          printedDocument.page(at: 0)?.bounds(for: .mediaBox).size == CGSize(width: 792, height: 842),
+          printedDocument.page(at: 0)?.bounds(for: .mediaBox).size
+            == CGSize(width: 792, height: 842),
           printedDocument.string?.contains("sPDF Editor fixture - page 1") == true
         else { throw PDFError(.malformed, "The print PDF derivative did not match the document") }
 
@@ -859,7 +882,8 @@
             pageID: first.editSession.pageIDs[0], candidate: flowing,
             replacement: "Reflowed smoke paragraph text that wraps across the box.",
             in: reflowGraph,
-            options: ParagraphReflowOptions(allowLowConfidence: true)).plan.sourceMap.isEmpty),
+            options: ParagraphReflowOptions(allowLowConfidence: true)
+          ).plan.sourceMap.isEmpty),
           first.reflowParagraph(
             pageID: first.editSession.pageIDs[0], candidate: flowing,
             replacement: "Reflowed smoke paragraph text that wraps across the box.",
@@ -956,8 +980,9 @@
         let exportedTables = try first.exportTables(
           to: tableXLSXURL, format: .xlsx, tables: reviewedTables)
         _ = try first.exportTables(to: tableCSVURL, format: .csv, tables: reviewedTables)
-        let detectedTables = (try? TableExtraction.tables(
-          pageIDs: first.editSession.pageIDs, in: firstGraph))?.count ?? 0
+        let detectedTables =
+          (try? TableExtraction.tables(
+            pageIDs: first.editSession.pageIDs, in: firstGraph))?.count ?? 0
         guard exportedTables == 1,
           SmokeTest.runToolOutput("/usr/bin/unzip", ["-t", tableXLSXURL.path]) != nil,
           let sheetXML = SmokeTest.runToolOutput(
@@ -1153,10 +1178,12 @@
         else { throw PDFError(.malformed, "No text selection for the annotation highlight") }
         let selectionBounds = selection.bounds(for: annotationPage)
         let annotationPageID = session.pageIDs[0]
-        let annotationQuads = AddHighlightCommand.quads(forClusterBounds: [[
-          selectionBounds.minX, selectionBounds.minY, selectionBounds.maxX,
-          selectionBounds.maxY,
-        ]])
+        let annotationQuads = AddHighlightCommand.quads(forClusterBounds: [
+          [
+            selectionBounds.minX, selectionBounds.minY, selectionBounds.maxX,
+            selectionBounds.maxY,
+          ]
+        ])
         try session.apply(
           PDFTransaction([
             AddHighlightCommand(
@@ -1296,7 +1323,8 @@
         let editedAnnotations = try AnnotationInventory.annotations(
           in: editedGraph, pageID: annotationPageID)
         guard editedAnnotations.count == 6,
-          let movedHighlight = editedAnnotations.first(where: { $0.subtype == PDFName("Highlight") }),
+          let movedHighlight = editedAnnotations.first(where: { $0.subtype == PDFName("Highlight") }
+          ),
           let movedRect = movedHighlight.rect,
           abs(movedRect[0] - (highlightRect[0] + 12)) < 1e-9,
           abs(movedRect[1] - (highlightRect[1] + 8)) < 1e-9,
@@ -1322,7 +1350,9 @@
         guard first.undoEdit(), first.undoEdit(), first.undoEdit(), first.undoEdit(),
           first.undoEdit(), first.undoEdit(),
           try first.data(ofType: "com.adobe.pdf") == annotationBaseline
-        else { throw PDFError(.malformed, "Annotation editing undo did not restore the baseline bytes") }
+        else {
+          throw PDFError(.malformed, "Annotation editing undo did not restore the baseline bytes")
+        }
         guard session.comments().isEmpty else {
           throw PDFError(.malformed, "Annotation undo did not clear the comment list")
         }
@@ -1425,6 +1455,12 @@
           try first.data(ofType: "com.adobe.pdf") == annotationBaseline
         else { throw PDFError(.malformed, "Cancelled ink preview changed the document") }
 
+        // The earlier rotation round-trip intentionally leaves page 1 at 90°.
+        // Direct text editing refuses rotated pages; exercise it on the supported
+        // unrotated page, then undo back to the exact earlier baseline.
+        viewer.go(to: 1)
+        first.rotateCurrentPage(byDegrees: -90)
+        let directTextBaseline = try first.data(ofType: "com.adobe.pdf")
         // Text edit through selection mapping and the document path.
         if let textPage = viewer.view.document?.page(at: 0),
           let selection = textPage.selection(for: CGRect(x: 42, y: 705, width: 200, height: 30))
@@ -1449,7 +1485,8 @@
           guard let liveSelection = viewer.view.currentSelection,
             liveSelection.string?.contains("Edited") == true
           else { throw PDFError(.malformed, "Selection identity did not survive the edit") }
-          guard first.undoEdit(), try first.data(ofType: "com.adobe.pdf") == annotationBaseline else {
+          guard first.undoEdit(), try first.data(ofType: "com.adobe.pdf") == directTextBaseline
+          else {
             throw PDFError(.malformed, "Text edit undo did not restore the baseline bytes")
           }
           viewer.view.setCurrentSelection(nil, animate: false)
@@ -1494,8 +1531,8 @@
           }
         }
         try await Task.sleep(for: .milliseconds(200))
-        func findTextEditor(in view: NSView) -> NSTextField? {
-          if let field = view as? NSTextField,
+        func findTextEditor(in view: NSView) -> InlinePageTextView? {
+          if let field = view as? InlinePageTextView,
             field.identifier?.rawValue == "spdf-text-editor"
           {
             return field
@@ -1508,21 +1545,26 @@
         guard let inPlaceEditor = findTextEditor(in: content) else {
           throw PDFError(.malformed, "In-place text editor did not appear")
         }
-        inPlaceEditor.stringValue = "Inline edit"
-        inPlaceEditor.sendAction(inPlaceEditor.action, to: inPlaceEditor.target)
+        inPlaceEditor.string = "Inline edit"
+        guard viewer.pendingEditFinisher?() == true else {
+          throw PDFError(.malformed, "Direct page text could not be committed")
+        }
         let inPlaceGraph = try PDFParser.parse(try first.data(ofType: "com.adobe.pdf")).graph
         guard case .stream(let inPlaceStream)? = inPlaceGraph.objects[PDFObjectID(5)],
           let inPlaceText = try? String(decoding: PDFFilters.decoded(inPlaceStream), as: UTF8.self)
         else { throw PDFError(.malformed, "In-place text edit stream is missing") }
-        guard inPlaceText.contains("(Inline edit)") || inPlaceText.contains("<0049006E006C0069006E006500200065006400690074>") else {
+        guard
+          inPlaceText.contains("(Inline edit)")
+            || inPlaceText.contains("<0049006E006C0069006E006500200065006400690074>")
+        else {
           throw PDFError(.malformed, "In-place text edit did not rewrite the operand")
         }
-        guard first.undoEdit(), try first.data(ofType: "com.adobe.pdf") == annotationBaseline else {
+        guard first.undoEdit(), try first.data(ofType: "com.adobe.pdf") == directTextBaseline else {
           throw PDFError(.malformed, "In-place text edit undo did not restore the baseline bytes")
         }
         // P17-010/P17-011: Escape cancels the in-place editor without
         // committing or dirtying the document, while Return commits (proven
-        // above through the field action). Re-open the editor over the same
+        // above through the canvas commit). Re-open the editor over the same
         // run and send a real Escape key event.
         let editorDirtyBefore = first.isDocumentEdited
         if let textPage = viewer.view.document?.page(at: 0) {
@@ -1557,7 +1599,7 @@
         guard let escapeEditor = findTextEditor(in: content) else {
           throw PDFError(.malformed, "In-place editor did not reopen for the cancel test")
         }
-        escapeEditor.stringValue = "Cancelled edit"
+        escapeEditor.string = "Cancelled edit"
         if let escape = NSEvent.keyEvent(
           with: .keyDown, location: .zero, modifierFlags: [],
           timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
@@ -1570,11 +1612,15 @@
         guard findTextEditor(in: content) == nil else {
           throw PDFError(.malformed, "Escape did not close the in-place editor")
         }
-        guard try first.data(ofType: "com.adobe.pdf") == annotationBaseline,
+        guard try first.data(ofType: "com.adobe.pdf") == directTextBaseline,
           first.isDocumentEdited == editorDirtyBefore
         else { throw PDFError(.malformed, "Escape committed the in-place edit") }
         guard KeyboardAudit.invoke("Select Tool"), viewer.activeTool == .select else {
           throw PDFError(.malformed, "Could not restore the select tool after editing")
+        }
+
+        guard first.undoEdit(), try first.data(ofType: "com.adobe.pdf") == annotationBaseline else {
+          throw PDFError(.malformed, "Direct text testing did not restore the rotated baseline")
         }
 
         // P17-021: compound page import — one page from the fixture file
@@ -1596,18 +1642,19 @@
         // P16-014: the selection's rich-text copy comes from the owned core
         // with the run's family/size/color, while plain Copy stays native.
         if let copyPage = viewer.view.document?.page(at: 0),
-          let copyMatch = viewer.view.document?.findString("fixture - page 1", withOptions: []).first
+          let copyMatch = viewer.view.document?.findString("fixture - page 1", withOptions: [])
+            .first
         {
-            let copySelection = copyPage.selection(for: copyMatch.bounds(for: copyPage))
-            viewer.view.setCurrentSelection(copySelection, animate: false)
-            guard first.copySelectionAsRichText() else {
-              throw PDFError(.malformed, "Styled copy produced no rich text")
-            }
-            guard let rtf = NSPasteboard.general.string(forType: .rtf),
-              rtf.hasPrefix("{\\rtf1"), rtf.contains("Helvetica"),
-              rtf.contains("fixture - page 1")
-            else { throw PDFError(.malformed, "Rich-text copy is malformed") }
-            viewer.view.setCurrentSelection(nil, animate: false)
+          let copySelection = copyPage.selection(for: copyMatch.bounds(for: copyPage))
+          viewer.view.setCurrentSelection(copySelection, animate: false)
+          guard first.copySelectionAsRichText() else {
+            throw PDFError(.malformed, "Styled copy produced no rich text")
+          }
+          guard let rtf = NSPasteboard.general.string(forType: .rtf),
+            rtf.hasPrefix("{\\rtf1"), rtf.contains("Helvetica"),
+            rtf.contains("fixture - page 1")
+          else { throw PDFError(.malformed, "Rich-text copy is malformed") }
+          viewer.view.setCurrentSelection(nil, animate: false)
         }
 
         // Image context menu and edits (P12-015, P20-008–P20-012).
@@ -1665,7 +1712,9 @@
           guard let dragPage = imageViewer.view.document?.page(at: 0),
             let overlayRoot = imageWindow.contentView,
             let overlay = findGraphicOverlay(in: overlayRoot)
-          else { throw PDFError(.malformed, "Native-image drag regression has no graphics overlay") }
+          else {
+            throw PDFError(.malformed, "Native-image drag regression has no graphics overlay")
+          }
           let dragFromPage = NSPoint(x: 140, y: 660)
           let dragFromView = imageViewer.view.convert(dragFromPage, from: dragPage)
           let dragFromWindow = imageViewer.view.convert(dragFromView, to: nil)
@@ -1673,11 +1722,12 @@
           let dragEnd = NSPoint(x: dragStart.x + 40, y: dragStart.y + 30)
           func syntheticDrag() {
             let endWindow = overlay.convert(dragEnd, to: nil)
-            guard let down = NSEvent.mouseEvent(
-              with: .leftMouseDown, location: dragFromWindow, modifierFlags: [],
-              timestamp: ProcessInfo.processInfo.systemUptime,
-              windowNumber: imageWindow.windowNumber, context: nil, eventNumber: 0,
-              clickCount: 1, pressure: 1),
+            guard
+              let down = NSEvent.mouseEvent(
+                with: .leftMouseDown, location: dragFromWindow, modifierFlags: [],
+                timestamp: ProcessInfo.processInfo.systemUptime,
+                windowNumber: imageWindow.windowNumber, context: nil, eventNumber: 0,
+                clickCount: 1, pressure: 1),
               let dragged = NSEvent.mouseEvent(
                 with: .leftMouseDragged, location: endWindow, modifierFlags: [],
                 timestamp: ProcessInfo.processInfo.systemUptime,
@@ -1786,7 +1836,8 @@
           throw PDFError(.malformed, "Image replacement did not commit")
         }
         let replacedScanGraph = try PDFParser.parse(
-          try third.data(ofType: "com.adobe.pdf")).graph
+          try third.data(ofType: "com.adobe.pdf")
+        ).graph
         guard
           !OCRLayer.hasGeneratedLayer(
             in: replacedScanGraph, pageID: third.editSession.pageIDs[0])
@@ -1816,7 +1867,8 @@
         else { throw PDFError(.malformed, "Filled form value did not round-trip") }
         formDocument.setFormButton(fieldName: "agree", isOn: true)
         let toggledFormGraph = try PDFParser.parse(
-          try formDocument.data(ofType: "com.adobe.pdf")).graph
+          try formDocument.data(ofType: "com.adobe.pdf")
+        ).graph
         let toggledFields = try FormInventory.fields(
           in: toggledFormGraph, pageIDs: formDocument.editSession.pageIDs)
         guard toggledFields.first(where: { $0.name == "agree" })?.isChecked == true else {
@@ -1824,7 +1876,8 @@
         }
         formDocument.setFormChoice(fieldName: "department", exportValue: "Support")
         let choiceGraph = try PDFParser.parse(
-          try formDocument.data(ofType: "com.adobe.pdf")).graph
+          try formDocument.data(ofType: "com.adobe.pdf")
+        ).graph
         let choiceFields = try FormInventory.fields(
           in: choiceGraph, pageIDs: formDocument.editSession.pageIDs)
         guard choiceFields.first(where: { $0.name == "department" })?.stringValue == "Support",
@@ -1864,7 +1917,8 @@
         editor.stringValue = "Inline note"
         editor.sendAction(editor.action, to: editor.target)
         let inlineGraph = try PDFParser.parse(
-          try formDocument.data(ofType: "com.adobe.pdf")).graph
+          try formDocument.data(ofType: "com.adobe.pdf")
+        ).graph
         let inlineFields = try FormInventory.fields(
           in: inlineGraph, pageIDs: formDocument.editSession.pageIDs)
         guard inlineFields.first(where: { $0.name == "notes" })?.stringValue == "Inline note"
@@ -1887,7 +1941,8 @@
         formViewer.showPages()
         formDocument.resetForm()
         let resetGraph = try PDFParser.parse(
-          try formDocument.data(ofType: "com.adobe.pdf")).graph
+          try formDocument.data(ofType: "com.adobe.pdf")
+        ).graph
         let resetFields = try FormInventory.fields(
           in: resetGraph, pageIDs: formDocument.editSession.pageIDs)
         guard resetFields.first(where: { $0.name == "name" })?.stringValue == "",
@@ -2208,29 +2263,50 @@
           "signing": "incremental signed copy, original bytes preserved, validated",
           "optimization": "lossless copy smaller, text preserved, no rewrite when not smaller",
           "comparison": "mapping, 2 deleted pages, report written, difference image",
-          "comparisonWorkspace": "sync navigation, change navigation, mapping correction, overlay, menu commands",
-          "structure": "tagged tree resolved, PDF/UA valid, inspector shown, role/artifact edits applied; assisted tagging reviewed and an accepted heading became confirmed structure",
-          "accessibility": "AX audit of \(accessibility.windowsAudited) windows: \(accessibility.interactiveCount) interactive controls all labeled, \(accessibility.elementCount) elements; keyboard map verified (\(keyboard.shortcutCount) shortcuts) and menu actions invoked",
+          "comparisonWorkspace":
+            "sync navigation, change navigation, mapping correction, overlay, menu commands",
+          "structure":
+            "tagged tree resolved, PDF/UA valid, inspector shown, role/artifact edits applied; assisted tagging reviewed and an accepted heading became confirmed structure",
+          "accessibility":
+            "AX audit of \(accessibility.windowsAudited) windows: \(accessibility.interactiveCount) interactive controls all labeled, \(accessibility.elementCount) elements; keyboard map verified (\(keyboard.shortcutCount) shortcuts) and menu actions invoked",
           "textExport": "3 pages in reading order, Unicode intact, form-feed separators",
           "imageExport": "3 deterministic PNGs at 72 dpi, reopened at 612x792",
-          "htmlExport": "semantic structure + link preserved and script-free; appearance mode packaged 3 page images",
-          "attachments": "2 inventoried with types and sizes; byte-exact extraction with traversal-shaped names sanitized",
-          "printExport": "3-page print PDF through the native pipeline; page boxes and text verified by an independent reader",
-          "imageExtraction": "3 stored-sample PNGs with original provenance at the source resolution (2x2), deterministic names",
-          "fonts": "installed/embedded/missing statuses resolved with fallbacks and paid-font warnings; missing font surfaced; panel shown",
-          "formAuthoring": "authored text field with properties (flags, style, max length, declarative format), formatted fill, hierarchical rename, duplication, tab-order editing, alignment, and deletion through the document path",
-          "paragraphs": "reconstructed heading and flowing candidates with confidences and source-linked runs; a reflow round-trip (with a source map) was applied and undone to the original bytes",
-          "docxExport": "\(docxBlocks) blocks reconstructed into a deterministic DOCX package; unzip and textutil read the document part independently and the source bytes are unchanged",
-          "docxAppearance": "\(appearanceBlocks) blocks in appearance mode; the package passes unzip integrity",
-          "docxPreview": "\(preview.totalCount) blocks previewed with \(preview.ambiguousCount) ambiguous, bounded snippets, and limitations listed",
-          "tables": "\(detectedTables) tables detected on the open document; the review model corrected a cell and accepted the table",
-          "inventory": "\(pageAttributes.count) page attributes with inherited boxes; \(inventoryAssessment.summary); metadata \(inventoryFacts.metadata.isEmpty ? "absent" : "present")",
-          "graphicalSignature": "placed as a stamp annotation with the disclosure text; no digital-signature claim; source bytes unchanged",
-          "preflightChecks": "\(preflightChecks.errorCount) errors / \(preflightChecks.warningCount) warnings across \(preflightChecks.findings.count) checks; read-only and no PDF/X claim",
-          "archival": "\(derivativePlan.transformations.count) transformations planned, \(stagedDerivative.applied.count) applied; independent validation \(archivalValidation.map { $0.isCompliant ? "compliant" : "not compliant (\($0.failedRules) failed rules)" } ?? "validator unavailable"); no PDF/A identifier written",
-          "accessibilityAudit": "\(accessibilityAudit.errorCount) errors / \(accessibilityAudit.warningCount) warnings with 7 human-review requirements; independent UA validation \(uaValidation.map { $0.isCompliant ? "compliant" : "not compliant" } ?? "validator unavailable")",
-          "compatibility": "version \(versionAudit.headerVersion) with \(versionAudit.extensions.count) extension dictionaries; archival inventory \(archivalInventory.errorCount) errors / \(archivalInventory.warningCount) warnings (no conformance claimed); preflight \(preflightInventory.pages.count) pages, \(preflightInventory.fontsNotEmbedded) fonts not embedded, \(preflightInventory.lowResolutionImages) low-resolution images, no profile selected",
-          "tablesExport": "reviewed table exported to CSV and XLSX; unzip verified the package, \"007\" stayed literal, \"=SUM(A1)\" stayed a string, and no formula element was written",
+          "htmlExport":
+            "semantic structure + link preserved and script-free; appearance mode packaged 3 page images",
+          "attachments":
+            "2 inventoried with types and sizes; byte-exact extraction with traversal-shaped names sanitized",
+          "printExport":
+            "3-page print PDF through the native pipeline; page boxes and text verified by an independent reader",
+          "imageExtraction":
+            "3 stored-sample PNGs with original provenance at the source resolution (2x2), deterministic names",
+          "fonts":
+            "installed/embedded/missing statuses resolved with fallbacks and paid-font warnings; missing font surfaced; panel shown",
+          "formAuthoring":
+            "authored text field with properties (flags, style, max length, declarative format), formatted fill, hierarchical rename, duplication, tab-order editing, alignment, and deletion through the document path",
+          "paragraphs":
+            "reconstructed heading and flowing candidates with confidences and source-linked runs; a reflow round-trip (with a source map) was applied and undone to the original bytes",
+          "docxExport":
+            "\(docxBlocks) blocks reconstructed into a deterministic DOCX package; unzip and textutil read the document part independently and the source bytes are unchanged",
+          "docxAppearance":
+            "\(appearanceBlocks) blocks in appearance mode; the package passes unzip integrity",
+          "docxPreview":
+            "\(preview.totalCount) blocks previewed with \(preview.ambiguousCount) ambiguous, bounded snippets, and limitations listed",
+          "tables":
+            "\(detectedTables) tables detected on the open document; the review model corrected a cell and accepted the table",
+          "inventory":
+            "\(pageAttributes.count) page attributes with inherited boxes; \(inventoryAssessment.summary); metadata \(inventoryFacts.metadata.isEmpty ? "absent" : "present")",
+          "graphicalSignature":
+            "placed as a stamp annotation with the disclosure text; no digital-signature claim; source bytes unchanged",
+          "preflightChecks":
+            "\(preflightChecks.errorCount) errors / \(preflightChecks.warningCount) warnings across \(preflightChecks.findings.count) checks; read-only and no PDF/X claim",
+          "archival":
+            "\(derivativePlan.transformations.count) transformations planned, \(stagedDerivative.applied.count) applied; independent validation \(archivalValidation.map { $0.isCompliant ? "compliant" : "not compliant (\($0.failedRules) failed rules)" } ?? "validator unavailable"); no PDF/A identifier written",
+          "accessibilityAudit":
+            "\(accessibilityAudit.errorCount) errors / \(accessibilityAudit.warningCount) warnings with 7 human-review requirements; independent UA validation \(uaValidation.map { $0.isCompliant ? "compliant" : "not compliant" } ?? "validator unavailable")",
+          "compatibility":
+            "version \(versionAudit.headerVersion) with \(versionAudit.extensions.count) extension dictionaries; archival inventory \(archivalInventory.errorCount) errors / \(archivalInventory.warningCount) warnings (no conformance claimed); preflight \(preflightInventory.pages.count) pages, \(preflightInventory.fontsNotEmbedded) fonts not embedded, \(preflightInventory.lowResolutionImages) low-resolution images, no profile selected",
+          "tablesExport":
+            "reviewed table exported to CSV and XLSX; unzip verified the package, \"007\" stayed literal, \"=SUM(A1)\" stayed a string, and no formula element was written",
         ]
         try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys])
           .write(to: output.appendingPathComponent("smoke-test.json"), options: .atomic)
@@ -2297,102 +2373,103 @@
     }
   }
 
-/// Debug-only helper: generates throwaway signing material with openssl and
-/// imports the identity into a temporary keychain so the smoke run never
-/// touches the user's keychain or requires committed private keys.
-enum SmokeSigningIdentity {
-  struct Handle {
-    let identity: SecIdentity
-    let caCertificate: SecCertificate
-    let keychain: SecKeychain
-    let directory: URL
+  /// Debug-only helper: generates throwaway signing material with openssl and
+  /// imports the identity into a temporary keychain so the smoke run never
+  /// touches the user's keychain or requires committed private keys.
+  enum SmokeSigningIdentity {
+    struct Handle {
+      let identity: SecIdentity
+      let caCertificate: SecCertificate
+      let keychain: SecKeychain
+      let directory: URL
 
-    func cleanUp() {
-      SecKeychainDelete(keychain)
-      try? FileManager.default.removeItem(at: directory)
+      func cleanUp() {
+        SecKeychainDelete(keychain)
+        try? FileManager.default.removeItem(at: directory)
+      }
+    }
+
+    static func make() -> Handle? {
+      let openssl = "/usr/bin/openssl"
+      guard FileManager.default.isExecutableFile(atPath: openssl) else { return nil }
+      let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent("spdf-smoke-signing-\(UUID().uuidString)", isDirectory: true)
+      guard
+        (try? FileManager.default.createDirectory(
+          at: directory, withIntermediateDirectories: true)) != nil
+      else { return nil }
+      func run(_ arguments: [String]) -> Bool {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: openssl)
+        process.arguments = arguments
+        process.standardError = Pipe()
+        process.standardOutput = Pipe()
+        do { try process.run() } catch { return false }
+        process.waitUntilExit()
+        return process.terminationStatus == 0
+      }
+      let caKey = directory.appendingPathComponent("ca.key").path
+      let caPEM = directory.appendingPathComponent("ca.pem").path
+      let leafKey = directory.appendingPathComponent("leaf.key").path
+      let leafCSR = directory.appendingPathComponent("leaf.csr").path
+      let leafPEM = directory.appendingPathComponent("leaf.pem").path
+      let p12Path = directory.appendingPathComponent("identity.p12").path
+      guard
+        run([
+          "req", "-x509", "-newkey", "rsa:2048", "-keyout", caKey, "-out", caPEM, "-days", "2",
+          "-nodes", "-sha256", "-subj", "/CN=sPDF Smoke CA/O=sPDF Editor",
+        ]),
+        run([
+          "req", "-newkey", "rsa:2048", "-keyout", leafKey, "-out", leafCSR, "-nodes", "-sha256",
+          "-subj", "/CN=sPDF Smoke Signer/O=sPDF Editor",
+        ]),
+        run([
+          "x509", "-req", "-in", leafCSR, "-CA", caPEM, "-CAkey", caKey, "-CAcreateserial",
+          "-out", leafPEM, "-days", "2", "-sha256",
+        ]),
+        run([
+          "pkcs12", "-export", "-out", p12Path, "-inkey", leafKey, "-in", leafPEM, "-certfile",
+          caPEM, "-passout", "pass:test", "-name", "sPDF Smoke Signer",
+        ]),
+        let p12 = try? Data(contentsOf: URL(fileURLWithPath: p12Path)),
+        let caPEMData = try? Data(contentsOf: URL(fileURLWithPath: caPEM)),
+        let caCertificate = certificate(fromPEM: caPEMData)
+      else {
+        try? FileManager.default.removeItem(at: directory)
+        return nil
+      }
+      let keychainPath = NSTemporaryDirectory() + "spdf-smoke-\(UUID().uuidString).keychain"
+      var keychain: SecKeychain?
+      guard
+        SecKeychainCreate(keychainPath, 4, "test", false, nil, &keychain) == errSecSuccess,
+        let keychain
+      else {
+        try? FileManager.default.removeItem(at: directory)
+        return nil
+      }
+      let options: [String: Any] = [
+        kSecImportExportPassphrase as String: "test",
+        kSecImportExportKeychain as String: keychain,
+      ]
+      var items: CFArray?
+      guard SecPKCS12Import(p12 as CFData, options as CFDictionary, &items) == errSecSuccess,
+        let array = items as? [[String: Any]],
+        let value = array.first?[kSecImportItemIdentity as String]
+      else {
+        SecKeychainDelete(keychain)
+        try? FileManager.default.removeItem(at: directory)
+        return nil
+      }
+      return Handle(
+        identity: value as! SecIdentity, caCertificate: caCertificate, keychain: keychain,
+        directory: directory)
+    }
+
+    static func certificate(fromPEM pem: Data) -> SecCertificate? {
+      let text = String(decoding: pem, as: UTF8.self)
+      let base64 = text.split(separator: "\n").filter { !$0.hasPrefix("-----") }.joined()
+      guard let der = Data(base64Encoded: base64) else { return nil }
+      return SecCertificateCreateWithData(nil, der as CFData)
     }
   }
-
-  static func make() -> Handle? {
-    let openssl = "/usr/bin/openssl"
-    guard FileManager.default.isExecutableFile(atPath: openssl) else { return nil }
-    let directory = FileManager.default.temporaryDirectory
-      .appendingPathComponent("spdf-smoke-signing-\(UUID().uuidString)", isDirectory: true)
-    guard (try? FileManager.default.createDirectory(
-      at: directory, withIntermediateDirectories: true)) != nil
-    else { return nil }
-    func run(_ arguments: [String]) -> Bool {
-      let process = Process()
-      process.executableURL = URL(fileURLWithPath: openssl)
-      process.arguments = arguments
-      process.standardError = Pipe()
-      process.standardOutput = Pipe()
-      do { try process.run() } catch { return false }
-      process.waitUntilExit()
-      return process.terminationStatus == 0
-    }
-    let caKey = directory.appendingPathComponent("ca.key").path
-    let caPEM = directory.appendingPathComponent("ca.pem").path
-    let leafKey = directory.appendingPathComponent("leaf.key").path
-    let leafCSR = directory.appendingPathComponent("leaf.csr").path
-    let leafPEM = directory.appendingPathComponent("leaf.pem").path
-    let p12Path = directory.appendingPathComponent("identity.p12").path
-    guard
-      run([
-        "req", "-x509", "-newkey", "rsa:2048", "-keyout", caKey, "-out", caPEM, "-days", "2",
-        "-nodes", "-sha256", "-subj", "/CN=sPDF Smoke CA/O=sPDF Editor",
-      ]),
-      run([
-        "req", "-newkey", "rsa:2048", "-keyout", leafKey, "-out", leafCSR, "-nodes", "-sha256",
-        "-subj", "/CN=sPDF Smoke Signer/O=sPDF Editor",
-      ]),
-      run([
-        "x509", "-req", "-in", leafCSR, "-CA", caPEM, "-CAkey", caKey, "-CAcreateserial",
-        "-out", leafPEM, "-days", "2", "-sha256",
-      ]),
-      run([
-        "pkcs12", "-export", "-out", p12Path, "-inkey", leafKey, "-in", leafPEM, "-certfile",
-        caPEM, "-passout", "pass:test", "-name", "sPDF Smoke Signer",
-      ]),
-      let p12 = try? Data(contentsOf: URL(fileURLWithPath: p12Path)),
-      let caPEMData = try? Data(contentsOf: URL(fileURLWithPath: caPEM)),
-      let caCertificate = certificate(fromPEM: caPEMData)
-    else {
-      try? FileManager.default.removeItem(at: directory)
-      return nil
-    }
-    let keychainPath = NSTemporaryDirectory() + "spdf-smoke-\(UUID().uuidString).keychain"
-    var keychain: SecKeychain?
-    guard
-      SecKeychainCreate(keychainPath, 4, "test", false, nil, &keychain) == errSecSuccess,
-      let keychain
-    else {
-      try? FileManager.default.removeItem(at: directory)
-      return nil
-    }
-    let options: [String: Any] = [
-      kSecImportExportPassphrase as String: "test",
-      kSecImportExportKeychain as String: keychain,
-    ]
-    var items: CFArray?
-    guard SecPKCS12Import(p12 as CFData, options as CFDictionary, &items) == errSecSuccess,
-      let array = items as? [[String: Any]],
-      let value = array.first?[kSecImportItemIdentity as String]
-    else {
-      SecKeychainDelete(keychain)
-      try? FileManager.default.removeItem(at: directory)
-      return nil
-    }
-    return Handle(
-      identity: value as! SecIdentity, caCertificate: caCertificate, keychain: keychain,
-      directory: directory)
-  }
-
-  static func certificate(fromPEM pem: Data) -> SecCertificate? {
-    let text = String(decoding: pem, as: UTF8.self)
-    let base64 = text.split(separator: "\n").filter { !$0.hasPrefix("-----") }.joined()
-    guard let der = Data(base64Encoded: base64) else { return nil }
-    return SecCertificateCreateWithData(nil, der as CFData)
-  }
-}
 #endif

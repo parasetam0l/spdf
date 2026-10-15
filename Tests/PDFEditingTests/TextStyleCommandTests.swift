@@ -33,7 +33,8 @@ struct TextStyleCommandTests {
     let content = try PageContent.load(pageID: pageID, in: edited)
     let text = String(decoding: content.bytes, as: UTF8.self)
     #expect(text.contains("/F1 18 Tf"))
-    #expect(!text.contains("/F1 24 Tf"))
+    // The original selection is retained and restored after this show.
+    #expect(text.contains("/F1 24 Tf"))
     #expect(text.contains("(Replace this text)"))
     // Neighboring runs keep their 12 pt selections.
     #expect(text.contains("/F1 12 Tf"))
@@ -43,9 +44,10 @@ struct TextStyleCommandTests {
     let reopened = try PDFParser.parse(PDFWriter.write(edited))
     let relayout = try PageTextLayout.build(pageID: pageID, in: reopened.graph)
     #expect(relayout.clusters.first { $0.runIndex == 0 }?.fontSize == 18)
-    #expect(try TextRunIndexer.runs(
-      in: PageContent.load(pageID: pageID, in: reopened.graph),
-      graph: reopened.graph)[0].text == "Replace this text")
+    #expect(
+      try TextRunIndexer.runs(
+        in: PageContent.load(pageID: pageID, in: reopened.graph),
+        graph: reopened.graph)[0].text == "Replace this text")
   }
 
   @Test func changeFillColorInsertsPaintWithoutMovingText() throws {
@@ -93,10 +95,12 @@ struct TextStyleCommandTests {
         ChangeTextStyleCommand(
           pageID: pageID, runIndex: 0, style: TextStyleChange(fontResource: PDFName("F2")))
       ]), to: graph)
-    let text = String(decoding: (try PageContent.load(pageID: pageID, in: edited)).bytes, as: UTF8.self)
+    let text = String(
+      decoding: (try PageContent.load(pageID: pageID, in: edited)).bytes, as: UTF8.self)
     #expect(text.contains("/F2"))
-    #expect(try TextRunIndexer.runs(
-      in: PageContent.load(pageID: pageID, in: edited), graph: edited)[0].text == "AB")
+    #expect(
+      try TextRunIndexer.runs(
+        in: PageContent.load(pageID: pageID, in: edited), graph: edited)[0].text == "AB")
 
     // Unknown resources and empty changes refuse.
     #expect(throws: PDFError.self) {
@@ -108,8 +112,10 @@ struct TextStyleCommandTests {
     }
     #expect(throws: PDFError.self) {
       _ = try PDFEditingEngine.commit(
-        PDFTransaction([ChangeTextStyleCommand(
-          pageID: pageID, runIndex: 0, style: TextStyleChange())]), to: graph)
+        PDFTransaction([
+          ChangeTextStyleCommand(
+            pageID: pageID, runIndex: 0, style: TextStyleChange())
+        ]), to: graph)
     }
   }
 
@@ -210,7 +216,8 @@ struct TextStyleCommandTests {
     let after = try TextRunIndexer.runs(
       in: PageContent.load(pageID: pageID, in: edited), graph: edited)
     #expect(after[0].text == "Hi" && after[1].text.isEmpty && after[2].text == "After")
-    let bytes = String(decoding: (try PageContent.load(pageID: pageID, in: edited)).bytes, as: UTF8.self)
+    let bytes = String(
+      decoding: (try PageContent.load(pageID: pageID, in: edited)).bytes, as: UTF8.self)
     #expect(!bytes.contains("(Hel)") && !bytes.contains("(lo)"))
     // Undo-equivalence: the bytes verify through a rewrite round trip.
     let reopened = try PDFParser.parse(PDFWriter.write(edited))
@@ -296,7 +303,8 @@ struct TextStyleCommandTests {
     }
     var bytes = Data("7 Tr\n".utf8)
     bytes.append(stream.bytes)
-    clipped.objects[PDFObjectID(5)] = .stream(PDFStream(dictionary: stream.dictionary, bytes: bytes))
+    clipped.objects[PDFObjectID(5)] = .stream(
+      PDFStream(dictionary: stream.dictionary, bytes: bytes))
     let rewritten = try PDFParser.parse(PDFWriter.write(clipped))
     let clip = TextEditabilityCheck.assess(
       pageID: rewritten.pageIDs[0], runIndex: 0, in: rewritten.graph)
@@ -401,7 +409,8 @@ struct TextStyleCommandTests {
     process.waitUntilExit()
     return (
       process.terminationStatus,
-      String(decoding: pipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self))
+      String(decoding: pipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+    )
   }
 
   /// Dark-pixel count of a binary PGM raster.
@@ -451,8 +460,8 @@ struct TextStyleCommandTests {
   }
 }
 
-private extension UInt8 {
-  func isWhitespaceLetterOrDigitSeparator() -> Bool {
+extension UInt8 {
+  fileprivate func isWhitespaceLetterOrDigitSeparator() -> Bool {
     self == 0x20 || self == 0x09 || self == 0x0A || self == 0x0D
   }
 }

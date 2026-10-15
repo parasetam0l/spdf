@@ -18,6 +18,7 @@
 		2DC129A2BA815F4E141D9C21 /* ComparisonSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = C2D20568FDE859912E452D28 /* ComparisonSession.swift */; };
 		337CB33D21D1544A6D6330A0 /* TableReviewPanel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 42117F0C4A7F6A3D0F507B8C /* TableReviewPanel.swift */; };
 		37DFD0503CC6E00E9186A7FC /* InkOverlay.swift in Sources */ = {isa = PBXBuildFile; fileRef = 13FCD45EDBDF88A2A15908C5 /* InkOverlay.swift */; };
+		3AF65FAA1B1218CE43FBACF9 /* InlinePageTextCanvas.swift in Sources */ = {isa = PBXBuildFile; fileRef = EDA85A84C15CC1E608B47AB3 /* InlinePageTextCanvas.swift */; };
 		3FD6850EB221398A65AB2A22 /* ActualUpdaterProbe.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0B96CA009439D7450B698917 /* ActualUpdaterProbe.swift */; };
 		455ADC5971DF0138D4349A53 /* SignatureCanvas.swift in Sources */ = {isa = PBXBuildFile; fileRef = CAEDDE0A21FD109A8C499FD3 /* SignatureCanvas.swift */; };
 		48115D078626EB7A89A4649F /* TerminationSmoke.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC390DF83FDBBCFE61003882 /* TerminationSmoke.swift */; };
@@ -94,6 +95,7 @@
 		CC390DF83FDBBCFE61003882 /* TerminationSmoke.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminationSmoke.swift; sourceTree = "<group>"; };
 		D65800C5E45DCA901B0CC22D /* WorkspacePerformance.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspacePerformance.swift; sourceTree = "<group>"; };
 		E22A55458206C80891A19A5B /* StructureModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StructureModel.swift; sourceTree = "<group>"; };
+		EDA85A84C15CC1E608B47AB3 /* InlinePageTextCanvas.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InlinePageTextCanvas.swift; sourceTree = "<group>"; };
 		EFC7C84694AA9DECF51EF198 /* TerminationCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminationCoordinator.swift; sourceTree = "<group>"; };
 		F09E92DC94966E861838CFF6 /* SPDF.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = SPDF.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		F375BD6C79BC3A4A3DE6376E /* RelaunchSmoke.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RelaunchSmoke.swift; sourceTree = "<group>"; };
@@ -132,6 +134,7 @@
 				2EF0C908D1784F36D1EF3CC5 /* GraphicSelectionOverlay.swift */,
 				9452F6B367E81926CFCAB840 /* Info.plist */,
 				13FCD45EDBDF88A2A15908C5 /* InkOverlay.swift */,
+				EDA85A84C15CC1E608B47AB3 /* InlinePageTextCanvas.swift */,
 				2A6A1C3ADABC41A95E32748D /* InspectorPanels.swift */,
 				962559E85F133C73EBD3324B /* PageEditOverlay.swift */,
 				A1EB135BD7BF21701C6FA995 /* PageOrganizer.swift */,
@@ -314,6 +317,7 @@
 				A27AFFCB05BE6C6B1FAF035C /* FormsPanel.swift in Sources */,
 				D56CF2FB3178845FE96E3B95 /* GraphicSelectionOverlay.swift in Sources */,
 				37DFD0503CC6E00E9186A7FC /* InkOverlay.swift in Sources */,
+				3AF65FAA1B1218CE43FBACF9 /* InlinePageTextCanvas.swift in Sources */,
 				0FE384F50302C3E66E04F73F /* InspectorPanels.swift in Sources */,
 				2BBDA3568867B341E37F70C4 /* PageEditOverlay.swift in Sources */,
 				B5ED5932EEADA8C869BCBF09 /* PageOrganizer.swift in Sources */,

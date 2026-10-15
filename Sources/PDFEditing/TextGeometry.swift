@@ -4,9 +4,8 @@ import PDFCore
 /// P16-001/P14-016: one glyph in reading order, decoded with its run's font
 /// and carrying its source run/glyph indices plus axis-aligned bounds
 /// (the conservative size estimate, extended by the embedded program's ink
-/// box when one is available). The profile works in page user space with an
-/// identity CTM; nested-form transforms and page rotation are not composed
-/// yet.
+/// box when one is available). Page-content graphics transforms are
+/// composed; nested-form transforms and page rotation remain separate.
 public struct TextCluster: Sendable, Equatable {
   public let runIndex: Int
   public let glyphIndex: Int
@@ -66,8 +65,10 @@ public struct PageTextLayout: Sendable {
     var metricsCache: [PDFObjectID: TrueTypeOutlineMetrics?] = [:]
     var glyphs: [TextCluster] = []
     for (runIndex, run) in runs.enumerated() {
-      guard let font = SimpleFont.resolve(
-        resource: run.fontResource, page: effectivePage, in: graph),
+      let matrix = TextCanvasSupport.concatenate(run.ctm, run.matrix)
+      guard
+        let font = SimpleFont.resolve(
+          resource: run.fontResource, page: effectivePage, in: graph),
         font.isSupported
       else { continue }
       let metrics: TrueTypeOutlineMetrics?
@@ -86,8 +87,8 @@ public struct PageTextLayout: Sendable {
           wordSpacing: run.wordSpacing, horizontalScale: run.horizontalScale)
         let base = run.hasKnownOffset ? run.textSpaceOffset : 0
         let origin = [
-          run.matrix[4] + (base + position) * run.matrix[0] + run.rise * run.matrix[2],
-          run.matrix[5] + (base + position) * run.matrix[1] + run.rise * run.matrix[3],
+          matrix[4] + (base + position) * matrix[0] + run.rise * matrix[2],
+          matrix[5] + (base + position) * matrix[1] + run.rise * matrix[3],
         ]
         // The glyph's own pen position (before this glyph's advance is
         // accumulated), used for both the estimate and the ink box.
@@ -100,13 +101,13 @@ public struct PageTextLayout: Sendable {
           // axis-aligned guess. The identity matrix reproduces the old
           // estimate exactly.
           bounds = Self.composedBounds(
-            matrix: run.matrix, position: glyphPosition, advance: advance,
+            matrix: matrix, position: glyphPosition, advance: advance,
             em: run.fontSize, descent: 0, rise: run.rise)
           position += advance
         } else {
           // Unknown metrics: keep the source order but a zero-width marker.
           bounds = Self.composedBounds(
-            matrix: run.matrix, position: glyphPosition, advance: 0,
+            matrix: matrix, position: glyphPosition, advance: 0,
             em: run.fontSize, descent: 0, rise: run.rise)
         }
         if let metrics {
@@ -121,18 +122,25 @@ public struct PageTextLayout: Sendable {
             let horizontal =
               pointScale * max(0.01, min(1000, run.horizontalScale)) / 100
             let inkBounds = Self.composedBounds(
-              matrix: run.matrix, position: glyphPosition,
+              matrix: matrix, position: glyphPosition,
               advance: Double(box[2] - box[0]) * horizontal,
               em: Double(box[3]) * pointScale,
               descent: Double(box[1]) * pointScale,
               xOffset: Double(box[0]) * horizontal, rise: run.rise)
-            ink = ink.map { [min($0[0], inkBounds[0]), min($0[1], inkBounds[1]),
-                             max($0[2], inkBounds[2]), max($0[3], inkBounds[3])] }
+            ink =
+              ink.map {
+                [
+                  min($0[0], inkBounds[0]), min($0[1], inkBounds[1]),
+                  max($0[2], inkBounds[2]), max($0[3], inkBounds[3]),
+                ]
+              }
               ?? inkBounds
           }
           if let ink {
-            bounds = [min(bounds[0], ink[0]), min(bounds[1], ink[1]),
-                      max(bounds[2], ink[2]), max(bounds[3], ink[3])]
+            bounds = [
+              min(bounds[0], ink[0]), min(bounds[1], ink[1]),
+              max(bounds[2], ink[2]), max(bounds[3], ink[3]),
+            ]
           }
         }
         glyphs.append(
@@ -142,9 +150,18 @@ public struct PageTextLayout: Sendable {
       }
     }
 
-    // Greedy line grouping by compatible baselines, then left-to-right.
+    // Rotated shows form their own lines in source glyph order. Grouping
+    // diagonal glyphs by page Y would reverse/split a watermark into letters.
+    let rotatedRuns = Set(
+      runs.indices.filter { index in
+        let matrix = TextCanvasSupport.concatenate(runs[index].ctm, runs[index].matrix)
+        return abs(matrix[1]) > 0.00001 || matrix[0] < 0
+      })
+    // Greedy line grouping by compatible horizontal baselines, then left-to-right.
     var pending: [(baseline: Double, tolerance: Double, items: [TextCluster])] = []
-    for glyph in glyphs.sorted(by: { $0.origin[1] > $1.origin[1] }) {
+    for glyph in glyphs.filter({ !rotatedRuns.contains($0.runIndex) }).sorted(by: {
+      $0.origin[1] > $1.origin[1]
+    }) {
       let tolerance = max(1.0, 0.3 * glyph.fontSize)
       if let index = pending.firstIndex(where: {
         abs($0.baseline - glyph.origin[1]) <= max($0.tolerance, tolerance)
@@ -196,6 +213,23 @@ public struct PageTextLayout: Sendable {
       }
       if !currentItems.isEmpty {
         segments.append(Segment(column: 0, baseline: line.baseline, items: currentItems))
+      }
+    }
+    let rotated = Dictionary(
+      grouping: glyphs.filter { rotatedRuns.contains($0.runIndex) },
+      by: { runs[$0.runIndex].instructionIndex })
+    for instruction in rotated.keys.sorted() {
+      let items = rotated[instruction] ?? []
+      let ordered = items.sorted {
+        $0.runIndex == $1.runIndex ? $0.glyphIndex < $1.glyphIndex : $0.runIndex < $1.runIndex
+      }
+      segments.append(
+        Segment(column: 0, baseline: items.map { $0.bounds[3] }.max() ?? 0, items: ordered))
+    }
+    if !rotated.isEmpty {
+      segments.sort {
+        if $0.baseline != $1.baseline { return $0.baseline > $1.baseline }
+        return ($0.items.first?.runIndex ?? 0) < ($1.items.first?.runIndex ?? 0)
       }
     }
     // A gutter is credible when at least half the lines leave it clear; its
@@ -386,7 +420,9 @@ public struct TextSearchOptions: Sendable, Equatable {
   public var wholeWord: Bool
   public var diacriticInsensitive: Bool
 
-  public init(caseSensitive: Bool = false, wholeWord: Bool = false, diacriticInsensitive: Bool = false) {
+  public init(
+    caseSensitive: Bool = false, wholeWord: Bool = false, diacriticInsensitive: Bool = false
+  ) {
     self.caseSensitive = caseSensitive
     self.wholeWord = wholeWord
     self.diacriticInsensitive = diacriticInsensitive

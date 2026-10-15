@@ -63,13 +63,10 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
     // Start Sparkle before the first application-menu validation.
     _ = AppUpdater.shared
     Task { @MainActor in
-      do { try await UpdateRelaunchCoordinator.restore() }
-      catch { documents.presentError(error) }
-      if documents.documents.isEmpty { showWelcome() }
-      else { welcome?.close() }
+      do { try await UpdateRelaunchCoordinator.restore() } catch { documents.presentError(error) }
+      if documents.documents.isEmpty { showWelcome() } else { welcome?.close() }
       #if SPDF_UPDATER_ACCEPTANCE
-        do { try await ActualUpdaterProbe.didLaunch() }
-        catch { documents.presentError(error) }
+        do { try await ActualUpdaterProbe.didLaunch() } catch { documents.presentError(error) }
       #endif
       offerRecoveryIfNeeded()
       NSApp.activate(ignoringOtherApps: true)
@@ -182,14 +179,36 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
   @objc private func zoomOut(_ sender: Any?) { currentDocument?.viewer?.zoomOut() }
   @objc private func fitPage(_ sender: Any?) { currentDocument?.viewer?.fitPage() }
   @objc private func actualSize(_ sender: Any?) { currentDocument?.viewer?.actualSize() }
-  @objc private func rotateLeft(_ sender: Any?) { currentDocument?.rotateCurrentPage(byDegrees: -90) }
-  @objc private func rotateRight(_ sender: Any?) { currentDocument?.rotateCurrentPage(byDegrees: 90) }
+  @objc private func rotateLeft(_ sender: Any?) {
+    currentDocument?.rotateCurrentPage(byDegrees: -90)
+  }
+  @objc private func rotateRight(_ sender: Any?) {
+    currentDocument?.rotateCurrentPage(byDegrees: 90)
+  }
   @objc private func movePageUp(_ sender: Any?) { currentDocument?.moveCurrentPage(by: -1) }
   @objc private func movePageDown(_ sender: Any?) { currentDocument?.moveCurrentPage(by: 1) }
-  @objc private func insertBlankPage(_ sender: Any?) { currentDocument?.insertBlankPageAfterCurrent() }
+  @objc private func insertBlankPage(_ sender: Any?) {
+    currentDocument?.insertBlankPageAfterCurrent()
+  }
   @objc private func deletePage(_ sender: Any?) { currentDocument?.deleteCurrentPage() }
-  @objc private func undoEdit(_ sender: Any?) { currentDocument?.undoEdit() }
-  @objc private func redoEdit(_ sender: Any?) { currentDocument?.redoEdit() }
+  @objc private func undoEdit(_ sender: Any?) {
+    if let text = NSApp.keyWindow?.firstResponder as? InlinePageTextView,
+      text.typingUndo.canUndo
+    {
+      text.typingUndo.undo()
+    } else {
+      currentDocument?.undoEdit()
+    }
+  }
+  @objc private func redoEdit(_ sender: Any?) {
+    if let text = NSApp.keyWindow?.firstResponder as? InlinePageTextView,
+      text.typingUndo.canRedo
+    {
+      text.typingUndo.redo()
+    } else {
+      currentDocument?.redoEdit()
+    }
+  }
   @objc private func showFind(_ sender: Any?) { currentDocument?.viewer?.showSearch() }
   @objc private func findNext(_ sender: Any?) { currentDocument?.viewer?.searchNext() }
   @objc private func findPrevious(_ sender: Any?) { currentDocument?.viewer?.searchPrevious() }
@@ -199,7 +218,9 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
   @objc private func showSignaturesSidebar(_ sender: Any?) {
     currentDocument?.viewer?.showSignatures()
   }
-  @objc private func showInspectorSidebar(_ sender: Any?) { currentDocument?.viewer?.showInspector() }
+  @objc private func showInspectorSidebar(_ sender: Any?) {
+    currentDocument?.viewer?.showInspector()
+  }
   @objc private func showInfoSidebar(_ sender: Any?) { currentDocument?.viewer?.showInfo() }
   @objc private func showFontsSidebar(_ sender: Any?) {
     currentDocument?.viewer?.showFonts()
@@ -311,7 +332,9 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
   @objc private func recalculateForm(_ sender: Any?) { currentDocument?.recalculateForm() }
   @objc private func duplicateFormField(_ sender: Any?) { currentDocument?.duplicateFormField() }
   @objc private func alignFormFields(_ sender: Any?) { currentDocument?.alignFormFields() }
-  @objc private func distributeFormFields(_ sender: Any?) { currentDocument?.distributeFormFields() }
+  @objc private func distributeFormFields(_ sender: Any?) {
+    currentDocument?.distributeFormFields()
+  }
   @objc private func editFormTabOrder(_ sender: Any?) { currentDocument?.editFormTabOrder() }
   @objc private func deleteFormField(_ sender: Any?) { currentDocument?.deleteFormField() }
   @objc private func exportPrintPDF(_ sender: Any?) {
@@ -428,7 +451,8 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
   func restoreUpdateSettings(frame: [Double]) {
     showUpdateSettings(nil)
     if frame.count == 4, frame.allSatisfy(\.isFinite), frame[2] > 200, frame[3] > 150 {
-      updateSettingsWindow?.setFrame(NSRect(x: frame[0], y: frame[1], width: frame[2], height: frame[3]),
+      updateSettingsWindow?.setFrame(
+        NSRect(x: frame[0], y: frame[1], width: frame[2], height: frame[3]),
         display: true)
     }
   }
@@ -492,14 +516,18 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
       guard let viewer = document.viewer else { return false }
       menuItem.state = viewer.isInkToolActive ? .on : .off
       return !viewer.isLocked && viewer.pageCount > 0
-    case #selector(selectTool), #selector(textEditTool), #selector(addTextTool), #selector(pageTool),
+    case #selector(selectTool), #selector(textEditTool), #selector(addTextTool),
+      #selector(pageTool),
       #selector(imageEditTool):
       guard let viewer = document.viewer else { return false }
       let tool: ViewerToolMode =
-        menuItem.action == #selector(textEditTool) ? .textEdit
-        : menuItem.action == #selector(addTextTool) ? .addText
-        : menuItem.action == #selector(pageTool) ? .page
-        : menuItem.action == #selector(imageEditTool) ? .imageEdit : .select
+        menuItem.action == #selector(textEditTool)
+        ? .textEdit
+        : menuItem.action == #selector(addTextTool)
+          ? .addText
+          : menuItem.action == #selector(pageTool)
+            ? .page
+            : menuItem.action == #selector(imageEditTool) ? .imageEdit : .select
       menuItem.state = viewer.activeTool == tool ? .on : .off
       return !viewer.isLocked && viewer.pageCount > 0
         && (tool == .select || document.editSession.canEdit)
@@ -566,8 +594,12 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
       return document.viewer?.isLocked == true
     case #selector(lockDocument):
       return document.canLockDocument
-    case #selector(undoEdit): return document.editSession.canUndo
-    case #selector(redoEdit): return document.editSession.canRedo
+    case #selector(undoEdit):
+      return (NSApp.keyWindow?.firstResponder as? InlinePageTextView)?.typingUndo.canUndo == true
+        || document.viewer?.isEditingPageText == true || document.editSession.canUndo
+    case #selector(redoEdit):
+      return (NSApp.keyWindow?.firstResponder as? InlinePageTextView)?.typingUndo.canRedo == true
+        || document.editSession.canRedo
     case #selector(rotateLeft), #selector(rotateRight), #selector(insertBlankPage):
       return document.editSession.canEdit && (document.viewer?.pageCount ?? 0) > 0
     case #selector(movePageUp):
@@ -644,7 +676,8 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
     add("Quit sPDF Editor", #selector(quitApplication), key: "q", target: self, to: app)
 
     let file = submenu("File", in: bar)
-    add("New PDF", #selector(NSDocumentController.newDocument(_:)), key: "n",
+    add(
+      "New PDF", #selector(NSDocumentController.newDocument(_:)), key: "n",
       target: documents, to: file)
     add(
       "Open…", #selector(NSDocumentController.openDocument(_:)), key: "o", target: documents,
@@ -708,7 +741,9 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
     let view = submenu("View", in: bar)
     add("Previous Page", #selector(previousPage), key: "[", target: self, to: view)
     add("Next Page", #selector(nextPage), key: "]", target: self, to: view)
-    add("Go Back", #selector(goBack), key: "[", modifiers: [.command, .option], target: self, to: view)
+    add(
+      "Go Back", #selector(goBack), key: "[", modifiers: [.command, .option], target: self, to: view
+    )
     add(
       "Go Forward", #selector(goForward), key: "]", modifiers: [.command, .option], target: self,
       to: view)
@@ -722,7 +757,9 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
     add("Zoom In", #selector(zoomIn), key: "=", target: self, to: view)
     add("Zoom Out", #selector(zoomOut), key: "-", target: self, to: view)
     add("Fit Page", #selector(fitPage), key: "0", target: self, to: view)
-    add("Fit Width", #selector(fitWidth), key: "0", modifiers: [.command, .shift], target: self, to: view)
+    add(
+      "Fit Width", #selector(fitWidth), key: "0", modifiers: [.command, .shift], target: self,
+      to: view)
     add("Show Rulers", #selector(toggleRulers), key: "r", target: self, to: view)
     add("Show Guides", #selector(toggleGuides), target: self, to: view)
     add("Actual Size", #selector(actualSize), key: "1", target: self, to: view)
@@ -832,7 +869,8 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
     annotate.addItem(.separator())
     add("Flatten Annotations…", #selector(flattenAnnotations), target: self, to: annotate)
     add("Flatten Form…", #selector(flattenForm), target: self, to: annotate)
-    add("Place Graphical Signature…", #selector(placeGraphicalSignature), target: self, to: annotate)
+    add(
+      "Place Graphical Signature…", #selector(placeGraphicalSignature), target: self, to: annotate)
     annotate.addItem(.separator())
     add("Recognize Text (OCR)…", #selector(runOCR), target: self, to: annotate)
     add("Recognize Text in All Pages…", #selector(runOCRAllPages), target: self, to: annotate)
