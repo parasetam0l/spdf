@@ -142,9 +142,11 @@ final class InlinePageTextCanvas: NSView, NSTextViewDelegate {
   private var dragBase: (Double, Double)?
   private(set) var isDragging = false
   private var isFinishing = false
+  private var isTyping = false
+  private var bodyDragStart = NSPoint.zero
   private var isLayingOut = false
   private var observations = Set<AnyCancellable>()
-  var onFinish: (() -> Void)?
+  var onFinish: ((Bool) -> Void)?
 
   init?(
     viewer: PDFViewingSession, target: PageTextTarget?, pageIndex: Int, rect: CGRect,
@@ -190,6 +192,9 @@ final class InlinePageTextCanvas: NSView, NSTextViewDelegate {
     textView.isRichText = false
     textView.importsGraphics = false
     textView.allowsUndo = true
+    textView.isEditable = target == nil
+    textView.isSelectable = target == nil
+    isTyping = target == nil
     textView.isAutomaticQuoteSubstitutionEnabled = false
     textView.isAutomaticDashSubstitutionEnabled = false
     textView.isAutomaticTextReplacementEnabled = false
@@ -220,8 +225,32 @@ final class InlinePageTextCanvas: NSView, NSTextViewDelegate {
     viewer.view.setAccessibilityHidden(true)
     viewer.pageTextStyle = style
     viewer.isEditingPageText = true
+    viewer.isTypingPageText = isTyping
+    viewer.pageTextBeginTyping = { [weak self] in self?.beginTyping() }
+    viewer.pageTextCancel = { [weak self] in self?.cancel() }
+    viewer.pageTextPositionApplier = { [weak self] x, y in
+      guard let self else { return }
+      self.dx = x - self.sourceRect.minX
+      self.dy = y - self.sourceRect.minY
+      self.synchronizeGeometry()
+      self.publishPendingChange()
+    }
     viewer.pageTextStyleApplier = { [weak self] style in self?.applyStyle(style) }
     viewer.hasPendingTextGesture = { [weak self] in self?.isDragging ?? false }
+    for name in [
+      Notification.Name.NSUndoManagerDidUndoChange,
+      .NSUndoManagerDidRedoChange, .NSUndoManagerDidCloseUndoGroup,
+    ] {
+      NotificationCenter.default.publisher(for: name, object: textView.typingUndo)
+        .receive(on: DispatchQueue.main)
+        .sink { [weak self] _ in
+          MainActor.assumeIsolated {
+            guard let self else { return }
+            self.viewer?.canUndoPageTyping = self.textView.typingUndo.canUndo
+            self.viewer?.canRedoPageTyping = self.textView.typingUndo.canRedo
+          }
+        }.store(in: &observations)
+    }
     for name in [
       Notification.Name.PDFViewScaleChanged, .PDFViewPageChanged,
       NSView.boundsDidChangeNotification,
@@ -243,11 +272,26 @@ final class InlinePageTextCanvas: NSView, NSTextViewDelegate {
   }
   required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
 
+  override var acceptsFirstResponder: Bool { true }
+
   func focusText() {
+    if isTyping { placeCaret(at: initialClickPoint) } else { window?.makeFirstResponder(self) }
+  }
+
+  func beginTyping(at point: NSPoint? = nil, selectWord: Bool = false) {
+    isTyping = true
+    textView.isEditable = true
+    textView.isSelectable = true
+    viewer?.isTypingPageText = true
+    placeCaret(at: point ?? initialClickPoint)
+    if selectWord { textView.selectWord(nil) }
+    needsDisplay = true
+  }
+
+  private func placeCaret(at point: NSPoint) {
     window?.makeFirstResponder(textView)
-    // Coordinate conversion must happen after the canvas joins the window.
     if let viewer {
-      let local = textView.convert(initialClickPoint, from: viewer.view)
+      let local = textView.convert(point, from: viewer.view)
       let index = textView.characterIndexForInsertion(at: local)
       textView.setSelectedRange(
         NSRange(location: min(index, (textView.string as NSString).length), length: 0))
@@ -256,8 +300,66 @@ final class InlinePageTextCanvas: NSView, NSTextViewDelegate {
 
   override func hitTest(_ point: NSPoint) -> NSView? {
     if moveHandle.frame.contains(point) { return moveHandle }
-    if textView.frame.contains(point) { return textView }
+    if textView.frame.contains(point) { return isTyping ? textView : self }
     return nil
+  }
+
+  override func resetCursorRects() {
+    if !isTyping { addCursorRect(textView.frame, cursor: .openHand) }
+  }
+
+  override func mouseDown(with event: NSEvent) {
+    if event.clickCount >= 2, let viewer {
+      beginTyping(at: viewer.view.convert(event.locationInWindow, from: nil), selectWord: true)
+      return
+    }
+    bodyDragStart = event.locationInWindow
+    window?.makeFirstResponder(self)
+  }
+
+  override func mouseDragged(with event: NSEvent) {
+    guard !isTyping else { return }
+    move(
+      byWindowDelta: NSPoint(
+        x: event.locationInWindow.x - bodyDragStart.x,
+        y: event.locationInWindow.y - bodyDragStart.y), finished: false)
+  }
+
+  override func mouseUp(with event: NSEvent) {
+    guard isDragging else { return }
+    move(
+      byWindowDelta: NSPoint(
+        x: event.locationInWindow.x - bodyDragStart.x,
+        y: event.locationInWindow.y - bodyDragStart.y), finished: true)
+  }
+
+  override func keyDown(with event: NSEvent) {
+    let step = event.modifierFlags.contains(.shift) ? 10.0 : 1.0
+    switch event.keyCode {
+    case 53: cancel()
+    case 36:
+      if event.modifierFlags.contains(.command) { _ = commit() } else { beginTyping() }
+    case 51, 117:
+      textView.string = ""
+      _ = commit()
+    case 123:
+      dx -= step
+      synchronizeGeometry()
+      publishPendingChange()
+    case 124:
+      dx += step
+      synchronizeGeometry()
+      publishPendingChange()
+    case 125:
+      dy -= step
+      synchronizeGeometry()
+      publishPendingChange()
+    case 126:
+      dy += step
+      synchronizeGeometry()
+      publishPendingChange()
+    default: super.keyDown(with: event)
+    }
   }
 
   private func swapRenderer(to document: PDFDocument) {
@@ -333,8 +435,8 @@ final class InlinePageTextCanvas: NSView, NSTextViewDelegate {
       sourceTarget == nil
       ? sourceRect.width * scale
       : max(
-        sourceRect.width * scale + 24,
-        (textView.string as NSString).size(withAttributes: [.font: scaled]).width + 24)
+        sourceRect.width * scale + 8,
+        (textView.string as NSString).size(withAttributes: [.font: scaled]).width + 8)
     textView.textContainer?.containerSize = NSSize(width: availableWidth, height: 1_000_000)
     textView.textContainer?.widthTracksTextView = false
     if let container = textView.textContainer, let manager {
@@ -356,7 +458,10 @@ final class InlinePageTextCanvas: NSView, NSTextViewDelegate {
     }
     textView.setSelectedRange(selected)
     moveHandle.frame = NSRect(
-      x: textView.frame.minX - 24, y: textView.frame.maxY - 20, width: 20, height: 20)
+      x: textView.frame.minX - 20, y: textView.frame.maxY - 16, width: 16, height: 16)
+    let position = [sourceRect.minX + dx, sourceRect.minY + dy]
+    if viewer.pageTextPosition != position { viewer.pageTextPosition = position }
+    window?.invalidateCursorRects(for: self)
     needsDisplay = true
   }
 
@@ -369,6 +474,7 @@ final class InlinePageTextCanvas: NSView, NSTextViewDelegate {
     let changed =
       textView.string != (sourceTarget?.text ?? "")
       || style != originalStyle || dx != 0 || dy != 0
+    viewer?.hasPendingPageTextChanges = changed
     viewer?.onPendingPageTextChange?(changed)
   }
 
@@ -403,7 +509,7 @@ final class InlinePageTextCanvas: NSView, NSTextViewDelegate {
           pageIndex, [rect.minX, rect.minY, rect.maxX, rect.maxY], textView.string, style) ?? false
     }
     if accepted {
-      retire()
+      retire(committed: true)
     } else {
       isFinishing = false
       if let target = sourceTarget, let data = viewer.onTextBlockPreview?(target),
@@ -420,24 +526,35 @@ final class InlinePageTextCanvas: NSView, NSTextViewDelegate {
     guard !isFinishing else { return }
     isFinishing = true
     swapRenderer(to: originalDocument)
-    retire()
+    retire(committed: false)
   }
 
-  private func retire() {
+  private func retire(committed: Bool) {
     observations.removeAll()
     viewer?.onPendingPageTextChange?(false)
     viewer?.view.setAccessibilityHidden(false)
     viewer?.isEditingPageText = false
+    viewer?.isTypingPageText = false
+    viewer?.hasPendingPageTextChanges = false
+    viewer?.canUndoPageTyping = false
+    viewer?.canRedoPageTyping = false
+    viewer?.pageTextBeginTyping = nil
+    viewer?.pageTextCancel = nil
+    viewer?.pageTextPositionApplier = nil
     viewer?.pageTextStyleApplier = nil
     viewer?.hasPendingTextGesture = nil
     textView.delegate = nil
-    onFinish?()
+    onFinish?(committed)
     removeFromSuperview()
   }
 
   override func draw(_ dirtyRect: NSRect) {
     NSColor.controlAccentColor.withAlphaComponent(0.6).setStroke()
-    let outline = NSBezierPath(rect: textView.frame.insetBy(dx: -3, dy: -3))
+    var box = textView.frame
+    if let container = textView.textContainer, let manager = textView.layoutManager {
+      box.size.width = max(18, min(box.width, manager.usedRect(for: container).width + 4))
+    }
+    let outline = NSBezierPath(rect: box.insetBy(dx: -3, dy: -3))
     outline.lineWidth = 0.75
     outline.stroke()
   }

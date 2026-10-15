@@ -63,6 +63,93 @@
         throw PDFError(.malformed, "Redo did not restore visible text")
       }
 
+      // Clicking selects a block without putting a caret into it. A selected
+      // block can move, cancel and enter native marked-text input independently.
+      guard let page = viewer.view.document?.page(at: 0),
+        let match = viewer.view.document?.findString(
+          "Workspace authoring regression", withOptions: []
+        ).first,
+        let content = window.contentView
+      else { throw PDFError(.malformed, "Missing native text fixture") }
+      window.makeKeyAndOrderFront(nil)
+      _ = viewer.activateTool(.textEdit)
+      try await Task.sleep(for: .milliseconds(100))
+      func findOverlay(_ view: NSView) -> PageEditOverlayView? {
+        if let overlay = view as? PageEditOverlayView { return overlay }
+        return view.subviews.lazy.compactMap { findOverlay($0) }.first
+      }
+      func findCanvas(_ view: NSView) -> InlinePageTextCanvas? {
+        if let canvas = view as? InlinePageTextCanvas { return canvas }
+        return view.subviews.lazy.compactMap { findCanvas($0) }.first
+      }
+      guard let overlay = findOverlay(content) else {
+        throw PDFError(.malformed, "Missing page overlay")
+      }
+      let bounds = match.bounds(for: page)
+      let point = viewer.view.convert(NSPoint(x: bounds.midX, y: bounds.midY), from: page)
+      let pointer = viewer.view.convert(point, to: nil)
+      func mouse(_ type: NSEvent.EventType, point: NSPoint, clicks: Int = 1) throws -> NSEvent {
+        guard
+          let event = NSEvent.mouseEvent(
+            with: type, location: point, modifierFlags: [],
+            timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
+            context: nil, eventNumber: 0, clickCount: clicks, pressure: type == .leftMouseUp ? 0 : 1
+          )
+        else { throw PDFError(.malformed, "Could not construct native pointer event") }
+        return event
+      }
+      let selectionBaseline = try document.editSession.bytesForSave()
+      overlay.mouseDown(with: try mouse(.leftMouseDown, point: pointer))
+      overlay.mouseUp(with: try mouse(.leftMouseUp, point: pointer))
+      guard let selected = findCanvas(content), viewer.isEditingPageText,
+        !viewer.isTypingPageText, !selected.textView.isEditable,
+        window.firstResponder === selected,
+        try document.editSession.bytesForSave() == selectionBaseline
+      else {
+        throw PDFError(.malformed, "Single-click did not create a non-mutating block selection")
+      }
+      let position = viewer.pageTextPosition
+      selected.mouseDown(with: try mouse(.leftMouseDown, point: pointer))
+      let movedPointer = NSPoint(x: pointer.x + 60, y: pointer.y - 30)
+      selected.mouseDragged(with: try mouse(.leftMouseDragged, point: movedPointer))
+      selected.mouseUp(with: try mouse(.leftMouseUp, point: movedPointer))
+      guard viewer.pageTextPosition != position, document.isDocumentEdited else {
+        throw PDFError(.malformed, "Selected-block drag did not move or mark pending text")
+      }
+      viewer.pageTextCancel?()
+      guard !viewer.isEditingPageText,
+        try document.editSession.bytesForSave() == selectionBaseline
+      else {
+        throw PDFError(.malformed, "Cancel did not restore selected-block movement")
+      }
+      overlay.mouseDown(with: try mouse(.leftMouseDown, point: pointer))
+      overlay.mouseUp(with: try mouse(.leftMouseUp, point: pointer))
+      guard let input = findCanvas(content) else {
+        throw PDFError(.malformed, "Text did not reselect")
+      }
+      input.mouseDown(with: try mouse(.leftMouseDown, point: pointer, clicks: 2))
+      guard viewer.isTypingPageText, input.textView.isEditable,
+        window.firstResponder === input.textView
+      else {
+        throw PDFError(.malformed, "Double-click did not enter native page typing")
+      }
+      input.textView.setMarkedText(
+        "composition", selectedRange: NSRange(location: 11, length: 0),
+        replacementRange: NSRange(location: 0, length: 0))
+      guard input.textView.hasMarkedText(), viewer.pendingEditFinisher?() == false,
+        viewer.isEditingPageText,
+        try document.editSession.bytesForSave() == selectionBaseline
+      else {
+        throw PDFError(.malformed, "Incomplete IME composition was committed")
+      }
+      input.textView.unmarkText()
+      viewer.pageTextCancel?()
+      guard !viewer.isTypingPageText, !viewer.isEditingPageText,
+        try document.editSession.bytesForSave() == selectionBaseline
+      else {
+        throw PDFError(.malformed, "Native composition cancellation changed the document")
+      }
+
       window.setContentSize(NSSize(width: 960, height: 650))
       try await Task.sleep(for: .milliseconds(150))
       let originalFrame = window.frame
@@ -173,6 +260,8 @@
       else { throw PDFError(.malformed, "Settings/menu structure regression") }
       settings.close()
       return [
+        "directTextSelection":
+          "single-click selection, body move/cancel, double-click typing, marked-text Save veto",
         "status": "passed", "blankAuthoring": "created, real text, saved, undo/redo",
         "sidebarModes": SidebarMode.allCases.map(\.rawValue),
         "windowSizing":

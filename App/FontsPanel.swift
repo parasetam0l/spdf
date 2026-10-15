@@ -31,9 +31,9 @@ struct FontsPanel: View {
           .padding(.vertical, 6)
       }
       if model.entries.isEmpty {
-        ContentUnavailableView(
-          "No Fonts Found", systemImage: "textformat",
-          description: Text("This document does not declare any fonts yet."))
+        WorkspacePanelEmptyState(
+          title: "No document fonts", symbol: "textformat",
+          detail: "No fonts are listed in this PDF.")
       } else {
         List {
           Section("Used Fonts") {

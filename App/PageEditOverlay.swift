@@ -37,6 +37,47 @@ struct PageEditOverlay: NSViewRepresentable {
 final class PageEditOverlayView: NSView, NSTextFieldDelegate {
   weak var viewer: PDFViewingSession?
   private var isCommitting = false
+  private var hoverTarget: PageTextTarget?
+  private var pointerTracking: NSTrackingArea?
+
+  override func updateTrackingAreas() {
+    super.updateTrackingAreas()
+    if let pointerTracking { removeTrackingArea(pointerTracking) }
+    let area = NSTrackingArea(
+      rect: .zero,
+      options: [.mouseMoved, .mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect],
+      owner: self, userInfo: nil)
+    addTrackingArea(area)
+    pointerTracking = area
+  }
+  override func mouseMoved(with event: NSEvent) {
+    guard viewer?.activeTool == .textEdit, textCanvas == nil else { return }
+    let point = convert(event.locationInWindow, from: nil)
+    let found: PageTextTarget?
+    if case .textRun(let text)? = target(at: point) { found = text } else { found = nil }
+    if hoverTarget != found {
+      hoverTarget = found
+      needsDisplay = true
+    }
+    if found != nil { NSCursor.openHand.set() }
+  }
+  override func mouseExited(with event: NSEvent) {
+    hoverTarget = nil
+    needsDisplay = true
+  }
+  override func draw(_ dirtyRect: NSRect) {
+    guard textCanvas == nil, viewer?.activeTool == .textEdit, let target = hoverTarget,
+      let viewer, let page = viewer.view.document?.page(at: target.pageIndex)
+    else { return }
+    let r = target.rect
+    let rect = viewer.view.convert(
+      CGRect(x: r[0], y: r[1], width: r[2] - r[0], height: r[3] - r[1]), from: page)
+    let outline = NSBezierPath(
+      roundedRect: convert(rect, from: viewer.view).insetBy(dx: -3, dy: -3), xRadius: 2, yRadius: 2)
+    NSColor.controlAccentColor.withAlphaComponent(0.4).setStroke()
+    outline.lineWidth = 0.75
+    outline.stroke()
+  }
 
   enum EditTarget {
     case form(FormFieldTarget)
@@ -94,7 +135,8 @@ final class PageEditOverlayView: NSView, NSTextFieldDelegate {
 
   override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
-  /// In Edit PDF a body drag moves a block; a click places its text caret.
+  /// In Edit PDF a click selects the block and a body drag moves it.
+  /// Double-clicking enters native text input.
   /// The Select tool keeps PDFKit's native character selection.
   private var pressTarget: EditTarget?
   private var pressPoint: NSPoint = .zero
@@ -164,6 +206,7 @@ final class PageEditOverlayView: NSView, NSTextFieldDelegate {
       return
     }
     beginEditing(pending, at: point)
+    if event.clickCount >= 2 { textCanvas?.beginTyping(at: point, selectWord: true) }
   }
 
   /// Resolve an editable target under an overlay point. The overlay shares
@@ -193,6 +236,8 @@ final class PageEditOverlayView: NSView, NSTextFieldDelegate {
   }
 
   private func beginEditing(_ target: EditTarget, at point: NSPoint) {
+    hoverTarget = nil
+    needsDisplay = true
     guard let viewer, let document = viewer.view.document,
       target.pageIndex >= 0, target.pageIndex < document.pageCount,
       let page = document.page(at: target.pageIndex),
@@ -229,8 +274,9 @@ final class PageEditOverlayView: NSView, NSTextFieldDelegate {
       }
       textCanvas = canvas
       canvas.frame = bounds
-      canvas.onFinish = { [weak self, weak viewer] in
+      canvas.onFinish = { [weak self, weak viewer] committed in
         self?.textCanvas = nil
+        if committed, run == nil { _ = viewer?.activateTool(.textEdit) }
         if let view = viewer?.view { self?.window?.makeFirstResponder(view) }
       }
       addSubview(canvas)
@@ -287,7 +333,13 @@ final class PageEditOverlayView: NSView, NSTextFieldDelegate {
     commitEditing()
   }
 
-  func synchronizeCanvas() { textCanvas?.synchronizeGeometry() }
+  func synchronizeCanvas() {
+    textCanvas?.synchronizeGeometry()
+    if viewer?.activeTool != .textEdit, hoverTarget != nil {
+      hoverTarget = nil
+      needsDisplay = true
+    }
+  }
   func editTextBlock(_ target: PageTextTarget) {
     guard let viewer, let page = viewer.view.document?.page(at: target.pageIndex),
       commitEditing()
@@ -296,6 +348,7 @@ final class PageEditOverlayView: NSView, NSTextFieldDelegate {
     let point = viewer.view.convert(
       NSPoint(x: (rect[0] + rect[2]) / 2, y: (rect[1] + rect[3]) / 2), from: page)
     beginEditing(.textRun(target), at: convert(point, from: viewer.view))
+    textCanvas?.beginTyping()
   }
   func discardPendingEditing() {
     textCanvas?.cancel()

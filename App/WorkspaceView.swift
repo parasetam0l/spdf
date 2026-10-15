@@ -6,6 +6,10 @@ import SwiftUI
 
 struct WorkspaceView: View {
   @ObservedObject var viewer: PDFViewingSession
+  @ObservedObject var documentState: WorkspaceDocumentState
+  var onSave: () -> Void
+  var onUndo: () -> Void
+  var onRedo: () -> Void
   var onOpenDroppedFile: ((URL) -> Void)?
   @ObservedObject var comments: CommentsModel
   @ObservedObject var forms: FormsModel
@@ -38,363 +42,125 @@ struct WorkspaceView: View {
   var onHighlight: () -> Void
   var onNote: () -> Void
   @State private var pageEntry = "1"
+  @State private var inspectorVisible = true
+  @State private var inspectorPopover = false
   @FocusState private var searchFocused: Bool
 
   var body: some View {
-    VStack(spacing: 0) {
-      HStack(spacing: 8) {
-        toolButton("Select", image: "cursorarrow", tool: .select)
-        toolButton("Edit PDF", image: "square.and.pencil", tool: .textEdit)
-        toolButton("Add Text", image: "text.badge.plus", tool: .addText)
-        toolButton("Images", image: "photo", tool: .imageEdit)
-        toolButton("Comments", image: "text.bubble", tool: .annotate)
-        toolButton("Pages", image: "square.grid.2x2", tool: .page)
-        Spacer(minLength: 12)
-        Button {
-          viewer.showSearch()
-        } label: {
-          Label("Find", systemImage: "magnifyingglass")
+    GeometryReader { geometry in
+      let wide = geometry.size.width >= 1_000
+      VStack(spacing: 0) {
+        commandBar(wide: wide)
+        Divider()
+        if viewer.isSearchVisible {
+          searchBar
+          Divider()
         }
-        .help("Find text (⌘F)")
-      }
-      .buttonStyle(.plain)
-      .padding(.horizontal, 14).padding(.vertical, 8)
-      .background(.bar)
-      .disabled(viewer.isLocked)
-      Divider()
-      HStack(spacing: 12) {
-        Text(toolHint).foregroundStyle(.secondary).lineLimit(1)
-        Spacer(minLength: 4)
-        if viewer.activeTool == .page {
-          Button("Organize Pages…", action: onOrganizePages)
-          Button("Insert Blank Page", action: onInsertBlankPage)
-          Button("Rotate Right", action: onRotateRight)
-        } else if viewer.activeTool == .annotate {
-          Button("Highlight", action: onHighlight)
-            .disabled(viewer.view.currentSelection == nil || !canEdit)
-          Button("Add Note", action: onNote)
-            .disabled(viewer.view.currentSelection == nil || !canEdit)
-          Button(viewer.isInkToolActive ? "Stop Drawing" : "Draw") { viewer.toggleInkTool() }
-            .disabled(!canEdit)
-        } else if viewer.activeTool == .textEdit || viewer.activeTool == .addText {
-          Text(viewer.pageTextStyle.fontFamily).lineLimit(1).frame(maxWidth: 110)
-            .help("The document's font is retained")
-          TextField(
-            "Text size",
-            value: Binding(
-              get: { viewer.pageTextStyle.fontSize },
-              set: { value in
-                guard value.isFinite, (2...144).contains(value) else { return }
-                viewer.pageTextStyle.fontSize = value
-                viewer.pageTextStyleApplier?(viewer.pageTextStyle)
-              }), format: .number.precision(.fractionLength(0...1))
-          )
-          .frame(width: 46).accessibilityLabel("Text size")
-          Text("pt").foregroundStyle(.secondary)
-          Menu {
-            Button("Black") { setTextColor([0, 0, 0]) }
-            Button("Dark Gray") { setTextColor([0.35, 0.35, 0.35]) }
-            Button("Red") { setTextColor([0.8, 0.12, 0.12]) }
-            Button("Blue") { setTextColor([0.08, 0.25, 0.8]) }
-            Button("Green") { setTextColor([0.05, 0.45, 0.2]) }
-            Divider()
-            Button("Custom Color…") { PageTextColorPanelController.shared.show(for: viewer) }
-          } label: {
-            let rgb = viewer.pageTextStyle.color
-            Image(nsImage: textColorSwatch(rgb)).renderingMode(.original)
-              .frame(width: 26, height: 24)
-          }
-          .menuStyle(.borderlessButton).fixedSize()
-          .accessibilityLabel("Text color").help("Text color")
-          if viewer.isEditingPageText {
-            Button("Done") { _ = viewer.pendingEditFinisher?() }
-              .keyboardShortcut(.return, modifiers: .command)
-          }
-        }
-      }
-      .font(.callout)
-      .padding(.horizontal, 16)
-      .frame(height: 36)
-      .background(.bar)
-      .disabled(viewer.isLocked)
-      Divider()
-      HStack(spacing: 10) {
-        Button {
-          viewer.isSidebarVisible.toggle()
-        } label: {
-          Image(systemName: "sidebar.left")
-            // P12-026: the label carries the minimum hit size (borderless
-            // buttons size to content, so button-level frames are ignored).
-            .frame(minWidth: 32, minHeight: 32)
-        }
-        // P12-026: primary pointer targets keep a minimum hit size without
-        // giving up the dense desktop layout (the visuals stay compact; the
-        // hit area grows).
-        .help("Show or hide sidebar").accessibilityLabel("Toggle sidebar")
-        Picker("Sidebar", selection: $viewer.sidebarMode) {
-          Text("Pages").tag(SidebarMode.pages)
-          Text("Comments").tag(SidebarMode.comments)
-          Text("Forms").tag(SidebarMode.forms)
-          Text("Signatures").tag(SidebarMode.signatures)
-          Text("Structure").tag(SidebarMode.structure)
-          Text("Fonts").tag(SidebarMode.fonts)
-          Text("Inspector").tag(SidebarMode.inspector)
-          Text("Info").tag(SidebarMode.info)
-        }
-        .labelsHidden()
-        .frame(width: 124)
-        .disabled(!viewer.isSidebarVisible)
-        .accessibilityLabel("Sidebar content")
-        Divider().frame(height: 18)
-        Button {
-          viewer.previousPage()
-        } label: {
-          Image(systemName: "chevron.left")
-            .frame(minWidth: 32, minHeight: 32)
-        }
-        .disabled(!viewer.canGoBack).help("Previous page").accessibilityLabel("Previous page")
-        HStack(spacing: 6) {
-          TextField("Page", text: $pageEntry)
-            .frame(width: 42).multilineTextAlignment(.center)
-            .onSubmit {
-              if let page = Int(pageEntry) { viewer.go(to: page) }
-              pageEntry = String(viewer.pageNumber)
+        if case .failed(let message) = viewer.documentState {
+          ContentUnavailableView(
+            "Could Not Open Document", systemImage: "doc.badge.gearshape",
+            description: Text(message))
+        } else if case .empty = viewer.documentState {
+          ContentUnavailableView(
+            "No Document", systemImage: "doc", description: Text("Open a PDF to begin."))
+        } else if case .loading = viewer.documentState {
+          ProgressView("Opening…").frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else if viewer.isLocked {
+          ContentUnavailableView(
+            "Password-protected PDF", systemImage: "lock.doc",
+            description: Text("Choose Tools → Security → Unlock Document to continue."))
+        } else {
+          HStack(spacing: 0) {
+            HSplitView {
+              if viewer.isSidebarVisible { navigationPanel }
+              pageCanvas
             }
-            .accessibilityLabel("Page number")
-          Text("of \(viewer.pageCount)").foregroundStyle(.secondary).monospacedDigit()
-        }
-        Button {
-          viewer.nextPage()
-        } label: {
-          Image(systemName: "chevron.right")
-            .frame(minWidth: 32, minHeight: 32)
-        }
-        .disabled(!viewer.canGoForward).help("Next page").accessibilityLabel("Next page")
-        Spacer()
-        Button {
-          viewer.zoomOut()
-        } label: {
-          Image(systemName: "minus.magnifyingglass")
-            .frame(minWidth: 32, minHeight: 32)
-        }
-        .help("Zoom out").accessibilityLabel("Zoom out")
-        Text("\(Int(viewer.scale * 100))%")
-          .monospacedDigit().frame(minWidth: 44).accessibilityLabel(
-            "Zoom \(Int(viewer.scale * 100)) percent")
-        Button {
-          viewer.zoomIn()
-        } label: {
-          Image(systemName: "plus.magnifyingglass")
-            .frame(minWidth: 32, minHeight: 32)
-        }
-        .help("Zoom in").accessibilityLabel("Zoom in")
-        Button("Fit Page") { viewer.fitPage() }
-        // P12-021: running background jobs with concise descriptions and
-        // cancellation, inline in the toolbar.
-        if let job = jobs.jobs.first {
-          HStack(spacing: 6) {
-            ProgressView(value: job.fraction) { Text(job.title) }
-              .frame(width: 120)
-            Text("\(job.completed)/\(job.total)")
-              .monospacedDigit().foregroundStyle(.secondary)
-            Button {
-              jobs.requestCancel(id: job.id)
-            } label: {
-              Image(systemName: "xmark.circle")
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            if usesTextProperties && wide && inspectorVisible {
+              Divider()
+              WorkspaceTextInspector(viewer: viewer)
             }
-            .help("Cancel \(job.title)").accessibilityLabel("Cancel \(job.title)")
-            .disabled(!jobs.canCancel(id: job.id))
           }
+          .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        Picker(
-          "Page layout",
-          selection: Binding(
-            get: { viewer.view.displayMode == .singlePageContinuous },
-            set: { viewer.setContinuous($0) })
-        ) {
-          Text("Continuous").tag(true)
-          Text("Single Page").tag(false)
-        }
-        .labelsHidden()
-        .frame(width: 130)
+        Divider()
+        documentFooter
       }
-      .buttonStyle(.borderless)
-      .padding(.horizontal, 16).padding(.vertical, 6)
-      .background(.bar)
-      .disabled(viewer.isLocked)
-      // P10-003: dropping PDF files onto the window opens them (Dock
-      // drops and Finder opens arrive through the application delegate).
+      .frame(maxWidth: .infinity, maxHeight: .infinity)
+      .background(Color(nsColor: .windowBackgroundColor))
       .onDrop(of: [.pdf], isTargeted: nil) { providers in
         for provider in providers {
           _ = provider.loadObject(ofClass: URL.self) { url, _ in
-            if let url { onOpenDroppedFile?(url) }
+            if let url { Task { @MainActor in onOpenDroppedFile?(url) } }
           }
         }
         return true
       }
-      Divider()
-      if viewer.isSearchVisible {
-        HStack(spacing: 8) {
-          Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
-          TextField("Find", text: $viewer.searchText)
-            .textFieldStyle(.roundedBorder)
-            .frame(width: 220)
-            .focused($searchFocused)
-            .onSubmit { viewer.runSearch() }
-            .accessibilityLabel("Find text")
-          Text(
-            viewer.searchMatchCount == 0
-              ? "No matches" : "\(viewer.searchIndex) of \(viewer.searchMatchCount)"
-          )
-          .font(.caption).foregroundStyle(.secondary).monospacedDigit()
-          Button {
-            viewer.searchPrevious()
-          } label: {
-            Image(systemName: "chevron.up")
-          }
-          .help("Previous match").accessibilityLabel("Previous match")
-          .disabled(viewer.searchMatchCount == 0)
-          Button {
-            viewer.searchNext()
-          } label: {
-            Image(systemName: "chevron.down")
-          }
-          .help("Next match").accessibilityLabel("Next match")
-          .disabled(viewer.searchMatchCount == 0)
-          Spacer()
-          Button {
-            viewer.hideSearch()
-          } label: {
-            Image(systemName: "xmark.circle.fill")
-          }
-          .help("Close search").accessibilityLabel("Close search")
-        }
-        .buttonStyle(.borderless)
-        .padding(.horizontal, 16).padding(.vertical, 8)
-        .background(.bar)
-        .onAppear {
-          // Focus after SwiftUI has attached the conditional native text field.
-          DispatchQueue.main.async { searchFocused = true }
-        }
-        Divider()
-      }
-      if case .failed(let message) = viewer.documentState {
-        ContentUnavailableView(
-          "Could Not Open Document", systemImage: "doc.badge.gearshape",
-          description: Text(message))
-      } else if case .empty = viewer.documentState {
-        ContentUnavailableView(
-          "No Document", systemImage: "doc",
-          description: Text("Open a PDF to view it here."))
-      } else if case .loading = viewer.documentState {
-        ProgressView("Opening…").frame(maxWidth: .infinity, maxHeight: .infinity)
-      } else if viewer.isLocked {
-        ContentUnavailableView(
-          "Password-protected PDF", systemImage: "lock.doc",
-          description: Text("Choose Tools → Security → Unlock Document to view this document."))
-      } else {
-        HSplitView {
-          if viewer.isSidebarVisible {
-            Group {
-              switch viewer.sidebarMode {
-              case .pages:
-                NativeView(view: viewer.thumbnails)
-                  .frame(
-                    minWidth: 144,
-                    idealWidth: viewer.sidebarWidth > 0 ? viewer.sidebarWidth : 168,
-                    maxWidth: 320
-                  )
-                  .accessibilityLabel("Page thumbnails")
-              case .comments:
-                CommentsPanel(
-                  comments: comments.comments, pageCount: viewer.pageCount,
-                  onSelect: onSelectComment, onDelete: onDeleteComment,
-                  onReply: onReplyComment, onSetState: onSetStateComment)
-              case .forms:
-                FormsPanel(
-                  fields: forms.fields, orphanedWidgetCount: forms.orphanedWidgetCount,
-                  onSubmitText: onSubmitFormText,
-                  onDraftText: { forms.pendingText[$0] = $1 }, onToggle: onToggleForm,
-                  onSelectChoice: onSelectFormChoice, onSelect: onSelectFormField)
-              case .signatures:
-                SignaturesPanel(entries: signatures.entries, onSelect: onSelectSignature)
-              case .fonts:
-                FontsPanel(model: fonts, onProvision: onProvisionFont)
-              case .inspector:
-                SelectionInspectorPanel(viewer: viewer)
-              case .info:
-                DocumentInfoPanel(viewer: viewer)
-              case .structure:
-                StructurePanel(
-                  model: structure, onSelect: onSelectStructurePage,
-                  onEditRole: onEditStructureRole, onEditAltText: onEditStructureAltText,
-                  onMarkArtifact: onMarkStructureArtifact,
-                  onSuggestTags: onSuggestStructureTags,
-                  onAcceptSuggestion: onAcceptStructureSuggestion,
-                  onRejectSuggestion: onRejectStructureSuggestion,
-                  onApplySuggestions: onApplyStructureSuggestions,
-                  onDiscardSuggestions: onDiscardStructureSuggestions)
-              }
-            }
-            .frame(maxHeight: .infinity, alignment: .top)
-          }
-          VStack(spacing: 0) {
-            // P12-018: rulers align with the page pane edges in the same
-            // layout pass, with a corner square where they meet.
-            if viewer.areRulersVisible {
-              HStack(spacing: 0) {
-                Color.clear.frame(width: 28, height: 22)
-                HorizontalRuler(viewer: viewer).frame(height: 22)
-              }
-              .accessibilityElement(children: .ignore)
-              .accessibilityLabel("Horizontal ruler")
-            }
-            HStack(spacing: 0) {
-              if viewer.areRulersVisible {
-                VerticalRuler(viewer: viewer).frame(width: 28)
-                  .accessibilityElement(children: .ignore)
-                  .accessibilityLabel("Vertical ruler")
-              }
-              ZStack {
-                NativeView(view: viewer.view)
-                  .accessibilityLabel("PDF pages")
-                  .accessibilityValue(viewer.selectedObjectSummary ?? "No selection")
-                PageEditOverlay(viewer: viewer)
-                GraphicSelectionOverlay(viewer: viewer)
-                if viewer.areGuidesVisible {
-                  ZStack {
-                    GuideOverlayView(viewer: viewer)
-                  }
-                  .frame(maxWidth: .infinity, maxHeight: .infinity)
-                  .allowsHitTesting(false)
-                  .accessibilityElement(children: .ignore)
-                  .accessibilityLabel("Alignment guides")
-                }
-                if viewer.isInkToolActive {
-                  InkOverlay(viewer: viewer)
-                }
-              }
-            }
-          }
-          .frame(minWidth: 450, maxWidth: .infinity, maxHeight: .infinity)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-      }
-      Divider()
-      HStack {
-        Label(modeTitle, systemImage: modeImage).foregroundStyle(.secondary)
-        Spacer()
-        Text("\(viewer.pageCount) \(viewer.pageCount == 1 ? "page" : "pages")").foregroundStyle(
-          .secondary)
-      }
-      .font(.caption).padding(.horizontal, 16).padding(.vertical, 8)
     }
-    .frame(maxWidth: .infinity, maxHeight: .infinity)
     .onAppear { pageEntry = String(max(1, viewer.pageNumber)) }
     .onChange(of: viewer.pageNumber) { _, page in pageEntry = String(page) }
   }
 
-  private func toolButton(_ title: String, image: String, tool: ViewerToolMode) -> some View {
+  private func commandBar(wide: Bool) -> some View {
+    HStack(spacing: 8) {
+      iconButton("Toggle sidebar", symbol: "sidebar.left") { viewer.isSidebarVisible.toggle() }
+        .help("Show or hide navigation")
+      Divider().frame(height: 18)
+      ViewThatFits(in: .horizontal) {
+        toolStrip(compact: false)
+        toolStrip(compact: true)
+      }
+      Spacer(minLength: 4)
+      HStack(spacing: 2) {
+        iconButton("Undo", symbol: "arrow.uturn.backward", action: onUndo)
+          .disabled(
+            !documentState.canUndo && !viewer.hasPendingPageTextChanges && !viewer.canUndoPageTyping
+          )
+        iconButton("Redo", symbol: "arrow.uturn.forward", action: onRedo)
+          .disabled(!documentState.canRedo && !viewer.canRedoPageTyping)
+      }
+      Divider().frame(height: 18)
+      iconButton("Find", symbol: "magnifyingglass") { viewer.showSearch() }
+        .help("Find in document (⌘F)")
+      if usesTextProperties {
+        iconButton("Text properties", symbol: "sidebar.right") {
+          if wide { inspectorVisible.toggle() } else { inspectorPopover.toggle() }
+        }
+        .popover(isPresented: $inspectorPopover, arrowEdge: .bottom) {
+          WorkspaceTextInspector(viewer: viewer).frame(height: 460)
+        }
+      }
+      if viewer.isEditingPageText && (!wide || !inspectorVisible) {
+        Button("Done") { _ = viewer.pendingEditFinisher?() }
+          .buttonStyle(.borderedProminent).controlSize(.small)
+      }
+      Button(action: onSave) { Label("Save", systemImage: "square.and.arrow.down") }
+        .buttonStyle(.bordered).controlSize(.small)
+        .disabled(!documentState.hasChanges)
+        .help("Save document (⌘S)")
+    }
+    .padding(.horizontal, 12).frame(height: 44)
+    .background(.bar)
+    .disabled(viewer.isLocked)
+    .accessibilityElement(children: .contain)
+    .accessibilityLabel("Document toolbar")
+  }
+
+  private func toolStrip(compact: Bool) -> some View {
+    HStack(spacing: 2) {
+      toolButton("Select", image: "cursorarrow", tool: .select, compact: compact)
+      toolButton("Edit PDF", image: "square.and.pencil", tool: .textEdit, compact: false)
+      toolButton("Add Text", image: "text.badge.plus", tool: .addText, compact: compact)
+      toolButton("Images", image: "photo", tool: .imageEdit, compact: compact)
+      Divider().frame(height: 18).padding(.horizontal, 4)
+      toolButton("Comments", image: "text.bubble", tool: .annotate, compact: compact)
+      toolButton("Pages", image: "square.grid.2x2", tool: .page, compact: compact)
+    }
+    .fixedSize()
+  }
+  private func toolButton(_ title: String, image: String, tool: ViewerToolMode, compact: Bool)
+    -> some View
+  {
     Button {
       guard viewer.activateTool(tool) else { return }
       viewer.isInkToolActive = false
@@ -407,67 +173,299 @@ struct WorkspaceView: View {
         viewer.isSidebarVisible = true
       }
     } label: {
-      Label(title, systemImage: image)
-        .font(.system(size: 12, weight: viewer.activeTool == tool ? .semibold : .regular))
-        .padding(.horizontal, 10).frame(height: 34)
-        .foregroundStyle(viewer.activeTool == tool ? Color.white : Color.primary)
-        .background(
-          viewer.activeTool == tool ? Color.accentColor : Color.clear,
-          in: RoundedRectangle(cornerRadius: 7))
+      HStack(spacing: 5) {
+        Image(systemName: image).font(.system(size: 13))
+        if !compact { Text(title) }
+      }
     }
+    .buttonStyle(WorkspaceToolStyle(selected: viewer.activeTool == tool))
     .disabled(tool != .select && tool != .annotate && !canEdit)
+    .help(title)
     .accessibilityLabel(title)
     .accessibilityValue(viewer.activeTool == tool ? "Active" : "Inactive")
   }
 
-  private var toolHint: String {
-    switch viewer.activeTool {
-    case .select: return "Select text to copy, highlight or add a comment."
-    case .textEdit: return "Click to type. Drag text or its handle to move. Escape cancels."
-    case .addText: return "Type on the page. Return starts a line; Done finishes."
-    case .imageEdit: return "Select an image to move it. Right-click for image actions."
-    case .annotate: return "Select text for markup, or draw on the page."
-    case .page: return "Reorder, insert, rotate or extract pages."
+  private var navigationPanel: some View {
+    VStack(spacing: 0) {
+      HStack(spacing: 3) {
+        navigationTab(.pages, title: "Pages", symbol: "square.on.square")
+        navigationTab(.comments, title: "Comments", symbol: "text.bubble")
+        navigationTab(.forms, title: "Forms", symbol: "rectangle.and.pencil.and.ellipsis")
+        Spacer(minLength: 0)
+        Menu {
+          ForEach(SidebarMode.allCases, id: \.self) { mode in
+            Button(sidebarTitle(mode)) { viewer.sidebarMode = mode }
+          }
+        } label: {
+          Image(systemName: "ellipsis").frame(width: 24, height: 26)
+        }
+        .menuStyle(.borderlessButton).fixedSize()
+        .accessibilityLabel("Navigation panels")
+      }
+      .padding(.horizontal, 8).frame(height: 38)
+      HStack {
+        Text(sidebarTitle(viewer.sidebarMode)).font(.system(size: 11, weight: .semibold))
+        Spacer()
+        if viewer.sidebarMode == .pages {
+          Text("\(viewer.pageCount)").font(.system(size: 10)).foregroundStyle(.secondary)
+        }
+      }
+      .padding(.horizontal, 14).padding(.bottom, 10)
+      if viewer.activeTool == .page {
+        HStack(spacing: 8) {
+          Button("Organize…", action: onOrganizePages).controlSize(.small)
+          iconButton(
+            "Insert Blank Page", symbol: "plus.rectangle.on.rectangle", action: onInsertBlankPage)
+          iconButton("Rotate Right", symbol: "rotate.right", action: onRotateRight)
+        }.padding(.horizontal, 10).padding(.bottom, 8)
+      }
+      if viewer.activeTool == .annotate {
+        HStack(spacing: 6) {
+          iconButton("Highlight", symbol: "highlighter", action: onHighlight)
+            .disabled(viewer.view.currentSelection == nil || !canEdit)
+          iconButton("Add Note", symbol: "note.text.badge.plus", action: onNote)
+            .disabled(viewer.view.currentSelection == nil || !canEdit)
+          Button {
+            viewer.toggleInkTool()
+          } label: {
+            Image(systemName: "scribble").frame(width: 32, height: 32)
+          }
+          .buttonStyle(WorkspaceToolStyle(selected: viewer.isInkToolActive))
+          .help(viewer.isInkToolActive ? "Stop drawing" : "Draw on page")
+          .accessibilityLabel("Draw")
+          .disabled(!canEdit)
+          Spacer(minLength: 0)
+        }.padding(.horizontal, 10).padding(.bottom, 8)
+      }
+      Divider()
+      sidebarContent.frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
     }
+    .background(Color(nsColor: .controlBackgroundColor))
+    .frame(
+      minWidth: 170,
+      idealWidth: viewer.sidebarWidth > 0 ? min(260, max(170, viewer.sidebarWidth)) : 200,
+      maxWidth: 280
+    )
+    .frame(maxHeight: .infinity)
+    .background(WorkspaceNavigationSizer(viewer: viewer))
+    .accessibilityElement(children: .contain)
+    .accessibilityLabel("Document navigation")
   }
 
-  private func setTextColor(_ color: [Double]) {
-    viewer.pageTextStyle.color = color
-    viewer.pageTextStyleApplier?(viewer.pageTextStyle)
-  }
-
-  private func textColorSwatch(_ rgb: [Double]) -> NSImage {
-    let color = NSColor(srgbRed: rgb[0], green: rgb[1], blue: rgb[2], alpha: 1)
-    let image =
-      NSImage(systemSymbolName: "circle.fill", accessibilityDescription: nil)?
-      .withSymbolConfiguration(.init(paletteColors: [color]))
-      ?? NSImage(size: NSSize(width: 14, height: 14))
-    image.isTemplate = false
-    return image
-  }
-
-  private var modeTitle: String {
-    switch viewer.activeTool {
-    case .select: return canEdit ? "Ready" : "Read Only"
-    case .textEdit: return "Editing PDF"
-    case .addText: return "Adding Text"
-    case .imageEdit: return "Editing Images"
-    case .annotate: return "Commenting"
-    case .page: return "Organizing Pages"
+  private func navigationTab(_ mode: SidebarMode, title: String, symbol: String) -> some View {
+    Button {
+      viewer.sidebarMode = mode
+    } label: {
+      Image(systemName: symbol).font(.system(size: 13)).frame(width: 24, height: 24)
     }
+    .buttonStyle(WorkspaceToolStyle(selected: viewer.sidebarMode == mode))
+    .help(title).accessibilityLabel("Show \(title.lowercased())")
+    .accessibilityValue(viewer.sidebarMode == mode ? "Selected" : "")
   }
 
-  private var modeImage: String {
-    switch viewer.activeTool {
-    case .select: return "cursorarrow"
-    case .textEdit, .addText: return "square.and.pencil"
-    case .imageEdit: return "photo"
-    case .annotate: return "text.bubble"
-    case .page: return "square.grid.2x2"
+  private var documentFooter: some View {
+    HStack(spacing: 12) {
+      HStack(spacing: 6) {
+        if let job = jobs.jobs.first {
+          ProgressView().controlSize(.mini)
+          Text(job.title).lineLimit(1)
+          Button {
+            jobs.requestCancel(id: job.id)
+          } label: {
+            Image(systemName: "xmark")
+          }
+          .buttonStyle(.borderless).help("Cancel \(job.title)")
+          .disabled(!jobs.canCancel(id: job.id))
+        } else {
+          Circle().fill(documentState.hasChanges ? Color.orange : Color.secondary.opacity(0.45))
+            .frame(width: 4, height: 4)
+          Text(
+            !canEdit
+              ? "Read only" : documentState.hasChanges ? "Unsaved changes" : "All changes saved")
+        }
+      }
+      .font(.system(size: 10)).foregroundStyle(.secondary)
+      .frame(maxWidth: .infinity, alignment: .leading)
+      HStack(spacing: 5) {
+        iconButton("Previous page", symbol: "chevron.left") { viewer.previousPage() }.disabled(
+          !viewer.canGoBack)
+        TextField("Page", text: $pageEntry)
+          .textFieldStyle(.plain).multilineTextAlignment(.center).frame(width: 28)
+          .padding(.vertical, 3)
+          .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 4))
+          .onSubmit {
+            if let page = Int(pageEntry) { viewer.go(to: page) }
+            pageEntry = String(viewer.pageNumber)
+          }
+          .accessibilityLabel("Page number")
+        Text("of \(viewer.pageCount)").foregroundStyle(.secondary).monospacedDigit()
+        iconButton("Next page", symbol: "chevron.right") { viewer.nextPage() }.disabled(
+          !viewer.canGoForward)
+      }.font(.system(size: 11))
+      HStack(spacing: 4) {
+        iconButton("Zoom out", symbol: "minus") { viewer.zoomOut() }
+        Menu {
+          Button("Fit Page") { viewer.fitPage() }
+          Button("Fit Width") { viewer.fitWidth() }
+          Divider()
+          ForEach([50, 75, 100, 125, 150, 200], id: \.self) { percent in
+            Button("\(percent)%") { viewer.setZoom(Double(percent) / 100) }
+          }
+        } label: {
+          Text("\(Int(viewer.scale*100))%").monospacedDigit().frame(minWidth: 38)
+        }
+        .menuStyle(.borderlessButton).fixedSize()
+        .accessibilityLabel("Zoom \(Int(viewer.scale*100)) percent")
+        iconButton("Zoom in", symbol: "plus") { viewer.zoomIn() }
+        Divider().frame(height: 12).padding(.horizontal, 4)
+        Button("Fit Page") { viewer.fitPage() }.buttonStyle(.borderless)
+        Menu {
+          Button("Continuous") { viewer.setContinuous(true) }
+          Button("Single Page") { viewer.setContinuous(false) }
+        } label: {
+          Image(systemName: "rectangle.split.1x2").frame(width: 24, height: 24)
+        }
+        .menuStyle(.borderlessButton).fixedSize().accessibilityLabel("Page layout")
+      }
+      .font(.system(size: 11))
+      .frame(maxWidth: .infinity, alignment: .trailing)
     }
+    .padding(.horizontal, 14).frame(height: 32)
+    .background(.bar)
+    .disabled(viewer.isLocked)
   }
 
+  private var searchBar: some View {
+    HStack(spacing: 10) {
+      Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
+      TextField("Find in document", text: $viewer.searchText)
+        .textFieldStyle(.plain).frame(minWidth: 140, maxWidth: 280)
+        .focused($searchFocused).onSubmit { viewer.runSearch() }.accessibilityLabel("Find text")
+      Text(searchStatus).font(.caption).foregroundStyle(.secondary).monospacedDigit()
+      iconButton("Previous match", symbol: "chevron.up") { viewer.searchPrevious() }.disabled(
+        !hasCurrentMatches)
+      iconButton("Next match", symbol: "chevron.down") { viewer.searchNext() }.disabled(
+        !hasCurrentMatches)
+      Spacer()
+      iconButton("Close search", symbol: "xmark") { viewer.hideSearch() }
+    }
+    .padding(.horizontal, 16).frame(height: 38).background(.bar)
+    .onAppear { DispatchQueue.main.async { searchFocused = true } }
+  }
+  private var searchStatus: String {
+    if viewer.searchText.isEmpty { return "" }
+    if viewer.searchedText != viewer.searchText { return "Return to search" }
+    return viewer.searchMatchCount == 0
+      ? "No matches" : "\(viewer.searchIndex) of \(viewer.searchMatchCount)"
+  }
+  private var hasCurrentMatches: Bool {
+    viewer.searchedText == viewer.searchText && viewer.searchMatchCount > 0
+  }
+  private var usesTextProperties: Bool {
+    viewer.activeTool == .textEdit || viewer.activeTool == .addText
+  }
   private var canEdit: Bool { viewer.allowsContentEditing && !viewer.isLocked }
+  private func iconButton(_ title: String, symbol: String, action: @escaping () -> Void)
+    -> some View
+  {
+    Button(action: action) {
+      Image(systemName: symbol).font(.system(size: 12)).frame(width: 32, height: 32)
+    }
+    .buttonStyle(.borderless).accessibilityLabel(title).help(title)
+  }
+  private func sidebarTitle(_ mode: SidebarMode) -> String {
+    switch mode {
+    case .pages: return "Pages"
+    case .comments: return "Comments"
+    case .forms: return "Forms"
+    case .signatures: return "Signatures"
+    case .structure: return "Structure"
+    case .fonts: return "Fonts"
+    case .inspector: return "Selection Info"
+    case .info: return "Document Info"
+    }
+  }
+
+  private var sidebarContent: some View {
+    Group {
+      switch viewer.sidebarMode {
+      case .pages:
+        NativeView(view: viewer.thumbnails)
+          .accessibilityLabel("Page thumbnails")
+      case .comments:
+        CommentsPanel(
+          comments: comments.comments, pageCount: viewer.pageCount,
+          onSelect: onSelectComment, onDelete: onDeleteComment,
+          onReply: onReplyComment, onSetState: onSetStateComment)
+      case .forms:
+        FormsPanel(
+          fields: forms.fields, orphanedWidgetCount: forms.orphanedWidgetCount,
+          onSubmitText: onSubmitFormText,
+          onDraftText: { forms.pendingText[$0] = $1 }, onToggle: onToggleForm,
+          onSelectChoice: onSelectFormChoice, onSelect: onSelectFormField)
+      case .signatures:
+        SignaturesPanel(entries: signatures.entries, onSelect: onSelectSignature)
+      case .fonts:
+        FontsPanel(model: fonts, onProvision: onProvisionFont)
+      case .inspector:
+        SelectionInspectorPanel(viewer: viewer)
+      case .info:
+        DocumentInfoPanel(viewer: viewer)
+      case .structure:
+        StructurePanel(
+          model: structure, onSelect: onSelectStructurePage,
+          onEditRole: onEditStructureRole, onEditAltText: onEditStructureAltText,
+          onMarkArtifact: onMarkStructureArtifact,
+          onSuggestTags: onSuggestStructureTags,
+          onAcceptSuggestion: onAcceptStructureSuggestion,
+          onRejectSuggestion: onRejectStructureSuggestion,
+          onApplySuggestions: onApplyStructureSuggestions,
+          onDiscardSuggestions: onDiscardStructureSuggestions)
+      }
+    }
+  }
+
+  private var pageCanvas: some View {
+    VStack(spacing: 0) {
+      // P12-018: rulers align with the page pane edges in the same
+      // layout pass, with a corner square where they meet.
+      if viewer.areRulersVisible {
+        HStack(spacing: 0) {
+          Color.clear.frame(width: 28, height: 22)
+          HorizontalRuler(viewer: viewer).frame(height: 22)
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Horizontal ruler")
+      }
+      HStack(spacing: 0) {
+        if viewer.areRulersVisible {
+          VerticalRuler(viewer: viewer).frame(width: 28)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("Vertical ruler")
+        }
+        ZStack {
+          NativeView(view: viewer.view)
+            .accessibilityLabel("PDF pages")
+            .accessibilityValue(viewer.selectedObjectSummary ?? "No selection")
+          PageEditOverlay(viewer: viewer)
+          GraphicSelectionOverlay(viewer: viewer)
+          if viewer.areGuidesVisible {
+            ZStack {
+              GuideOverlayView(viewer: viewer)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .allowsHitTesting(false)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("Alignment guides")
+          }
+          if viewer.isInkToolActive {
+            InkOverlay(viewer: viewer)
+          }
+        }
+      }
+    }
+    .frame(minWidth: 320, maxWidth: .infinity, maxHeight: .infinity)
+  }
 }
 
 private struct NativeView<V: NSView>: NSViewRepresentable {

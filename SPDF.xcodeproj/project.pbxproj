@@ -51,6 +51,7 @@
 		E5E87804624D1233320C9673 /* UpdateRelaunchCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = AC3F2000EB9699A06E69C102 /* UpdateRelaunchCoordinator.swift */; };
 		E9A19C59B22DBD21DC4DBF19 /* DocumentController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 956CFADA4F98A800CE064D7E /* DocumentController.swift */; };
 		E9F3FCD6120F423EBE73ACE6 /* MacServices in Frameworks */ = {isa = PBXBuildFile; productRef = 6F428C749515EF1664FF0F81 /* MacServices */; };
+		EDB2FE1A9011B8EFE30278DE /* WorkspaceChrome.swift in Sources */ = {isa = PBXBuildFile; fileRef = B6E473AA51FAAA64191E1052 /* WorkspaceChrome.swift */; };
 		EF5D9E101289FDC3AD572200 /* SmokeTest.swift in Sources */ = {isa = PBXBuildFile; fileRef = 40CFDE87E89D9F244DF2A500 /* SmokeTest.swift */; };
 /* End PBXBuildFile section */
 
@@ -87,6 +88,7 @@
 		A984AC6A2AC818FAEAA157BA /* WorkspaceSmoke.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceSmoke.swift; sourceTree = "<group>"; };
 		AC3F2000EB9699A06E69C102 /* UpdateRelaunchCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UpdateRelaunchCoordinator.swift; sourceTree = "<group>"; };
 		B3DA39FC05B81DDCFC670B89 /* WorkspaceView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceView.swift; sourceTree = "<group>"; };
+		B6E473AA51FAAA64191E1052 /* WorkspaceChrome.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceChrome.swift; sourceTree = "<group>"; };
 		0F42D55017C22563EFAB12FC /* PublicSource */ = {isa = PBXFileReference; lastKnownFileType = folder; name = PublicSource; path = .; sourceTree = SOURCE_ROOT; };
 		C0705225D1C69ADFF420119E /* UpdateSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UpdateSettingsView.swift; sourceTree = "<group>"; };
 		C2D20568FDE859912E452D28 /* ComparisonSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComparisonSession.swift; sourceTree = "<group>"; };
@@ -151,6 +153,7 @@
 				EFC7C84694AA9DECF51EF198 /* TerminationCoordinator.swift */,
 				AC3F2000EB9699A06E69C102 /* UpdateRelaunchCoordinator.swift */,
 				C0705225D1C69ADFF420119E /* UpdateSettingsView.swift */,
+				B6E473AA51FAAA64191E1052 /* WorkspaceChrome.swift */,
 				861EA8B50EF918A38F86E7CE /* WorkspacePreferences.swift */,
 				B3DA39FC05B81DDCFC670B89 /* WorkspaceView.swift */,
 				885B1D8D908675B17F223BEB /* Diagnostics */,
@@ -337,6 +340,7 @@
 				48115D078626EB7A89A4649F /* TerminationSmoke.swift in Sources */,
 				E5E87804624D1233320C9673 /* UpdateRelaunchCoordinator.swift in Sources */,
 				89C657CE2CBD250F48A1B98E /* UpdateSettingsView.swift in Sources */,
+				EDB2FE1A9011B8EFE30278DE /* WorkspaceChrome.swift in Sources */,
 				8767D9ABC02F99629065E1B2 /* WorkspacePerformance.swift in Sources */,
 				8688559D76B81B374C8CB5F5 /* WorkspacePreferences.swift in Sources */,
 				0462C2635405398CFEBF90EA /* WorkspaceSmoke.swift in Sources */,

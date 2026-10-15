@@ -214,6 +214,7 @@ public final class PDFViewingSession: NSObject, ObservableObject, PDFViewDelegat
   @Published public private(set) var scale = 1.0
   @Published public private(set) var isLocked = false
   @Published public var searchText = ""
+  @Published public private(set) var searchedText: String?
   @Published public private(set) var searchMatchCount = 0
   @Published public private(set) var searchIndex = 0
   @Published public private(set) var isSearchVisible = false
@@ -229,6 +230,14 @@ public final class PDFViewingSession: NSObject, ObservableObject, PDFViewDelegat
   public var pendingEditFinisher: (() -> Bool)?
   @Published public var pageTextStyle = PageTextStyle()
   @Published public var isEditingPageText = false
+  @Published public var isTypingPageText = false
+  @Published public var hasPendingPageTextChanges = false
+  @Published public var canUndoPageTyping = false
+  @Published public var canRedoPageTyping = false
+  @Published public var pageTextPosition = [0.0, 0.0]
+  public var pageTextBeginTyping: (() -> Void)?
+  public var pageTextCancel: (() -> Void)?
+  public var pageTextPositionApplier: ((Double, Double) -> Void)?
   public var pageTextStyleApplier: ((PageTextStyle) -> Void)?
   public var hasPendingTextGesture: (() -> Bool)?
   public var onTextBlockPreview: ((PageTextTarget) -> Data?)?
@@ -400,6 +409,13 @@ public final class PDFViewingSession: NSObject, ObservableObject, PDFViewDelegat
   public func closeDocument() {
     onPendingPageTextChange?(false)
     isEditingPageText = false
+    isTypingPageText = false
+    hasPendingPageTextChanges = false
+    canUndoPageTyping = false
+    canRedoPageTyping = false
+    pageTextBeginTyping = nil
+    pageTextCancel = nil
+    pageTextPositionApplier = nil
     pageTextStyleApplier = nil
     selectedObjectSummary = nil
     selectionDetails = nil
@@ -451,6 +467,7 @@ public final class PDFViewingSession: NSObject, ObservableObject, PDFViewDelegat
       clearSearch()
       return
     }
+    searchedText = searchText
     searchMatches = document.findString(searchText, withOptions: [.caseInsensitive])
     searchMatchCount = searchMatches.count
     view.highlightedSelections = searchMatches
@@ -482,6 +499,7 @@ public final class PDFViewingSession: NSObject, ObservableObject, PDFViewDelegat
   }
 
   private func clearSearch() {
+    searchedText = nil
     searchMatches = []
     searchMatchCount = 0
     searchIndex = 0

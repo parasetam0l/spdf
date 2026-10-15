@@ -16,6 +16,7 @@ final class SPDFDocument: NSDocument {
   let signaturesModel = SignaturesModel()
   let structureModel = StructureModel()
   let fontsModel = FontsModel()
+  let workspaceDocumentState = WorkspaceDocumentState()
   private var warnedFonts: Set<String> = []
   /// P36-009: the table review window and its model stay alive while open.
   private var tableReviewModel: TableReviewModel?
@@ -195,8 +196,8 @@ final class SPDFDocument: NSDocument {
     // P12-019: the sidebar width is captured from the laid-out thumbnails
     // view (HSplitView divider drags report nowhere else); zero means the
     // width was never laid out and restores as automatic.
-    let sidebarWidth =
-      viewer.isSidebarVisible ? Double(viewer.thumbnails.frame.width) : viewer.sidebarWidth
+    let sidebarWidth = viewer.sidebarWidth > 0
+      ? viewer.sidebarWidth : Double(viewer.thumbnails.frame.width)
     return ViewState(
       windowFrame: [frame.origin.x, frame.origin.y, frame.size.width, frame.size.height],
       pageNumber: viewer.pageNumber, scale: viewer.scale,
@@ -301,6 +302,7 @@ final class SPDFDocument: NSDocument {
           }
         }
         jobCenter.finish(id: job)
+        refreshWorkspaceActions()
       }
       completionHandler(error)
     }
@@ -413,6 +415,7 @@ final class SPDFDocument: NSDocument {
     viewer.onPendingPageTextChange = { [weak self] changed in
       guard let self else { return }
       self.pendingPageText.hasChanges = changed
+      self.refreshWorkspaceActions()
       for controller in self.windowControllers {
         controller.window?.isDocumentEdited = self.isDocumentEdited
       }
@@ -440,7 +443,11 @@ final class SPDFDocument: NSDocument {
     window.isReleasedWhenClosed = false
     let hosting = NSHostingView(
       rootView: WorkspaceView(
-        viewer: viewer, onOpenDroppedFile: { [weak self] url in self?.openDroppedFile(url) },
+        viewer: viewer, documentState: workspaceDocumentState,
+        onSave: { [weak self] in self?.save(nil) },
+        onUndo: { NSApp.sendAction(NSSelectorFromString("undoEdit:"), to: NSApp.delegate, from: nil) },
+        onRedo: { NSApp.sendAction(NSSelectorFromString("redoEdit:"), to: NSApp.delegate, from: nil) },
+        onOpenDroppedFile: { [weak self] url in self?.openDroppedFile(url) },
         comments: commentsModel, forms: formsModel,
         signatures: signaturesModel, structure: structureModel,
         onSelectComment: { [weak self] comment in self?.navigate(to: comment) },
@@ -509,6 +516,7 @@ final class SPDFDocument: NSDocument {
     window.center()
     addWindowController(NSWindowController(window: window))
     restoreViewState(viewer: viewer)
+    refreshWorkspaceActions()
     refreshComments()
     refreshForms()
     refreshFonts()
@@ -612,6 +620,7 @@ final class SPDFDocument: NSDocument {
   /// latest edit; direct session edits (scripts, tests) keep the fallback
   /// path in `undoEdit()`/`redoEdit()`.
   private func noteUserEdit() {
+    defer { refreshWorkspaceActions() }
     // NSDocument observes this manager's groups and updates its change count
     // itself. Explicitly incrementing as well counts each native edit twice.
     guard let undoManager else {
@@ -4252,7 +4261,14 @@ final class SPDFDocument: NSDocument {
     return formatter.string(from: date)
   }
 
+  private func refreshWorkspaceActions() {
+    workspaceDocumentState.hasChanges = isDocumentEdited
+    workspaceDocumentState.canUndo = editSession.canUndo
+    workspaceDocumentState.canRedo = editSession.canRedo
+  }
+
   private func refreshViewer(preservingPage page: Int) {
+    defer { refreshWorkspaceActions() }
     guard
       let data = try? WorkspacePerformance.profile(
         "serialize-for-viewer",

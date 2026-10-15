@@ -17,9 +17,9 @@ struct FormsPanel: View {
 
   var body: some View {
     if fields.isEmpty && orphanedWidgetCount == 0 {
-      ContentUnavailableView(
-        "No Form Fields", systemImage: "list.bullet.rectangle",
-        description: Text("This document has no AcroForm fields."))
+      WorkspacePanelEmptyState(
+        title: "No fillable fields", symbol: "rectangle.and.pencil.and.ellipsis",
+        detail: "This PDF has no form fields to fill in.")
     } else {
       VStack(alignment: .leading, spacing: 0) {
         if orphanedWidgetCount > 0 {

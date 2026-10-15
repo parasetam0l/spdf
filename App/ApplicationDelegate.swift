@@ -636,11 +636,11 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
   private func showWelcome() {
     if welcome == nil {
       let window = NSWindow(
-        contentRect: NSRect(x: 0, y: 0, width: 680, height: 440),
+        contentRect: NSRect(x: 0, y: 0, width: 760, height: 480),
         styleMask: [.titled, .closable, .miniaturizable], backing: .buffered, defer: false)
       window.title = "sPDF Editor"
       window.isReleasedWhenClosed = false
-      window.contentView = NSHostingView(rootView: WelcomeView())
+      window.contentView = NSHostingView(rootView: WorkspaceWelcomeView())
       // P12-019: the welcome window keeps its placement across launches.
       window.setFrameAutosaveName("spdf-welcome")
       window.center()
@@ -921,23 +921,5 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
     item.keyEquivalentModifierMask = modifiers
     item.target = target
     menu.addItem(item)
-  }
-}
-
-private struct WelcomeView: View {
-  var body: some View {
-    VStack(spacing: 20) {
-      Image(systemName: "doc.richtext").font(.system(size: 60)).foregroundStyle(.blue)
-      Text("sPDF Editor").font(.largeTitle.weight(.semibold))
-      Text("Create a PDF or open one to edit.").foregroundStyle(.secondary)
-      HStack(spacing: 12) {
-        Button("New PDF") { NSDocumentController.shared.newDocument(nil) }
-          .buttonStyle(.borderedProminent).keyboardShortcut("n")
-        Button("Open PDF…") { NSDocumentController.shared.openDocument(nil) }
-          .buttonStyle(.bordered).keyboardShortcut("o")
-      }
-      .controlSize(.large)
-    }
-    .frame(maxWidth: .infinity, maxHeight: .infinity)
   }
 }

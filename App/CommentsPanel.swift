@@ -42,41 +42,46 @@ struct CommentsPanel: View {
 
   var body: some View {
     VStack(spacing: 0) {
-      VStack(alignment: .leading, spacing: 6) {
-        filterMenu(
-          title: pageIndex == nil ? "All Pages" : "Page \((pageIndex ?? 0) + 1)"
-        ) {
-          Button("All Pages") { pageIndex = nil }
-          Divider()
-          ForEach(1...max(1, pageCount), id: \.self) { page in
-            Button("Page \(page)") { pageIndex = page - 1 }
+      if !comments.isEmpty {
+        VStack(alignment: .leading, spacing: 6) {
+          filterMenu(
+            title: pageIndex == nil ? "All Pages" : "Page \((pageIndex ?? 0) + 1)"
+          ) {
+            Button("All Pages") { pageIndex = nil }
+            Divider()
+            ForEach(1...max(1, pageCount), id: \.self) { page in
+              Button("Page \(page)") { pageIndex = page - 1 }
+            }
+          }
+          filterMenu(
+            title: subtype == nil ? "All Types" : CommentsPanel.label(for: subtype!)
+          ) {
+            Button("All Types") { subtype = nil }
+            Divider()
+            ForEach(Array(Self.subtypes.enumerated()), id: \.offset) { _, name in
+              Button(Self.label(for: name)) { subtype = name }
+            }
+          }
+          filterMenu(
+            title: state == nil ? "All Statuses" : CommentsPanel.stateLabel(for: state!)
+          ) {
+            Button("All Statuses") { state = nil }
+            Divider()
+            ForEach(Array(Self.states.enumerated()), id: \.offset) { _, name in
+              Button(Self.stateLabel(for: name)) { state = name }
+            }
           }
         }
-        filterMenu(
-          title: subtype == nil ? "All Types" : CommentsPanel.label(for: subtype!)
-        ) {
-          Button("All Types") { subtype = nil }
-          Divider()
-          ForEach(Array(Self.subtypes.enumerated()), id: \.offset) { _, name in
-            Button(Self.label(for: name)) { subtype = name }
-          }
-        }
-        filterMenu(
-          title: state == nil ? "All Statuses" : CommentsPanel.stateLabel(for: state!)
-        ) {
-          Button("All Statuses") { state = nil }
-          Divider()
-          ForEach(Array(Self.states.enumerated()), id: \.offset) { _, name in
-            Button(Self.stateLabel(for: name)) { state = name }
-          }
-        }
+        .padding(8)
+        Divider()
       }
-      .padding(8)
-      Divider()
       if rows.isEmpty {
-        ContentUnavailableView(
-          "No Comments", systemImage: "text.bubble",
-          description: Text("Select text on the page, then use Highlight or Add Note."))
+        WorkspacePanelEmptyState(
+          title: comments.isEmpty ? "No comments" : "No matching comments",
+          symbol: "text.bubble",
+          detail: comments.isEmpty
+            ? "Select text on the page, then choose Highlight or Add Note."
+            : "Try another page, type, or status filter.")
       } else {
         List {
           ForEach(Array(rows.enumerated()), id: \.offset) { _, row in

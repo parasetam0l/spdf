@@ -20,7 +20,7 @@ The smoke check uses the Debug app and the synthetic fixtures in `Tests/Fixtures
 
 `bash Scripts/dev.sh relaunch-smoke` captures approved file bookmarks and view metadata, then restores them in a separate Debug process. It checks renamed files, view/Settings state, one-use consumption and protected-file policy on disposable copies under `Work/Relaunch`.
 
-`bash Scripts/dev.sh workspace-smoke` checks New PDF, real page-text creation, a native save, Undo/Redo, independent untitled recovery keys, all sidebar modes, window resizing and auxiliary-window closure. It writes disposable output under `Work/WorkspaceSmoke`. These regressions also run in the full native smoke check. For lifetime diagnostics, run it with `NSZombieEnabled=YES`.
+`bash Scripts/dev.sh workspace-smoke` checks New PDF, real page-text creation, a native save, Undo/Redo, independent untitled recovery keys, all sidebar modes, window resizing and auxiliary-window closure. It writes disposable output under `Work/WorkspaceSmoke`. It also checks non-mutating text-block selection, selected-block dragging/cancellation, double-click typing and refusal to save an unfinished native IME composition. These regressions also run in the full native smoke check. For lifetime diagnostics, run it with `NSZombieEnabled=YES`.
 
 Some tests use optional independent tools: qpdf, MuPDF (`mutool`), veraPDF, OpenSSL, Python, and macOS `textutil`, `unzip`, and Quick Look. They report or skip unavailable tools; installing them expands verification coverage. OCR recognition and display-dependent behavior can vary with the host environment.
 

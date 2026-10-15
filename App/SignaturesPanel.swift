@@ -10,16 +10,10 @@ struct SignaturesPanel: View {
 
   var body: some View {
     VStack(alignment: .leading, spacing: 0) {
-      Text("Signatures")
-        .font(.headline)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-        .background(.bar)
       if entries.isEmpty {
-        ContentUnavailableView(
-          "No Signatures", systemImage: "signature",
-          description: Text("This document has no signature fields or timestamp dictionaries."))
+        WorkspacePanelEmptyState(
+          title: "No digital signatures", symbol: "signature",
+          detail: "This PDF has not been digitally signed.")
       } else {
         List(entries) { entry in
           VStack(alignment: .leading, spacing: 6) {
@@ -42,9 +36,11 @@ struct SignaturesPanel: View {
               Text(algorithm).font(.caption2).foregroundStyle(.secondary)
             }
             if entry.validation.unsignedChanges {
-              Text("The document changed after signing (\(entry.validation.changedObjectCount) objects)")
-                .font(.caption2)
-                .foregroundStyle(.orange)
+              Text(
+                "The document changed after signing (\(entry.validation.changedObjectCount) objects)"
+              )
+              .font(.caption2)
+              .foregroundStyle(.orange)
             }
             if let permission = entry.signature.docMDPPermission {
               Text("Certification permission: \(permission)")
@@ -69,7 +65,8 @@ struct SignaturesPanel: View {
   private func statusIcon(_ validation: PDFSignatureValidation) -> some View {
     Image(
       systemName: validation.crypto == .valid
-        ? "checkmark.seal.fill" : (validation.crypto == .invalid ? "xmark.seal.fill" : "questionmark.circle")
+        ? "checkmark.seal.fill"
+        : (validation.crypto == .invalid ? "xmark.seal.fill" : "questionmark.circle")
     )
     .foregroundStyle(statusColor(validation))
   }
@@ -94,7 +91,8 @@ struct SignaturesPanel: View {
       case .trusted: return "Cryptographically valid; certificate chain trusted"
       case .unknown: return "Cryptographically valid; chain not anchored by a trusted root"
       case .untrusted: return "Cryptographically valid; certificate chain untrusted"
-      case .missingAnchor: return "Cryptographically valid; chain not anchored by the supplied roots"
+      case .missingAnchor:
+        return "Cryptographically valid; chain not anchored by the supplied roots"
       case .expired: return "Cryptographically valid; signer certificate expired"
       }
     case .invalid:
