@@ -1,6 +1,7 @@
 import AppKit
 import DocumentSession
 import MacServices
+import PDFEditing
 import SwiftUI
 
 @MainActor
@@ -476,6 +477,18 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
     window.makeKeyAndOrderFront(nil)
   }
 
+  @objc private func togglePageTextBold(_ sender: Any?) {
+    guard let viewer = currentDocument?.viewer,
+      let face = StandardTextFont(rawValue: viewer.pageTextStyle.fontFamily) else { return }
+    viewer.pageTextFormattingApplier?(.bold(viewer.pageTextMixedFormatting.contains("bold") || !face.isBold))
+  }
+
+  @objc private func togglePageTextItalic(_ sender: Any?) {
+    guard let viewer = currentDocument?.viewer,
+      let face = StandardTextFont(rawValue: viewer.pageTextStyle.fontFamily) else { return }
+    viewer.pageTextFormattingApplier?(.italic(viewer.pageTextMixedFormatting.contains("italic") || !face.isItalic))
+  }
+
   func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
     if menuItem.action == #selector(quitApplication) {
       return !TerminationCoordinator.shared.isPreparing
@@ -488,6 +501,8 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
     }
     guard let document = currentDocument else { return false }
     switch menuItem.action {
+    case #selector(togglePageTextBold), #selector(togglePageTextItalic):
+      return document.viewer?.canFormatPageText == true
     case #selector(showFind):
       guard let viewer = document.viewer else { return false }
       return !viewer.isLocked && viewer.pageCount > 0
@@ -722,6 +737,9 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
     add("Paste", #selector(NSText.paste(_:)), key: "v", to: edit)
     add("Copy as Rich Text", #selector(copyAsRichText), target: self, to: edit)
     add("Select All", #selector(NSText.selectAll(_:)), key: "a", to: edit)
+    let format = submenu("Text Format", in: edit)
+    add("Bold", #selector(togglePageTextBold), key: "b", target: self, to: format)
+    add("Italic", #selector(togglePageTextItalic), key: "i", target: self, to: format)
     edit.addItem(.separator())
     add("Find…", #selector(showFind), key: "f", target: self, to: edit)
     add("Find Next", #selector(findNext), key: "g", target: self, to: edit)

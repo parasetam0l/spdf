@@ -21,6 +21,9 @@ public struct AddedTextStyle: Sendable, Equatable {
 
     func baseFont(bold: Bool, italic: Bool) -> String {
       switch (self, bold, italic) {
+      case (.helvetica, true, true): return "Helvetica-BoldOblique"
+      case (.times, true, true): return "Times-BoldItalic"
+      case (.courier, true, true): return "Courier-BoldOblique"
       case (.helvetica, true, _): return "Helvetica-Bold"
       case (.helvetica, _, true): return "Helvetica-Oblique"
       case (.times, true, _): return "Times-Bold"
@@ -230,6 +233,10 @@ public enum AddedContent {
           case .dictionary(let dictionary)? = graph.objects[id],
           case .name(let baseFont)? = dictionary[PDFName("BaseFont")],
           String(decoding: baseFont.bytes, as: UTF8.self) == base,
+          dictionary[PDFName("Subtype")] == .name(PDFName("Type1")),
+          dictionary[PDFName("Widths")] == nil,
+          dictionary[PDFName("ToUnicode")] == nil,
+          dictionary[PDFName("FontDescriptor")] == nil,
           // Only reuse a font with the WinAnsi encoding this writer needs;
           // an existing StandardEncoding resource cannot carry accents.
           dictionary[PDFName("Encoding")] == .name(PDFName("WinAnsiEncoding"))

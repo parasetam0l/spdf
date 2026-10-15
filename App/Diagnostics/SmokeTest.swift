@@ -1545,19 +1545,19 @@
         guard let inPlaceEditor = findTextEditor(in: content) else {
           throw PDFError(.malformed, "In-place text editor did not appear")
         }
-        inPlaceEditor.string = "Inline edit"
+        viewer.pageTextBeginTyping?()
+        let originalInPlaceText = inPlaceEditor.string
+        inPlaceEditor.insertText("Inline edit", replacementRange:
+          NSRange(location: 0, length: (inPlaceEditor.string as NSString).length))
         guard viewer.pendingEditFinisher?() == true else {
           throw PDFError(.malformed, "Direct page text could not be committed")
         }
-        let inPlaceGraph = try PDFParser.parse(try first.data(ofType: "com.adobe.pdf")).graph
-        guard case .stream(let inPlaceStream)? = inPlaceGraph.objects[PDFObjectID(5)],
-          let inPlaceText = try? String(decoding: PDFFilters.decoded(inPlaceStream), as: UTF8.self)
-        else { throw PDFError(.malformed, "In-place text edit stream is missing") }
-        guard
-          inPlaceText.contains("(Inline edit)")
-            || inPlaceText.contains("<0049006E006C0069006E006500200065006400690074>")
-        else {
-          throw PDFError(.malformed, "In-place text edit did not rewrite the operand")
+        let inPlaceBytes = try first.data(ofType: "com.adobe.pdf")
+        try inPlaceBytes.write(to: output.appendingPathComponent("native-inline-edited.pdf"))
+        guard let reader = PDFDocument(data: inPlaceBytes),
+          reader.findString("Inline edit", withOptions: []).count == 1,
+          reader.findString(originalInPlaceText, withOptions: []).isEmpty else {
+          throw PDFError(.malformed, "In-place edit did not replace the real saved page text")
         }
         guard first.undoEdit(), try first.data(ofType: "com.adobe.pdf") == directTextBaseline else {
           throw PDFError(.malformed, "In-place text edit undo did not restore the baseline bytes")

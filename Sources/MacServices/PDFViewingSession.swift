@@ -239,6 +239,11 @@ public final class PDFViewingSession: NSObject, ObservableObject, PDFViewDelegat
   @Published public var canRedoPageTyping = false
   @Published public var pageTextPosition = [0.0, 0.0]
   @Published public var pageTextWidth = 0.0
+  @Published public var canFormatPageText = false
+  @Published public var pageTextMixedFormatting = Set<String>()
+  @Published public var pageTextSelectionScope = "Whole text box"
+  @Published public var pageTextFormattingIssue: String?
+  public var pageTextFormattingApplier: ((PageTextFormatChange) -> Void)?
   public var pageTextBeginTyping: (() -> Void)?
   public var pageTextCancel: (() -> Void)?
   public var pageTextPositionApplier: ((Double, Double) -> Void)?
@@ -247,8 +252,8 @@ public final class PDFViewingSession: NSObject, ObservableObject, PDFViewDelegat
   public var hasPendingTextGesture: (() -> Bool)?
   public var onTextBlockPreview: ((PageTextTarget) -> Data?)?
   /// A single atomic content transaction: replacement, formatting and movement.
-  public var onTextBlockCommit: ((PageTextTarget, String, PageTextStyle, Double, Double, [PageTextLine]?) -> Bool)?
-  public var onNewTextBlockCommit: ((Int, [Double], String, PageTextStyle) -> Bool)?
+  public var onTextBlockCommit: ((PageTextTarget, String, PageTextStyle, Double, Double, [PageTextLine]?, PageTextBox?) -> Bool)?
+  public var onNewTextBlockCommit: ((Int, [Double], String, PageTextStyle, [PageTextLine], PageTextBox) -> Bool)?
   public var onPendingPageTextChange: ((Bool) -> Void)?
   public var textBlockEditStarter: ((PageTextTarget) -> Void)?
   /// A pointer transaction cannot be abandoned by an update mid-drag.
@@ -423,6 +428,10 @@ public final class PDFViewingSession: NSObject, ObservableObject, PDFViewDelegat
     pageTextPositionApplier = nil
     pageTextWidthApplier = nil
     pageTextStyleApplier = nil
+    pageTextFormattingApplier = nil
+    canFormatPageText = false
+    pageTextMixedFormatting = []
+    pageTextFormattingIssue = nil
     selectedObjectSummary = nil
     selectionDetails = nil
     selectedGraphics = []

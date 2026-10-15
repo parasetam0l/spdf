@@ -411,11 +411,19 @@ final class SPDFDocument: NSDocument {
         return try PDFWriter.write(preview)
       } catch { return nil }
     }
-    viewer.onTextBlockCommit = { [weak self] target, text, style, dx, dy, lines in
-      self?.commitTextBlock(target, text: text, style: style, dx: dx, dy: dy, lines: lines) ?? false
+    viewer.onTextBlockCommit = { [weak self] target, text, style, dx, dy, lines, box in
+      self?.commitTextBlock(target, text: text, style: style, dx: dx, dy: dy, lines: lines, box: box) ?? false
     }
-    viewer.onNewTextBlockCommit = { [weak self] pageIndex, rect, text, style in
-      self?.addPageText(pageIndex: pageIndex, rect: rect, text: text, style: style) ?? false
+    viewer.onNewTextBlockCommit = { [weak self] pageIndex, rect, text, style, lines, box in
+      guard let self, self.editSession.canEdit, self.editSession.pageIDs.indices.contains(pageIndex) else { return false }
+      do {
+        try self.editSession.apply(PDFTransaction([
+          AddPageTextLinesCommand(pageID: self.editSession.pageIDs[pageIndex], lines: lines, box: box)
+        ]))
+        self.noteUserEdit()
+        self.refreshViewer(preservingPage: pageIndex + 1)
+        return true
+      } catch { self.presentError(error); return false }
     }
     viewer.onPendingPageTextChange = { [weak self] changed in
       guard let self else { return }
@@ -1353,7 +1361,7 @@ final class SPDFDocument: NSDocument {
             style: block.style, runIndices: block.runIndices)
         } ?? []
       textBlockCache[pageIndex] = NativeParagraphEditing.targets(
-        from: blocks, pageID: editSession.pageIDs[pageIndex], graph: graph, page: page)
+        from: blocks, pageID: editSession.pageIDs[pageIndex], graph: graph, page: page, pageIndex: pageIndex)
     }
     return textBlockCache[pageIndex]?.first { target in
       let r = target.rect
@@ -3358,7 +3366,7 @@ final class SPDFDocument: NSDocument {
   @discardableResult
   func commitTextBlock(
     _ target: PageTextTarget, text: String, style: PageTextStyle,
-    dx: Double, dy: Double, lines: [PageTextLine]? = nil
+    dx: Double, dy: Double, lines: [PageTextLine]? = nil, box: PageTextBox? = nil
   ) -> Bool {
     guard editSession.canEdit, editSession.pageIDs.indices.contains(target.pageIndex)
     else { return false }
@@ -3373,7 +3381,7 @@ final class SPDFDocument: NSDocument {
           RewritePageTextCommand(
             pageID: page, originalText: paragraph.originalText, lines: lines,
             fontSize: style.fontSize, color: style.color,
-            standardFontAdvances: paragraph.standardFontAdvances)
+            standardFontAdvances: paragraph.standardFontAdvances, box: box)
         ]))
         noteUserEdit()
         refreshViewer(preservingPage: target.pageIndex + 1)

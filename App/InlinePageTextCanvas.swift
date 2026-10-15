@@ -40,8 +40,9 @@ final class PageTextColorPanelController: NSObject {
   }
   @objc private func colorChanged(_ sender: NSColorPanel) {
     guard let viewer, let rgb = sender.color.usingColorSpace(.sRGB) else { return }
-    viewer.pageTextStyle.color = [rgb.redComponent, rgb.greenComponent, rgb.blueComponent]
-    viewer.pageTextStyleApplier?(viewer.pageTextStyle)
+    let color: [Double] = [Double(rgb.redComponent), Double(rgb.greenComponent), Double(rgb.blueComponent)]
+    if let apply = viewer.pageTextFormattingApplier { apply(.color(color)) }
+    else { viewer.pageTextStyle.color = color; viewer.pageTextStyleApplier?(viewer.pageTextStyle) }
   }
 }
 
@@ -55,7 +56,10 @@ final class InlinePageTextView: NSTextView {
   var acceptsLineBreaks = false
   var onScroll: ((NSEvent) -> Void)?
   var onMagnify: ((NSEvent) -> Void)?
+  var toggleBold: (() -> Void)?
+  var toggleItalic: (() -> Void)?
   override var undoManager: UndoManager? { typingUndo }
+  override func paste(_ sender: Any?) { pasteAsPlainText(sender) }
 
   override func insertNewline(_ sender: Any?) {
     if acceptsLineBreaks { super.insertNewline(sender) } else { finish?() }
@@ -65,7 +69,33 @@ final class InlinePageTextView: NSTextView {
   override func scrollWheel(with event: NSEvent) { onScroll?(event) }
   override func magnify(with event: NSEvent) { onMagnify?(event) }
 
+  static func formattingKey(_ event: NSEvent) -> String? {
+    guard event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command else {
+      return nil
+    }
+    switch event.charactersIgnoringModifiers?.lowercased() {
+    case "b": return "b"
+    // Turkish input sources can report dotless ı or dotted capital İ for
+    // the same command. Keep the text command usable in those layouts.
+    case "i", "ı", "i\u{0307}": return "i"
+    default: return nil
+    }
+  }
+
+  private func performFormattingKey(_ event: NSEvent) -> Bool {
+    let action = Self.formattingKey(event) == "b" ? toggleBold
+      : Self.formattingKey(event) == "i" ? toggleItalic : nil
+    guard let action else { return false }
+    action()
+    return true
+  }
+
+  override func performKeyEquivalent(with event: NSEvent) -> Bool {
+    performFormattingKey(event) || super.performKeyEquivalent(with: event)
+  }
+
   override func keyDown(with event: NSEvent) {
+    if performFormattingKey(event) { return }
     if event.keyCode == 36, event.modifierFlags.contains(.command) {
       finish?()
       return
@@ -167,6 +197,9 @@ final class InlinePageTextCanvas: NSView, NSTextViewDelegate {
   private let originalDocument: PDFDocument
   private let font: NSFont
   private let originalStyle: PageTextStyle
+  private let initialBaseline: Double
+  private(set) var formatting: NativeTextFormatting?
+  private var wrapsText = true
   private let initialClickPoint: NSPoint
   private var style: PageTextStyle
   private var dx = 0.0
@@ -201,6 +234,7 @@ final class InlinePageTextCanvas: NSView, NSTextViewDelegate {
     self.pageIndex = pageIndex
     sourceRect = rect
     sourceTarget = target
+    wrapsText = target?.paragraph?.wraps ?? (target == nil)
     textWidth = rect.width
     initialClickPoint = clickPoint
     originalDocument = document
@@ -210,10 +244,13 @@ final class InlinePageTextCanvas: NSView, NSTextViewDelegate {
       ? attributed!.attributes(at: 0, effectiveRange: nil) : [:]
     let input = target?.style
     let pointSize = input?.fontSize ?? viewer.pageTextStyle.fontSize
-    let family = input?.fontFamily ?? "Helvetica"
-    font =
+    let family = input?.fontFamily ?? viewer.pageTextStyle.fontFamily
+    let resolvedFont =
       (target == nil ? nil : attributes[.font] as? NSFont)
       ?? NSFont(name: family, size: pointSize) ?? .systemFont(ofSize: pointSize)
+    font = resolvedFont
+    initialBaseline = target?.paragraph?.firstBaseline ?? (target == nil
+      ? rect.maxY - pointSize * 0.8 : rect.minY - resolvedFont.descender)
     style = PageTextStyle(
       fontFamily: family, fontSize: pointSize,
       color: input?.fillColor ?? viewer.pageTextStyle.color)
@@ -224,6 +261,9 @@ final class InlinePageTextCanvas: NSView, NSTextViewDelegate {
     textView.setAccessibilityLabel("Page text")
     textView.drawsBackground = false
     textView.backgroundColor = .clear
+    // The PDF page remains white in either system appearance. Keep its native
+    // selection readable when a dark inspector takes keyboard focus.
+    textView.appearance = NSAppearance(named: .aqua)
     textView.isRichText = false
     textView.importsGraphics = false
     textView.allowsUndo = true
@@ -236,8 +276,16 @@ final class InlinePageTextCanvas: NSView, NSTextViewDelegate {
     textView.isContinuousSpellCheckingEnabled = false
     textView.textContainerInset = .zero
     textView.textContainer?.lineFragmentPadding = 0
-    textView.acceptsLineBreaks = target == nil || target?.paragraph != nil
+    textView.acceptsLineBreaks = wrapsText
     textView.string = target?.text ?? ""
+    if let face = StandardTextFont(rawValue: family), target == nil || target?.paragraph != nil {
+      let initial = PageTextFormat(font: face, size: pointSize, color: style.color)
+      formatting = NativeTextFormatting(view: textView,
+        fragments: target?.paragraph?.fragments ?? [], initial: initial)
+      formatting?.onChange = { [weak self] in self?.formattingChanged() }
+      textView.toggleBold = { [weak self] in self?.toggleFormat(italic: false) }
+      textView.toggleItalic = { [weak self] in self?.toggleFormat(italic: true) }
+    }
     textView.delegate = self
     textView.finish = { [weak self] in _ = self?.commit() }
     textView.cancel = { [weak self] in self?.cancel() }
@@ -246,7 +294,7 @@ final class InlinePageTextCanvas: NSView, NSTextViewDelegate {
     addSubview(textView)
     addSubview(moveHandle)
     addSubview(widthHandle)
-    widthHandle.isHidden = target?.paragraph == nil
+    widthHandle.isHidden = formatting == nil
     widthHandle.onDrag = { [weak self] delta, finished in
       guard let self, let viewer = self.viewer,
         let page = viewer.view.document?.page(at: self.pageIndex) else { return }
@@ -271,6 +319,12 @@ final class InlinePageTextCanvas: NSView, NSTextViewDelegate {
     viewer.view.clearSelection()
     viewer.view.setAccessibilityHidden(true)
     viewer.pageTextStyle = style
+    viewer.canFormatPageText = formatting != nil
+    viewer.pageTextFormattingIssue = nil
+    viewer.pageTextFormattingApplier = formatting == nil ? nil : { [weak self] change in
+      guard let self else { return }
+      self.viewer?.pageTextFormattingIssue = self.formatting?.apply(change, isTyping: self.isTyping)
+    }
     viewer.isEditingPageText = true
     viewer.isTypingPageText = isTyping
     viewer.pageTextBeginTyping = { [weak self] in self?.beginTyping() }
@@ -283,7 +337,7 @@ final class InlinePageTextCanvas: NSView, NSTextViewDelegate {
       self.publishPendingChange()
     }
     viewer.pageTextStyleApplier = { [weak self] style in self?.applyStyle(style) }
-    viewer.pageTextWidthApplier = target?.paragraph == nil ? nil : { [weak self] width in
+    viewer.pageTextWidthApplier = formatting == nil ? nil : { [weak self] width in
       self?.setTextWidth(width)
     }
     viewer.hasPendingTextGesture = { [weak self] in self?.isDragging ?? false }
@@ -319,6 +373,7 @@ final class InlinePageTextCanvas: NSView, NSTextViewDelegate {
         }.store(in: &observations)
     }
     synchronizeGeometry()
+    publishFormattingSelection()
   }
   required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
 
@@ -335,6 +390,7 @@ final class InlinePageTextCanvas: NSView, NSTextViewDelegate {
     viewer?.isTypingPageText = true
     placeCaret(at: point ?? initialClickPoint)
     if selectWord { textView.selectWord(nil) }
+    publishFormattingSelection()
     needsDisplay = true
   }
 
@@ -386,6 +442,10 @@ final class InlinePageTextCanvas: NSView, NSTextViewDelegate {
 
   override func keyDown(with event: NSEvent) {
     let step = event.modifierFlags.contains(.shift) ? 10.0 : 1.0
+    if formatting != nil, let key = InlinePageTextView.formattingKey(event) {
+      toggleFormat(italic: key == "i")
+      return
+    }
     switch event.keyCode {
     case 53: cancel()
     case 36:
@@ -413,6 +473,14 @@ final class InlinePageTextCanvas: NSView, NSTextViewDelegate {
     }
   }
 
+  override func performKeyEquivalent(with event: NSEvent) -> Bool {
+    if formatting != nil, let key = InlinePageTextView.formattingKey(event) {
+      toggleFormat(italic: key == "i")
+      return true
+    }
+    return super.performKeyEquivalent(with: event)
+  }
+
   private func swapRenderer(to document: PDFDocument) {
     guard let viewer else { return }
     let scale = viewer.view.scaleFactor
@@ -435,6 +503,16 @@ final class InlinePageTextCanvas: NSView, NSTextViewDelegate {
       requested.color.count == 3,
       requested.color.allSatisfy({ $0.isFinite && (0...1).contains($0) })
     else { return }
+    if let formatting {
+      if let face = StandardTextFont(rawValue: requested.fontFamily), requested.fontFamily != style.fontFamily {
+        _ = formatting.apply(.family(face.family), isTyping: isTyping)
+        _ = formatting.apply(.bold(face.isBold), isTyping: isTyping)
+        _ = formatting.apply(.italic(face.isItalic), isTyping: isTyping)
+      }
+      if requested.fontSize != style.fontSize { _ = formatting.apply(.size(requested.fontSize), isTyping: isTyping) }
+      if requested.color != style.color { _ = formatting.apply(.color(requested.color), isTyping: isTyping) }
+      return
+    }
     style = requested
     synchronizeGeometry()
     publishPendingChange()
@@ -442,6 +520,8 @@ final class InlinePageTextCanvas: NSView, NSTextViewDelegate {
 
   func setTextWidth(_ width: Double) {
     guard width.isFinite, (24...2_000).contains(width) else { return }
+    wrapsText = true
+    textView.acceptsLineBreaks = true
     textWidth = width
     synchronizeGeometry()
     publishPendingChange()
@@ -465,13 +545,18 @@ final class InlinePageTextCanvas: NSView, NSTextViewDelegate {
     let color = NSColor(
       srgbRed: style.color[0], green: style.color[1], blue: style.color[2], alpha: 1)
     let selected = textView.selectedRange()
-    textView.font = scaled
-    textView.textColor = color
-    textView.insertionPointColor = color
+    if let formatting {
+      formatting.render(scale: scale,
+        minimumLineSpacing: sourceTarget?.paragraph?.lineSpacing ?? originalStyle.fontSize * 1.2)
+    } else {
+      textView.font = scaled
+      textView.textColor = color
+      textView.insertionPointColor = color
+    }
     var attributes: [NSAttributedString.Key: Any] = [
       .font: scaled, .foregroundColor: color, .kern: 0, .ligature: 0,
     ]
-    if sourceTarget == nil || sourceTarget?.paragraph != nil {
+    if formatting == nil && (sourceTarget == nil || sourceTarget?.paragraph != nil) {
       let paragraph = NSMutableParagraphStyle()
       let spacing = sourceTarget?.paragraph?.lineSpacing ?? originalStyle.fontSize * 1.2
       paragraph.minimumLineHeight = spacing * style.fontSize / originalStyle.fontSize * scale
@@ -483,30 +568,24 @@ final class InlinePageTextCanvas: NSView, NSTextViewDelegate {
           range: NSRange(location: 0, length: (textView.string as NSString).length))
       }
     }
-    if sourceTarget?.paragraph != nil, !textView.string.isEmpty {
+    if formatting == nil, sourceTarget?.paragraph != nil, !textView.string.isEmpty {
       textView.textStorage?.addAttributes(
         [.kern: 0, .ligature: 0],
         range: NSRange(location: 0, length: (textView.string as NSString).length))
     }
-    textView.typingAttributes = attributes
+    if formatting == nil { textView.typingAttributes = attributes }
     let manager = textView.layoutManager
     let height = max(16, manager?.defaultLineHeight(for: scaled) ?? scaled.pointSize * 1.2)
     var baselineOffset = manager?.defaultBaselineOffset(for: scaled) ?? scaled.ascender
-    let originalBaseline: Double
-    if let paragraph = sourceTarget?.paragraph {
-      originalBaseline = paragraph.firstBaseline
-    } else {
-      originalBaseline = sourceTarget == nil
-        ? sourceRect.maxY - style.fontSize * 0.8 : sourceRect.minY - font.descender
-    }
     let baseline = viewer.view.convert(
-      NSPoint(x: sourceRect.minX + dx, y: originalBaseline + dy), from: page)
+      NSPoint(x: sourceRect.minX + dx, y: initialBaseline + dy), from: page)
     let availableWidth =
-      sourceTarget == nil || sourceTarget?.paragraph != nil
+      wrapsText
       ? textWidth * scale
       : max(
-        sourceRect.width * scale + 8,
-        (textView.string as NSString).size(withAttributes: [.font: scaled]).width + 8)
+        textWidth * scale + 8,
+        (formatting == nil ? (textView.string as NSString).size(withAttributes: [.font: scaled]).width
+          : textView.attributedString().size().width) + 8)
     textView.textContainer?.containerSize = NSSize(width: availableWidth, height: 1_000_000)
     textView.textContainer?.widthTracksTextView = false
     if let container = textView.textContainer, let manager {
@@ -520,7 +599,7 @@ final class InlinePageTextCanvas: NSView, NSTextViewDelegate {
     textView.frame = NSRect(
       x: baseline.x, y: baseline.y - (height - baselineOffset),
       width: max(24, availableWidth), height: height)
-    if sourceTarget == nil || sourceTarget?.paragraph != nil, let container = textView.textContainer {
+    if sourceTarget == nil || formatting != nil, let container = textView.textContainer {
       manager?.ensureLayout(for: container)
       let used = manager?.usedRect(for: container).height ?? height
       textView.frame.size.height = max(height, used)
@@ -541,12 +620,42 @@ final class InlinePageTextCanvas: NSView, NSTextViewDelegate {
   func textDidChange(_ notification: Notification) {
     synchronizeGeometry()
     publishPendingChange()
+    publishFormattingSelection()
+  }
+
+  func textViewDidChangeSelection(_ notification: Notification) {
+    guard !isLayingOut else { return }
+    publishFormattingSelection()
+  }
+
+  private func formattingChanged() {
+    synchronizeGeometry()
+    publishPendingChange()
+    publishFormattingSelection()
+  }
+
+  private func toggleFormat(italic: Bool) {
+    guard let formatting else { return }
+    let selection = formatting.selection(isTyping: isTyping)
+    let enabled = selection.mixed.contains(italic ? "italic" : "bold")
+      || !(italic ? selection.format.font.isItalic : selection.format.font.isBold)
+    viewer?.pageTextFormattingIssue = formatting.apply(
+      italic ? .italic(enabled) : .bold(enabled), isTyping: isTyping)
+  }
+
+  private func publishFormattingSelection() {
+    guard let selection = formatting?.selection(isTyping: isTyping), let viewer else { return }
+    style = PageTextStyle(fontFamily: selection.format.font.rawValue,
+      fontSize: selection.format.size, color: selection.format.color)
+    if viewer.pageTextStyle != style { viewer.pageTextStyle = style }
+    if viewer.pageTextMixedFormatting != selection.mixed { viewer.pageTextMixedFormatting = selection.mixed }
+    if viewer.pageTextSelectionScope != selection.scope { viewer.pageTextSelectionScope = selection.scope }
   }
 
   private func publishPendingChange() {
     let changed =
-      textView.string != (sourceTarget?.text ?? "")
-      || style != originalStyle || dx != 0 || dy != 0
+      (formatting?.hasChanges ?? (textView.string != (sourceTarget?.text ?? "") || style != originalStyle))
+      || dx != 0 || dy != 0
       || abs(textWidth - sourceRect.width) > 0.01
     viewer?.hasPendingPageTextChanges = changed
     viewer?.onPendingPageTextChange?(changed)
@@ -574,14 +683,16 @@ final class InlinePageTextCanvas: NSView, NSTextViewDelegate {
     let accepted: Bool
     if let target = sourceTarget {
       accepted = viewer.onTextBlockCommit?(
-        target, textView.string, style, dx, dy, target.paragraph == nil ? nil : pageLines()) ?? false
+        target, textView.string, style, dx, dy,
+        formatting == nil ? nil : pageLines(), formatting == nil ? nil : pageBox()) ?? false
     } else if textView.string.isEmpty {
       accepted = true
     } else {
       let rect = sourceRect.offsetBy(dx: dx, dy: dy)
       accepted =
         viewer.onNewTextBlockCommit?(
-          pageIndex, [rect.minX, rect.minY, rect.maxX, rect.maxY], textView.string, style) ?? false
+          pageIndex, [rect.minX, rect.minY, rect.maxX, rect.maxY], textView.string, style,
+          pageLines(), pageBox()) ?? false
     }
     if accepted {
       retire(committed: true)
@@ -618,6 +729,10 @@ final class InlinePageTextCanvas: NSView, NSTextViewDelegate {
     viewer?.pageTextPositionApplier = nil
     viewer?.pageTextStyleApplier = nil
     viewer?.pageTextWidthApplier = nil
+    viewer?.pageTextFormattingApplier = nil
+    viewer?.pageTextMixedFormatting = []
+    viewer?.pageTextFormattingIssue = nil
+    viewer?.canFormatPageText = false
     viewer?.hasPendingTextGesture = nil
     textView.delegate = nil
     onFinish?(committed)
@@ -627,7 +742,7 @@ final class InlinePageTextCanvas: NSView, NSTextViewDelegate {
   override func draw(_ dirtyRect: NSRect) {
     NSColor.controlAccentColor.withAlphaComponent(0.6).setStroke()
     var box = textView.frame
-    if sourceTarget?.paragraph == nil, let container = textView.textContainer, let manager = textView.layoutManager {
+    if !wrapsText, let container = textView.textContainer, let manager = textView.layoutManager {
       box.size.width = max(18, min(box.width, manager.usedRect(for: container).width + 4))
     }
     let outline = NSBezierPath(rect: box.insetBy(dx: -3, dy: -3))
@@ -651,9 +766,40 @@ final class InlinePageTextCanvas: NSView, NSTextViewDelegate {
       let native = textView.convert(
         NSPoint(x: rect.minX + location.x, y: rect.minY + location.y), to: viewer.view)
       let point = viewer.view.convert(native, to: page)
-      lines.append(PageTextLine(text: value, x: point.x, baseline: point.y))
+      var segments: [PageTextSegment] = []
+      if let formatting {
+        var offset = range.location
+        for fragment in formatting.fragments(in: range) {
+          let raw = fragment.text as NSString
+          let cleaned = fragment.text.trimmingCharacters(in: .newlines)
+          if !cleaned.isEmpty {
+            let glyph = manager.glyphIndexForCharacter(at: offset)
+            let origin = manager.location(forGlyphAt: glyph)
+            let native = textView.convert(NSPoint(x: rect.minX + origin.x, y: rect.minY + origin.y), to: viewer.view)
+            let mapped = viewer.view.convert(native, to: page)
+            segments.append(.init(text: cleaned, x: mapped.x, format: fragment.format))
+          }
+          offset += raw.length
+        }
+      }
+      let hard = text.substring(with: range).hasSuffix("\n") || text.substring(with: range).hasSuffix("\r")
+      let breakFormat = hard ? formatting?.fragments(in:
+        NSRange(location: NSMaxRange(range) - 1, length: 1)).first?.format : nil
+      lines.append(PageTextLine(text: value, x: point.x, baseline: point.y,
+        segments: segments, endsParagraph: hard, breakFormat: breakFormat))
     }
     return lines
+  }
+
+  func pageBox() -> PageTextBox {
+    let width: Double
+    if !wrapsText, let container = textView.textContainer, let manager = textView.layoutManager,
+      let scale = viewer?.view.scaleFactor {
+      width = max(textWidth, manager.usedRect(for: container).width / scale)
+    } else { width = textWidth }
+    return .init(x: sourceRect.minX + dx, firstBaseline: initialBaseline + dy,
+      width: max(24, min(2_000, width)),
+      lineSpacing: sourceTarget?.paragraph?.lineSpacing ?? originalStyle.fontSize * 1.2, wraps: wrapsText)
   }
 
   override func scrollWheel(with event: NSEvent) { viewer?.scrollPage(with: event) }

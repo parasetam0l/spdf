@@ -9,6 +9,8 @@ public struct PageTextParagraph: Sendable, Equatable {
   public let lineSpacing: Double
   public let firstBaseline: Double
   public let standardFontAdvances: [Int: Double]
+  public let fragments: [PageTextFragment]
+  public let wraps: Bool
 }
 
 /// Reconstruct a paragraph only when its source lines round-trip through
@@ -16,13 +18,48 @@ public struct PageTextParagraph: Sendable, Equatable {
 @MainActor
 public enum NativeParagraphEditing {
   public static func targets(
-    from blocks: [PageTextTarget], pageID: PDFObjectID, graph: PDFGraph, page: PDFPage
+    from blocks: [PageTextTarget], pageID: PDFObjectID, graph: PDFGraph, page: PDFPage,
+    pageIndex: Int? = nil
   ) -> [PageTextTarget] {
-    let ordered = blocks.sorted {
+    var owned: [PageTextTarget] = []
+    var ownedRuns = Set<Int>()
+    for authored in (try? AuthoredPageTextBoxes.read(pageID: pageID, in: graph)) ?? [] {
+      let indices = authored.originalText.keys.sorted()
+      guard let first = indices.first, let initial = authored.fragments.first else { continue }
+      let segments = authored.lines.flatMap(\.segments)
+      var advances: [Int: Double] = [:]
+      for (index, segment) in zip(indices, segments) {
+        advances[index] = standardAdvance(segment.text,
+          family: segment.format.font.rawValue, size: segment.format.size)
+      }
+      guard (try? RewritePageTextCommand(pageID: pageID, originalText: authored.originalText,
+        lines: [], fontSize: initial.format.size, color: initial.format.color,
+        standardFontAdvances: advances).validate(in: graph)) != nil else { continue }
+      var bottom = authored.box.firstBaseline
+      var top = authored.box.firstBaseline
+      for line in authored.lines {
+        for segment in line.segments {
+          guard let font = NSFont(name: segment.format.font.rawValue, size: segment.format.size) else { continue }
+          bottom = min(bottom, line.baseline + font.descender)
+          top = max(top, line.baseline + font.ascender)
+        }
+        bottom = min(bottom, line.baseline - initial.format.size * 0.2)
+      }
+      owned.append(PageTextTarget(pageIndex: pageIndex ?? blocks.first?.pageIndex ?? 0, runIndex: first,
+        rect: [authored.box.x, bottom, authored.box.x + authored.box.width, top],
+        text: authored.fragments.map(\.text).joined(),
+        style: .init(fontFamily: initial.format.font.rawValue, fontSize: initial.format.size,
+          fillColor: initial.format.color), runIndices: indices,
+        paragraph: PageTextParagraph(originalText: authored.originalText,
+          lineSpacing: authored.box.lineSpacing, firstBaseline: authored.box.firstBaseline,
+          standardFontAdvances: advances, fragments: authored.fragments, wraps: authored.box.wraps)))
+      ownedRuns.formUnion(indices)
+    }
+    let ordered = blocks.filter { ownedRuns.isDisjoint(with: $0.runIndices) }.sorted {
       $0.rect[3] == $1.rect[3] ? $0.rect[0] < $1.rect[0] : $0.rect[3] > $1.rect[3]
     }
     var consumed = Set<Int>()
-    var result: [PageTextTarget] = []
+    var result: [PageTextTarget] = owned
     for (offset, first) in ordered.enumerated() where !consumed.contains(offset) {
       guard let style = first.style, first.runIndices.count == 1,
         RewritePageTextCommand.standardFonts.contains(style.fontFamily ?? ""),
@@ -49,7 +86,7 @@ public enum NativeParagraphEditing {
         if members.count == 100 { break }
       }
       guard members.count >= 2 else {
-        result.append(first)
+        result.append(editableSingle(first, pageID: pageID, graph: graph, font: font))
         continue
       }
       let width = (members.map { $0.1.rect[2] }.max() ?? first.rect[2]) - first.rect[0] + 0.75
@@ -59,7 +96,7 @@ public enum NativeParagraphEditing {
       guard width >= 120,
         nativeLines == members.map({ $0.1.text.trimmingCharacters(in: .whitespacesAndNewlines) })
       else {
-        result.append(first)
+        result.append(editableSingle(first, pageID: pageID, graph: graph, font: font))
         continue
       }
       let original = Dictionary(uniqueKeysWithValues: members.map { ($0.1.runIndex, $0.1.text) })
@@ -89,10 +126,34 @@ public enum NativeParagraphEditing {
             originalText: original,
             lineSpacing: members[0].1.rect[1] - members[1].1.rect[1],
             firstBaseline: first.rect[1] - font.descender,
-            standardFontAdvances: advances)))
+            standardFontAdvances: advances,
+            fragments: [.init(text: text, format: .init(
+              font: StandardTextFont(rawValue: style.fontFamily ?? "")!,
+              size: style.fontSize, color: style.fillColor))], wraps: true)))
       consumed.formUnion(members.dropFirst().map(\.0))
     }
     return result
+  }
+
+  private static func editableSingle(_ target: PageTextTarget, pageID: PDFObjectID,
+    graph: PDFGraph, font: NSFont) -> PageTextTarget {
+    guard let style = target.style, let family = style.fontFamily,
+      let face = StandardTextFont(rawValue: family), target.runIndices.count == 1,
+      let advance = standardAdvance(target.text, family: family, size: style.fontSize)
+    else { return target }
+    let original = [target.runIndex: target.text]
+    let advances = [target.runIndex: advance]
+    guard (try? RewritePageTextCommand(pageID: pageID, originalText: original,
+      lines: [], fontSize: style.fontSize, color: style.fillColor,
+      standardFontAdvances: advances).validate(in: graph)) != nil else { return target }
+    var rect = target.rect
+    rect[2] = rect[0] + max(24, rect[2] - rect[0] + 0.75)
+    return PageTextTarget(pageIndex: target.pageIndex, runIndex: target.runIndex,
+      rect: rect, text: target.text, style: style, runIndices: target.runIndices,
+      paragraph: .init(originalText: original, lineSpacing: style.fontSize * 1.2,
+        firstBaseline: rect[1] - font.descender, standardFontAdvances: advances,
+        fragments: [.init(text: target.text, format: .init(font: face, size: style.fontSize,
+          color: style.fillColor))], wraps: false))
   }
 
   public static func font(for target: PageTextTarget, page: PDFPage) -> NSFont? {

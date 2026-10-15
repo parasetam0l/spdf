@@ -8,15 +8,22 @@ public struct PageTextLine: Sendable, Equatable {
   public let text: String
   public let x: Double
   public let baseline: Double
+  public let segments: [PageTextSegment]
+  public let endsParagraph: Bool
+  public let breakFormat: PageTextFormat?
 
-  public init(text: String, x: Double, baseline: Double) {
+  public init(text: String, x: Double, baseline: Double,
+    segments: [PageTextSegment] = [], endsParagraph: Bool = false, breakFormat: PageTextFormat? = nil) {
     self.text = text
     self.x = x
     self.baseline = baseline
+    self.segments = segments
+    self.endsParagraph = endsParagraph
+    self.breakFormat = breakFormat
   }
 }
 
-/// Replaces a homogeneous paragraph with the exact lines shown by the native
+/// Replaces supported paragraph text with the exact lines shown by the native
 /// editor. Numeric TJ advances remove the original strings while preserving
 /// the pen position seen by all following, unedited text.
 public struct RewritePageTextCommand: PDFEditCommand, Equatable, Sendable {
@@ -28,10 +35,11 @@ public struct RewritePageTextCommand: PDFEditCommand, Equatable, Sendable {
   /// Standard-14 fonts can omit /Widths. The platform supplies unshaped
   /// advances only for those fonts; other missing metrics are refused.
   public let standardFontAdvances: [Int: Double]
+  public let box: PageTextBox?
 
   public init(
     pageID: PDFObjectID, originalText: [Int: String], lines: [PageTextLine],
-    fontSize: Double, color: [Double], standardFontAdvances: [Int: Double] = [:]
+    fontSize: Double, color: [Double], standardFontAdvances: [Int: Double] = [:], box: PageTextBox? = nil
   ) {
     self.pageID = pageID
     self.originalText = originalText
@@ -39,6 +47,7 @@ public struct RewritePageTextCommand: PDFEditCommand, Equatable, Sendable {
     self.fontSize = fontSize
     self.color = color
     self.standardFontAdvances = standardFontAdvances
+    self.box = box
   }
 
   public var name: String { "Edit Paragraph" }
@@ -111,8 +120,7 @@ public struct RewritePageTextCommand: PDFEditCommand, Equatable, Sendable {
         let font = SimpleFont.resolve(resource: run.fontResource, page: page, in: graph),
         font.isEditable, !font.isType3,
         let segment = content.segmentIndex(for: run.stringSpan),
-        content.segments[segment].isEditable,
-        firstFont == nil || firstFont?.fontID == font.fontID
+        content.segments[segment].isEditable
       else {
         throw PDFError(.unsupported, "This paragraph needs a different font, spacing or transform")
       }
@@ -141,7 +149,9 @@ public struct RewritePageTextCommand: PDFEditCommand, Equatable, Sendable {
       advances.append(advance)
       firstFont = font
     }
-    guard let font = firstFont, lines.allSatisfy({ font.encode($0.text) != nil }) else {
+    try PageTextLineWriter.validate(lines, box: box)
+    guard let font = firstFont,
+      lines.allSatisfy({ !$0.segments.isEmpty || font.encode($0.text) != nil }) else {
       throw PDFError(.unsupported, "The PDF font cannot encode the replacement characters")
     }
     return (content, selected, font, advances)
@@ -182,22 +192,8 @@ public struct RewritePageTextCommand: PDFEditCommand, Equatable, Sendable {
         result = try context.content.replacing(ranges: local, in: result)
       }
     }
-    let resource = String(
-      decoding: try PDFWriter.serializedValue(.name(context.font.resource)), as: UTF8.self)
-    var output =
-      "q\nBT\n0 Tc 0 Tw 100 Tz 0 Ts 0 Tr\n\(resource) \(AnnotationSupport.number(fontSize)) Tf\n"
-    output += color.map(AnnotationSupport.number).joined(separator: " ") + " rg\n"
-    var bytes = Array(output.utf8)
-    for line in lines where !line.text.isEmpty {
-      bytes += Array(
-        "1 0 0 1 \(AnnotationSupport.number(line.x)) \(AnnotationSupport.number(line.baseline)) Tm\n"
-          .utf8)
-      bytes += ReplaceTextCommand.literalStringBytes(context.font.encode(line.text) ?? [])
-      bytes += Array(" Tj\n".utf8)
-    }
-    bytes += Array("ET\nQ\n".utf8)
-    try AddedContent.append(
-      String(decoding: bytes, as: UTF8.self), pageID: pageID, toFront: true, in: &result)
+    try PageTextLineWriter.append(lines, box: box, pageID: pageID, defaultFont: context.font,
+      defaultSize: fontSize, defaultColor: color, in: &result)
     return result
   }
 

@@ -1,0 +1,420 @@
+import Foundation
+import PDFCore
+
+public enum StandardTextFont: String, CaseIterable, Sendable {
+  case helvetica = "Helvetica"
+  case helveticaBold = "Helvetica-Bold"
+  case helveticaItalic = "Helvetica-Oblique"
+  case helveticaBoldItalic = "Helvetica-BoldOblique"
+  case times = "Times-Roman"
+  case timesBold = "Times-Bold"
+  case timesItalic = "Times-Italic"
+  case timesBoldItalic = "Times-BoldItalic"
+  case courier = "Courier"
+  case courierBold = "Courier-Bold"
+  case courierItalic = "Courier-Oblique"
+  case courierBoldItalic = "Courier-BoldOblique"
+
+  public var family: AddedTextStyle.Family {
+    if rawValue.hasPrefix("Times") { return .times }
+    if rawValue.hasPrefix("Courier") { return .courier }
+    return .helvetica
+  }
+  public var isBold: Bool { rawValue.contains("Bold") }
+  public var isItalic: Bool { rawValue.contains("Italic") || rawValue.contains("Oblique") }
+  public static func face(family: AddedTextStyle.Family, bold: Bool, italic: Bool) -> Self {
+    Self(rawValue: family.baseFont(bold: bold, italic: italic))!
+  }
+  public static func canEncode(_ text: String) -> Bool {
+    text.unicodeScalars.allSatisfy { scalar in
+      if scalar == "\n" || scalar == "\r" { return true }
+      if CharacterSet.controlCharacters.contains(scalar) { return false }
+      guard let data = String(scalar).data(using: .windowsCP1252), data.count == 1 else {
+        return false
+      }
+      return String(data: data, encoding: .windowsCP1252) == String(scalar)
+    }
+  }
+}
+
+public struct PageTextFormat: Sendable, Equatable {
+  public var font: StandardTextFont
+  public var size: Double
+  public var color: [Double]
+  public init(font: StandardTextFont = .helvetica, size: Double = 12, color: [Double] = [0, 0, 0]) {
+    self.font = font
+    self.size = size
+    self.color = color
+  }
+  public var isValid: Bool {
+    size.isFinite && (2...144).contains(size) && color.count == 3
+      && color.allSatisfy { $0.isFinite && (0...1).contains($0) }
+  }
+}
+
+public struct PageTextFragment: Sendable, Equatable {
+  public let text: String
+  public let format: PageTextFormat
+  public init(text: String, format: PageTextFormat) {
+    self.text = text
+    self.format = format
+  }
+}
+
+public struct PageTextSegment: Sendable, Equatable {
+  public let text: String
+  public let x: Double
+  public let format: PageTextFormat
+  public init(text: String, x: Double, format: PageTextFormat) {
+    self.text = text
+    self.x = x
+    self.format = format
+  }
+}
+
+public struct PageTextBox: Sendable, Equatable {
+  public let x: Double
+  public let firstBaseline: Double
+  public let width: Double
+  public let lineSpacing: Double
+  public let wraps: Bool
+  public init(
+    x: Double, firstBaseline: Double, width: Double, lineSpacing: Double, wraps: Bool = true
+  ) {
+    self.x = x
+    self.firstBaseline = firstBaseline
+    self.width = width
+    self.lineSpacing = lineSpacing
+    self.wraps = wraps
+  }
+  var isValid: Bool {
+    [x, firstBaseline, width, lineSpacing].allSatisfy(\.isFinite)
+      && abs(x) <= 1_000_000 && abs(firstBaseline) <= 1_000_000
+      && (24...2_000).contains(width) && lineSpacing > 0 && lineSpacing <= 1_000
+  }
+}
+
+/// Authoring metadata retains geometry, paragraph breaks and their nonpainting
+/// style. Painted text and styles come from actual PDF painting instructions.
+public struct AuthoredPageTextBox: Sendable {
+  public let box: PageTextBox
+  public let lines: [PageTextLine]
+  public let originalText: [Int: String]
+  public var fragments: [PageTextFragment] {
+    var result: [PageTextFragment] = []
+    let fallback = lines.lazy.flatMap(\.segments).first?.format
+    for line in lines {
+      result += line.segments.map { PageTextFragment(text: $0.text, format: $0.format) }
+      if line.endsParagraph,
+        let format = line.breakFormat ?? line.segments.last?.format ?? fallback
+      {
+        result.append(.init(text: "\n", format: format))
+      }
+    }
+    return result
+  }
+}
+
+enum PageTextLineWriter {
+  static func originalContent(pageID: PDFObjectID, in graph: PDFGraph) throws -> PageContent {
+    let content = try PageContent.load(pageID: pageID, in: graph)
+    guard content.segments.allSatisfy(\.isEditable),
+      Set(content.segments.map(\.objectID)).count == content.segments.count
+    else {
+      throw PDFError(.unsupported, "This page repeats streams or uses unsupported content filters")
+    }
+    var depth = 0
+    var inText = false
+    for instruction in content.instructions {
+      switch instruction.operatorName {
+      case "q": depth += 1
+      case "Q":
+        depth -= 1
+        guard depth >= 0 else { throw PDFError(.unsupported, "Unbalanced page graphics state") }
+      case "BT":
+        guard !inText else { throw PDFError(.unsupported, "Nested page text objects") }
+        inText = true
+      case "ET":
+        guard inText else { throw PDFError(.unsupported, "Unbalanced page text objects") }
+        inText = false
+      default: break
+      }
+    }
+    guard depth == 0, !inText else {
+      throw PDFError(.unsupported, "Unbalanced page content cannot receive inline text")
+    }
+    return content
+  }
+
+  static func validate(_ lines: [PageTextLine], box: PageTextBox?) throws {
+    guard lines.count <= 4_000,
+      lines.reduce(0, { $0 + max(1, $1.segments.count) }) <= 500,
+      box == nil || box!.isValid
+    else {
+      throw PDFError(.malformed, "Invalid text box geometry")
+    }
+    for line in lines {
+      guard line.breakFormat == nil || (line.endsParagraph && line.breakFormat!.isValid) else {
+        throw PDFError(.malformed, "Invalid paragraph break style")
+      }
+      guard line.x.isFinite, line.baseline.isFinite,
+        abs(line.x) <= 1_000_000, abs(line.baseline) <= 1_000_000
+      else {
+        throw PDFError(.malformed, "Invalid text line position")
+      }
+      if let box {
+        guard abs(line.x - box.x) < 0.005 else {
+          throw PDFError(.malformed, "Text line does not match its box")
+        }
+      }
+      if !line.segments.isEmpty {
+        guard line.segments.map(\.text).joined() == line.text,
+          line.segments.allSatisfy({
+            $0.x.isFinite && abs($0.x) <= 1_000_000 && $0.format.isValid
+              && !$0.text.contains("\n") && !$0.text.contains("\r")
+              && StandardTextFont.canEncode($0.text)
+          })
+        else {
+          throw PDFError(.unsupported, "The selected PDF font cannot encode these characters")
+        }
+      }
+    }
+    if let box, let first = lines.first {
+      guard abs(first.baseline - box.firstBaseline) < 0.005 else {
+        throw PDFError(.malformed, "Text baseline does not match its box")
+      }
+    }
+  }
+
+  static func append(
+    _ lines: [PageTextLine], box: PageTextBox?, pageID: PDFObjectID,
+    defaultFont: SimpleFont?, defaultSize: Double, defaultColor: [Double], in graph: inout PDFGraph
+  ) throws {
+    try validate(lines, box: box)
+    var bytes = Array("q\nBT\n0 Tc 0 Tw 100 Tz 0 Ts 0 Tr\n".utf8)
+    var lineRecords: [PDFValue] = []
+    for line in lines {
+      var count = 0
+      if line.segments.isEmpty, !line.text.isEmpty, let font = defaultFont,
+        let codes = font.encode(line.text)
+      {
+        try emit(
+          codes, x: line.x, baseline: line.baseline, resource: font.resource,
+          size: defaultSize, color: defaultColor, to: &bytes)
+        count = 1
+      } else {
+        for segment in line.segments where !segment.text.isEmpty {
+          let face = segment.format.font
+          let resource = try AddedContent.registerStandardFont(
+            family: face.family, bold: face.isBold, italic: face.isItalic, pageID: pageID,
+            in: &graph)
+          guard case .dictionary(let page)? = graph.objects[pageID],
+            let font = SimpleFont.resolve(resource: resource, page: page, in: graph),
+            let codes = font.encode(segment.text)
+          else { throw PDFError(.unsupported, "The selected font cannot encode these characters") }
+          try emit(
+            codes, x: segment.x, baseline: line.baseline, resource: resource,
+            size: segment.format.size, color: segment.format.color, to: &bytes)
+          count += 1
+        }
+      }
+      let breakStyle: PDFValue =
+        line.breakFormat.map { format in
+          .array([
+            .name(PDFName(format.font.rawValue)), .real(format.size),
+            .array(format.color.map { .real($0) }),
+          ])
+        } ?? .null
+      lineRecords.append(
+        .array([
+          .integer(Int64(count)), .boolean(line.endsParagraph),
+          .real(line.x), .real(line.baseline), breakStyle,
+        ]))
+    }
+    bytes += Array("ET\nQ\n".utf8)
+    try AddedContent.append(
+      String(decoding: bytes, as: UTF8.self), pageID: pageID, toFront: true, in: &graph)
+    let streamID: PDFObjectID? = {
+      guard case .dictionary(let page)? = graph.objects[pageID] else { return nil }
+      switch page[PDFName("Contents")] {
+      case .reference(let id)?: return id
+      case .array(let values)?:
+        if case .reference(let id)? = values.last { return id }
+        return nil
+      default: return nil
+      }
+    }()
+    if let box, let id = streamID,
+      case .stream(let stream)? = graph.objects[id]
+    {
+      var dictionary = stream.dictionary
+      dictionary[PDFName("SPDFTextVersion")] = .integer(1)
+      dictionary[PDFName("SPDFTextBox")] = .array([
+        .real(box.x), .real(box.firstBaseline), .real(box.width), .real(box.lineSpacing),
+        .boolean(box.wraps),
+      ])
+      dictionary[PDFName("SPDFTextLines")] = .array(lineRecords)
+      graph.objects[id] = .stream(PDFStream(dictionary: dictionary, bytes: stream.bytes))
+    }
+  }
+
+  private static func emit(
+    _ codes: [UInt8], x: Double, baseline: Double, resource: PDFName,
+    size: Double, color: [Double], to bytes: inout [UInt8]
+  ) throws {
+    bytes += Array(try PDFWriter.serializedValue(.name(resource)))
+    bytes += Array(" \(AnnotationSupport.number(size)) Tf\n".utf8)
+    bytes += Array((color.map(AnnotationSupport.number).joined(separator: " ") + " rg\n").utf8)
+    bytes += Array(
+      "1 0 0 1 \(AnnotationSupport.number(x)) \(AnnotationSupport.number(baseline)) Tm\n".utf8)
+    bytes += ReplaceTextCommand.literalStringBytes(codes)
+    bytes += Array(" Tj\n".utf8)
+  }
+}
+
+public enum AuthoredPageTextBoxes {
+  /// Metadata is a hint, never authority to bypass the normal edit checks.
+  /// Every current string, style and position is resolved from page content.
+  public static func read(pageID: PDFObjectID, in graph: PDFGraph) throws -> [AuthoredPageTextBox] {
+    let content = try PageContent.load(pageID: pageID, in: graph)
+    let allRuns = try TextRunIndexer.runs(in: content, graph: graph)
+    func number(_ value: PDFValue) -> Double? {
+      switch value {
+      case .real(let n): return n
+      case .integer(let n): return Double(n)
+      default: return nil
+      }
+    }
+    var boxes: [AuthoredPageTextBox] = []
+    for (segmentIndex, segment) in content.segments.enumerated() {
+      let dictionary = segment.dictionary
+      guard dictionary[PDFName("SPDFAdded")] == .boolean(true),
+        dictionary[PDFName("SPDFTextVersion")] == .integer(1),
+        case .array(let geometry)? = dictionary[PDFName("SPDFTextBox")], geometry.count == 5,
+        let x = number(geometry[0]), let baseline = number(geometry[1]),
+        let width = number(geometry[2]), let spacing = number(geometry[3]),
+        case .boolean(let wraps) = geometry[4],
+        case .array(let records)? = dictionary[PDFName("SPDFTextLines")], records.count <= 4_000
+      else { continue }
+      let box = PageTextBox(
+        x: x, firstBaseline: baseline, width: width, lineSpacing: spacing, wraps: wraps)
+      guard box.isValid else { continue }
+      let indices = allRuns.indices.filter {
+        content.segmentIndex(for: allRuns[$0].stringSpan) == segmentIndex
+      }
+      guard !indices.isEmpty else { continue }
+      var cursor = 0
+      var lines: [PageTextLine] = []
+      var original: [Int: String] = [:]
+      var valid = true
+      for record in records {
+        guard case .array(let fields) = record, (4...5).contains(fields.count),
+          case .integer(let count) = fields[0], count >= 0, count <= 4_000,
+          case .boolean(let hard) = fields[1], let lineX = number(fields[2]),
+          let lineY = number(fields[3]), lineX.isFinite, lineY.isFinite,
+          abs(lineX - box.x) < 0.005, abs(lineY) <= 1_000_000,
+          cursor + Int(count) <= indices.count
+        else {
+          valid = false
+          break
+        }
+        var breakFormat: PageTextFormat?
+        if fields.count == 5, fields[4] != .null {
+          guard hard, case .array(let style) = fields[4], style.count == 3,
+            case .name(let name) = style[0],
+            let font = StandardTextFont(rawValue: String(decoding: name.bytes, as: UTF8.self)),
+            let size = number(style[1]), case .array(let components) = style[2],
+            components.count == 3
+          else {
+            valid = false
+            break
+          }
+          let format = PageTextFormat(font: font, size: size, color: components.compactMap(number))
+          guard format.isValid else {
+            valid = false
+            break
+          }
+          breakFormat = format
+        }
+        var segments: [PageTextSegment] = []
+        for index in indices[cursor..<(cursor + Int(count))] {
+          let run = allRuns[index]
+          let style = TextEditTargeting.inputStyle(runIndex: index, runs: allRuns, in: graph)
+          guard let family = style.fontFamily, let face = StandardTextFont(rawValue: family),
+            abs(run.baselineY - lineY) < 0.002
+          else {
+            valid = false
+            break
+          }
+          original[index] = run.text
+          segments.append(
+            .init(
+              text: run.text, x: run.baselineX,
+              format: .init(font: face, size: style.fontSize, color: style.fillColor)))
+        }
+        cursor += Int(count)
+        if let first = segments.first, abs(first.x - lineX) >= 0.005 { valid = false }
+        lines.append(
+          .init(
+            text: segments.map(\.text).joined(), x: lineX, baseline: lineY,
+            segments: segments, endsParagraph: hard, breakFormat: breakFormat))
+      }
+      guard valid, cursor == indices.count, let first = lines.first,
+        abs(first.baseline - box.firstBaseline) < 0.005
+      else { continue }
+      // Fonts without /Widths are verified by the platform when editing.
+      // Reading metadata still checks instruction/transform identity below.
+      guard
+        original.keys.allSatisfy({ index in
+          let run = allRuns[index]
+          return content.instructions[run.instructionIndex].operatorName == "Tj"
+            && run.ctm == [1, 0, 0, 1, 0, 0] && run.matrix[0] == 1 && run.matrix[3] == 1
+            && run.matrix[1] == 0 && run.matrix[2] == 0
+        })
+      else { continue }
+      boxes.append(.init(box: box, lines: lines, originalText: original))
+    }
+    return boxes
+  }
+}
+
+public struct AddPageTextLinesCommand: PDFEditCommand, Sendable, Equatable {
+  public let pageID: PDFObjectID
+  public let lines: [PageTextLine]
+  public let box: PageTextBox
+  public init(pageID: PDFObjectID, lines: [PageTextLine], box: PageTextBox) {
+    self.pageID = pageID
+    self.lines = lines
+    self.box = box
+  }
+  public var name: String { "Add Text" }
+  public func affectedPageIDs(in graph: PDFGraph) -> [PDFObjectID] { [pageID] }
+  public func validate(in graph: PDFGraph) throws {
+    guard try PDFPageTree.pageIDs(in: graph).contains(pageID),
+      lines.allSatisfy({ $0.text.isEmpty || !$0.segments.isEmpty })
+    else { throw PDFError(.malformed, "Missing text page or formatted lines") }
+    try PageTextLineWriter.validate(lines, box: box)
+    _ = try PageTextLineWriter.originalContent(pageID: pageID, in: graph)
+  }
+  public func apply(to graph: PDFGraph) throws -> PDFGraph {
+    try validate(in: graph)
+    var result = try PageContentCopy.makePrivate(pageID: pageID, in: graph)
+    let content = try PageTextLineWriter.originalContent(pageID: pageID, in: result)
+    // PDF content streams share graphics state. Restore the initial page CTM,
+    // clipping and alpha before painting the native editor's page positions.
+    if !content.segments.isEmpty {
+      let ranges: [(range: Range<Int>, replacement: [UInt8])] = [
+        (range: 0..<0, replacement: Array("q\n".utf8)),
+        (range: content.bytes.count..<content.bytes.count, replacement: Array("\nQ\n".utf8)),
+      ]
+      for index in content.segments.indices {
+        let local = ranges.filter { content.segmentIndex(for: $0.range) == index }
+        result = try content.replacing(ranges: local, in: result)
+      }
+    }
+    try PageTextLineWriter.append(
+      lines, box: box, pageID: pageID,
+      defaultFont: nil, defaultSize: 12, defaultColor: [0, 0, 0], in: &result)
+    return result
+  }
+}
