@@ -12,7 +12,13 @@ public enum VerifiedFileWriter {
   ) throws {
     try write(bytes, to: destination) { data in
       let reparsed = try PDFParser.parse(data, limits: limits)
-      guard reparsed.graph == expectedGraph else {
+      // The writer derives /Size from the output cross-reference table. New
+      // content can allocate objects without changing this cached trailer value;
+      // incremental output may also retain freed object numbers. Match the
+      // session's save verification while comparing every object and other key.
+      var expected = expectedGraph
+      expected.trailer[PDFName("Size")] = reparsed.graph.trailer[PDFName("Size")]
+      guard reparsed.graph == expected else {
         throw PDFError(
           .malformed, "Temporary output failed verification against the edited graph")
       }

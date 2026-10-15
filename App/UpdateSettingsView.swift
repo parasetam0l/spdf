@@ -1,60 +1,50 @@
+import PDFCore
 import SwiftUI
 
-/// P41-009: native update settings — check preferences, the current
-/// marketing/build version, the last-check state, and a manual check
-/// action. State comes from `AppUpdater` (Sparkle in Release builds,
-/// unavailable in Debug); preferences persist through Sparkle's standard
-/// defaults and survive restarts.
-struct UpdateSettingsView: View {
+/// One preferences window for document defaults and release updates.
+struct SettingsView: View {
   @ObservedObject private var updater = AppUpdater.shared
+  @AppStorage(WorkspacePreferences.paperKey) private var paper = BlankPageFormat.a4.rawValue
+  @AppStorage(WorkspacePreferences.landscapeKey) private var landscape = false
+  @AppStorage(WorkspacePreferences.continuousKey) private var continuous = true
 
   var body: some View {
     Form {
-      Section("Version") {
-        LabeledContent("Installed version", value: AppUpdater.currentVersion)
+      Section("Documents") {
+        Picker("New PDF paper size", selection: $paper) {
+          ForEach(BlankPageFormat.allCases, id: \.rawValue) { format in
+            Text(format.title).tag(format.rawValue)
+          }
+        }
+        Toggle("Create new PDFs in landscape", isOn: $landscape)
+        Toggle("Open PDFs in continuous view", isOn: $continuous)
       }
-      Section("Checking") {
+      Section("Updates") {
+        LabeledContent("Installed version", value: AppUpdater.currentVersion)
         if let guidance = updater.installationGuidance {
           Text(guidance)
           Button("Show Installation Instructions") { updater.checkForUpdates() }
         } else if updater.isAvailable {
-          Toggle(
-            "Automatically check for updates",
-            isOn: Binding(
-              get: { updater.automaticallyChecksForUpdates },
-              set: { updater.automaticallyChecksForUpdates = $0 }))
-          LabeledContent(
-            "Schedule",
-            value: "Daily (\(Int(UpdateSettings.checkIntervalHours)) h) once allowed")
-          LabeledContent("Last check", value: UpdateSettings.lastCheckText(updater.lastCheck))
-          if updater.isInstallDeferred {
-            Text("Installation is waiting for your work. Resume when you are ready to quit.")
-          }
-          Button(updater.isInstallDeferred ? "Resume Update" : "Check for Updates Now") {
+          Toggle("Automatically check for updates", isOn: Binding(
+            get: { updater.automaticallyChecksForUpdates },
+            set: { updater.automaticallyChecksForUpdates = $0 }))
+          LabeledContent("Last checked", value: UpdateSettings.lastCheckText(updater.lastCheck))
+          Button(updater.isInstallDeferred ? "Resume Update" : "Check for Updates…") {
             updater.checkForUpdates()
           }
-            .disabled(!updater.canCheckForUpdates)
+          .disabled(!updater.canCheckForUpdates)
+          Text("Updates ask before installing.").font(.caption).foregroundStyle(.secondary)
         } else {
-          Text("Update checks are unavailable in development builds.")
+          Text("Automatic updates are available in installed release builds.")
             .foregroundStyle(.secondary)
-          LabeledContent("Installed version", value: AppUpdater.currentVersion)
         }
-      }
-      Section("Policy") {
-        Text(
-          "Stable releases only; automatic installation stays off so every update asks first. "
-            + "Downgrades never go through the updater — reinstall the older published DMG by hand."
-        ).foregroundStyle(.secondary)
       }
     }
     .formStyle(.grouped)
-    .frame(width: 420)
-    .padding()
+    .frame(maxWidth: .infinity, maxHeight: .infinity)
   }
 }
 
-/// Testable formatting behind the settings view (the view itself is
-/// build-verified; the rules live in ReleaseTools' `UpdatePreferences`).
 enum UpdateSettings {
   static let checkIntervalHours = 24.0
 

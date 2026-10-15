@@ -32,12 +32,55 @@ struct WorkspaceView: View {
   var onRejectStructureSuggestion: (UUID) -> Void
   var onApplyStructureSuggestions: () -> Void
   var onDiscardStructureSuggestions: () -> Void
+  var onOrganizePages: () -> Void
+  var onInsertBlankPage: () -> Void
+  var onRotateRight: () -> Void
+  var onHighlight: () -> Void
+  var onNote: () -> Void
   @State private var pageEntry = "1"
   @FocusState private var searchFocused: Bool
 
   var body: some View {
     VStack(spacing: 0) {
-      HStack(spacing: 16) {
+      HStack(spacing: 8) {
+        toolButton("Select", image: "cursorarrow", tool: .select)
+        toolButton("Edit PDF", image: "square.and.pencil", tool: .textEdit)
+        toolButton("Add Text", image: "text.badge.plus", tool: .addText)
+        toolButton("Images", image: "photo", tool: .imageEdit)
+        toolButton("Comments", image: "text.bubble", tool: .annotate)
+        toolButton("Pages", image: "square.grid.2x2", tool: .page)
+        Spacer(minLength: 12)
+        Button { viewer.showSearch() } label: { Label("Find", systemImage: "magnifyingglass") }
+          .help("Find text (⌘F)")
+      }
+      .buttonStyle(.plain)
+      .padding(.horizontal, 14).padding(.vertical, 8)
+      .background(.bar)
+      .disabled(viewer.isLocked)
+      Divider()
+      HStack(spacing: 12) {
+        Text(toolHint).foregroundStyle(.secondary).lineLimit(1)
+        Spacer(minLength: 4)
+        if viewer.activeTool == .page {
+          Button("Organize Pages…", action: onOrganizePages)
+          Button("Insert Blank Page", action: onInsertBlankPage)
+          Button("Rotate Right", action: onRotateRight)
+        } else if viewer.activeTool == .annotate {
+          Button("Highlight", action: onHighlight)
+            .disabled(viewer.view.currentSelection == nil || !canEdit)
+          Button("Add Note", action: onNote)
+            .disabled(viewer.view.currentSelection == nil || !canEdit)
+          Button(viewer.isInkToolActive ? "Stop Drawing" : "Draw") { viewer.toggleInkTool() }
+            .disabled(!canEdit)
+        }
+      }
+      .font(.callout)
+      .padding(.horizontal, 16)
+      .frame(height: 36)
+      .background(.bar)
+      .disabled(viewer.isLocked)
+      Divider()
+      HStack(spacing: 10) {
         Button {
           viewer.isSidebarVisible.toggle()
         } label: {
@@ -49,7 +92,7 @@ struct WorkspaceView: View {
         // P12-026: primary pointer targets keep a minimum hit size without
         // giving up the dense desktop layout (the visuals stay compact; the
         // hit area grows).
-        .help("Toggle page thumbnails").accessibilityLabel("Toggle page thumbnails")
+        .help("Show or hide sidebar").accessibilityLabel("Toggle sidebar")
         Picker("Sidebar", selection: $viewer.sidebarMode) {
           Text("Pages").tag(SidebarMode.pages)
           Text("Comments").tag(SidebarMode.comments)
@@ -135,7 +178,7 @@ struct WorkspaceView: View {
         .frame(width: 130)
       }
       .buttonStyle(.borderless)
-      .padding(.horizontal, 16).padding(.vertical, 12)
+      .padding(.horizontal, 16).padding(.vertical, 6)
       .background(.bar)
       .disabled(viewer.isLocked)
       // P10-003: dropping PDF files onto the window opens them (Dock
@@ -207,10 +250,11 @@ struct WorkspaceView: View {
       } else if viewer.isLocked {
         ContentUnavailableView(
           "Password-protected PDF", systemImage: "lock.doc",
-          description: Text("Unlock from the File menu (Unlock Document…) to view this document."))
+          description: Text("Choose Tools → Security → Unlock Document to view this document."))
       } else {
         HSplitView {
           if viewer.isSidebarVisible {
+            Group {
             switch viewer.sidebarMode {
             case .pages:
               NativeView(view: viewer.thumbnails)
@@ -249,6 +293,8 @@ struct WorkspaceView: View {
                 onApplySuggestions: onApplyStructureSuggestions,
                 onDiscardSuggestions: onDiscardStructureSuggestions)
             }
+            }
+            .frame(maxHeight: .infinity, alignment: .top)
           }
           VStack(spacing: 0) {
             // P12-018: rulers align with the page pane edges in the same
@@ -287,21 +333,76 @@ struct WorkspaceView: View {
               }
             }
           }
-          .frame(minWidth: 500)
+          .frame(minWidth: 450, maxWidth: .infinity, maxHeight: .infinity)
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
       }
       Divider()
       HStack {
-        Label("Viewing", systemImage: "eye").foregroundStyle(.secondary)
+        Label(modeTitle, systemImage: modeImage).foregroundStyle(.secondary)
         Spacer()
         Text("\(viewer.pageCount) \(viewer.pageCount == 1 ? "page" : "pages")").foregroundStyle(
           .secondary)
       }
       .font(.caption).padding(.horizontal, 16).padding(.vertical, 8)
     }
+    .frame(maxWidth: .infinity, maxHeight: .infinity)
     .onAppear { pageEntry = String(max(1, viewer.pageNumber)) }
     .onChange(of: viewer.pageNumber) { _, page in pageEntry = String(page) }
   }
+
+  private func toolButton(_ title: String, image: String, tool: ViewerToolMode) -> some View {
+    Button {
+      guard viewer.activateTool(tool) else { return }
+      viewer.isInkToolActive = false
+      if tool == .annotate { viewer.showComments(); viewer.isSidebarVisible = true }
+      if tool == .page { viewer.showPages(); viewer.isSidebarVisible = true }
+    } label: {
+      Label(title, systemImage: image)
+        .font(.system(size: 12, weight: viewer.activeTool == tool ? .semibold : .regular))
+        .padding(.horizontal, 10).frame(height: 34)
+        .foregroundStyle(viewer.activeTool == tool ? Color.white : Color.primary)
+        .background(viewer.activeTool == tool ? Color.accentColor : Color.clear,
+          in: RoundedRectangle(cornerRadius: 7))
+    }
+    .disabled(tool != .select && tool != .annotate && !canEdit)
+    .accessibilityLabel(title)
+    .accessibilityValue(viewer.activeTool == tool ? "Active" : "Inactive")
+  }
+
+  private var toolHint: String {
+    switch viewer.activeTool {
+    case .select: return "Select text to copy, highlight or add a comment."
+    case .textEdit: return "Click existing text to edit. Return saves the change; Escape cancels."
+    case .addText: return "Click a page and type. Return adds the text; Escape cancels."
+    case .imageEdit: return "Select an image to move it. Right-click for image actions."
+    case .annotate: return "Select text for markup, or draw on the page."
+    case .page: return "Reorder, insert, rotate or extract pages."
+    }
+  }
+
+  private var modeTitle: String {
+    switch viewer.activeTool {
+    case .select: return canEdit ? "Ready" : "Read Only"
+    case .textEdit: return "Editing PDF"
+    case .addText: return "Adding Text"
+    case .imageEdit: return "Editing Images"
+    case .annotate: return "Commenting"
+    case .page: return "Organizing Pages"
+    }
+  }
+
+  private var modeImage: String {
+    switch viewer.activeTool {
+    case .select: return "cursorarrow"
+    case .textEdit, .addText: return "square.and.pencil"
+    case .imageEdit: return "photo"
+    case .annotate: return "text.bubble"
+    case .page: return "square.grid.2x2"
+    }
+  }
+
+  private var canEdit: Bool { viewer.allowsContentEditing && !viewer.isLocked }
 }
 
 private struct NativeView<V: NSView>: NSViewRepresentable {

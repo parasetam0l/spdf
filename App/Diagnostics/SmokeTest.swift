@@ -411,7 +411,7 @@
         try await Task.sleep(for: .milliseconds(300))
         let accessibility = AccessibilityAudit.run()
         let requiredLabels: Set<String> = [
-          "Toggle page thumbnails", "Previous page", "Next page", "Page number",
+          "Toggle sidebar", "Previous page", "Next page", "Page number",
           "Zoom out", "Zoom in", "Fit Page", "Suggest structure tags",
           "Accept suggestion: Heading 1", "Reject suggestion: Heading 1", "Structure",
           "Selection inspector", "Document information",
@@ -426,6 +426,8 @@
         }
 
         let keyboard = KeyboardAudit.verify([
+          .init(title: "New PDF", modifiers: [.command]),
+          .init(title: "Settings…", modifiers: [.command]),
           .init(title: "Open…", modifiers: [.command]),
           .init(title: "Save", modifiers: [.command]),
           .init(title: "Find…", modifiers: [.command]),
@@ -509,7 +511,7 @@
           return frame
         }
         for label in [
-          "Toggle page thumbnails", "Previous page", "Next page", "Zoom out", "Zoom in",
+          "Toggle sidebar", "Previous page", "Next page", "Zoom out", "Zoom in",
         ] {
           let frame = try hitButtonFrame(labeled: label)
           guard frame.width >= 32, frame.height >= 32 else {
@@ -2171,7 +2173,9 @@
           throw PDFError(.malformed, "The comparison window was not found")
         }
 
+        let workspaceRepairs = try await WorkspaceSmoke.checks(output: output)
         let report: [String: Any] = [
+          "workspaceRepairs": workspaceRepairs,
           "status": "passed", "app": "sPDF Editor", "windows": controller.documents.count,
           "pageCounts": [viewer.pageCount, secondViewer.pageCount],
           "navigation": "passed", "originalBytes": "preserved", "nativeWrite": "preserved",

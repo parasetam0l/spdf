@@ -57,7 +57,7 @@ final class AppUpdater: NSObject, ObservableObject, SPUUpdaterDelegate {
     if let updater = controller?.updater {
       // Sparkle cannot start on a read-only volume. Keep the manual command
       // available so that installation instructions remain reachable.
-      canCheckForUpdates = installationGuidance != nil
+      canCheckForUpdates = updater.canCheckForUpdates || installationGuidance != nil
       updater.publisher(for: \.canCheckForUpdates)
         .receive(on: DispatchQueue.main)
         .sink { [weak self] in
@@ -84,6 +84,18 @@ final class AppUpdater: NSObject, ObservableObject, SPUUpdaterDelegate {
     }
     if pendingInstall != nil {
       resumePendingInstall()
+      return
+    }
+    guard isAvailable else {
+      let alert = NSAlert()
+      alert.messageText = "Updates are available in release builds"
+      alert.informativeText = "This is a development build. Install a released version of sPDF Editor to use automatic updates."
+      alert.addButton(withTitle: "OK")
+      if let window = NSApp.keyWindow ?? NSApp.mainWindow {
+        alert.beginSheetModal(for: window)
+      } else {
+        alert.runModal()
+      }
       return
     }
     controller?.checkForUpdates(nil)

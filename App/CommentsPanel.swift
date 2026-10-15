@@ -76,7 +76,7 @@ struct CommentsPanel: View {
       if rows.isEmpty {
         ContentUnavailableView(
           "No Comments", systemImage: "text.bubble",
-          description: Text("Select text and use the Annotate menu to add markup."))
+          description: Text("Select text on the page, then use Highlight or Add Note."))
       } else {
         List {
           ForEach(Array(rows.enumerated()), id: \.offset) { _, row in

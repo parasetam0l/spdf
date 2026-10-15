@@ -19,6 +19,13 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
       return
     }
     #if DEBUG
+      if let index = CommandLine.arguments.firstIndex(of: "--test-workspace"),
+        CommandLine.arguments.count > index + 1
+      {
+        let output = URL(fileURLWithPath: CommandLine.arguments[index + 1], isDirectory: true)
+        Task { await WorkspaceSmoke.run(output: output) }
+        return
+      }
       if let index = CommandLine.arguments.firstIndex(of: "--test-relaunch"),
         CommandLine.arguments.count > index + 3
       {
@@ -53,6 +60,8 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
         return
       }
     #endif
+    // Start Sparkle before the first application-menu validation.
+    _ = AppUpdater.shared
     Task { @MainActor in
       do { try await UpdateRelaunchCoordinator.restore() }
       catch { documents.presentError(error) }
@@ -134,6 +143,7 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
         || CommandLine.arguments.contains("--test-termination")
         || CommandLine.arguments.contains("--test-termination-ui")
         || CommandLine.arguments.contains("--test-relaunch")
+        || CommandLine.arguments.contains("--test-workspace")
       {
         sender.reply(toOpenOrPrint: .success)
         return
@@ -156,6 +166,8 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
   }
 
   private var currentDocument: SPDFDocument? { documents.currentDocument as? SPDFDocument }
+
+  func dismissWelcome() { welcome?.close() }
 
   @objc private func previousPage(_ sender: Any?) { currentDocument?.viewer?.previousPage() }
   @objc private func nextPage(_ sender: Any?) { currentDocument?.viewer?.nextPage() }
@@ -216,6 +228,9 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
   }
   @objc private func textEditTool(_ sender: Any?) {
     _ = currentDocument?.viewer?.activateTool(.textEdit)
+  }
+  @objc private func addTextTool(_ sender: Any?) {
+    _ = currentDocument?.viewer?.activateTool(.addText)
   }
   @objc private func pageTool(_ sender: Any?) {
     _ = currentDocument?.viewer?.activateTool(.page)
@@ -426,10 +441,13 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
     let window = NSWindow(
       contentRect: NSRect(x: 0, y: 0, width: 460, height: 380),
       styleMask: [.titled, .closable], backing: .buffered, defer: false)
-    window.title = "Update Settings"
+    window.title = "Settings"
     window.isReleasedWhenClosed = false
     updateSettingsWindow = window
-    window.contentView = NSHostingView(rootView: UpdateSettingsView())
+    let hosting = NSHostingView(rootView: SettingsView())
+    hosting.sizingOptions = []
+    window.setContentSize(NSSize(width: 520, height: 460))
+    window.contentView = hosting
     window.center()
     window.makeKeyAndOrderFront(nil)
   }
@@ -439,7 +457,7 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
       return !TerminationCoordinator.shared.isPreparing
     }
     if menuItem.action == #selector(checkForUpdates(_:)) {
-      return AppUpdater.shared.canCheckForUpdates
+      return !AppUpdater.shared.isAvailable || AppUpdater.shared.canCheckForUpdates
     }
     if menuItem.action == #selector(showUpdateSettings) {
       return true
@@ -474,15 +492,17 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
       guard let viewer = document.viewer else { return false }
       menuItem.state = viewer.isInkToolActive ? .on : .off
       return !viewer.isLocked && viewer.pageCount > 0
-    case #selector(selectTool), #selector(textEditTool), #selector(pageTool),
+    case #selector(selectTool), #selector(textEditTool), #selector(addTextTool), #selector(pageTool),
       #selector(imageEditTool):
       guard let viewer = document.viewer else { return false }
       let tool: ViewerToolMode =
         menuItem.action == #selector(textEditTool) ? .textEdit
+        : menuItem.action == #selector(addTextTool) ? .addText
         : menuItem.action == #selector(pageTool) ? .page
         : menuItem.action == #selector(imageEditTool) ? .imageEdit : .select
       menuItem.state = viewer.activeTool == tool ? .on : .off
       return !viewer.isLocked && viewer.pageCount > 0
+        && (tool == .select || document.editSession.canEdit)
     case #selector(flattenAnnotations):
       return document.canFlattenAnnotations
     case #selector(flattenForm):
@@ -587,6 +607,7 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
         contentRect: NSRect(x: 0, y: 0, width: 680, height: 440),
         styleMask: [.titled, .closable, .miniaturizable], backing: .buffered, defer: false)
       window.title = "sPDF Editor"
+      window.isReleasedWhenClosed = false
       window.contentView = NSHostingView(rootView: WelcomeView())
       // P12-019: the welcome window keeps its placement across launches.
       window.setFrameAutosaveName("spdf-welcome")
@@ -612,7 +633,7 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
     let app = submenu("sPDF Editor", in: bar)
     add("About sPDF Editor", #selector(NSApplication.orderFrontStandardAboutPanel(_:)), to: app)
     add("Check for Updates…", #selector(checkForUpdates(_:)), target: self, to: app)
-    add("Update Settings…", #selector(showUpdateSettings), key: ",", modifiers: [.command, .option], target: self, to: app)
+    add("Settings…", #selector(showUpdateSettings), key: ",", target: self, to: app)
     app.addItem(.separator())
     add("Hide sPDF Editor", #selector(NSApplication.hide(_:)), key: "h", to: app)
     add(
@@ -623,11 +644,11 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
     add("Quit sPDF Editor", #selector(quitApplication), key: "q", target: self, to: app)
 
     let file = submenu("File", in: bar)
+    add("New PDF", #selector(NSDocumentController.newDocument(_:)), key: "n",
+      target: documents, to: file)
     add(
       "Open…", #selector(NSDocumentController.openDocument(_:)), key: "o", target: documents,
       to: file)
-    add("Unlock Document…", #selector(unlockDocument), target: self, to: file)
-    add("Lock Document", #selector(lockDocument), target: self, to: file)
     file.addItem(.separator())
     add("Close", #selector(NSWindow.performClose(_:)), key: "w", to: file)
     add("Save", #selector(NSDocument.save(_:)), key: "s", to: file)
@@ -638,39 +659,24 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
       "Duplicate", #selector(NSDocument.duplicate(_:)), key: "d",
       modifiers: [.command, .shift], to: file)
     file.addItem(.separator())
+    let exports = submenu("Export", in: file)
     add(
       "Export Text…", #selector(exportText), key: "t", modifiers: [.command, .option],
-      target: self, to: file)
-    add("Export Page Images…", #selector(exportPageImages), target: self, to: file)
-    add("Export HTML…", #selector(exportHTML), target: self, to: file)
-    add("Export DOCX…", #selector(exportDOCX), target: self, to: file)
-    add("Preview DOCX Reconstruction…", #selector(previewDOCX), target: self, to: file)
-    add("Review Tables…", #selector(reviewTables), target: self, to: file)
-    add("Export Tables…", #selector(exportTables), target: self, to: file)
-    add("Compatibility Report…", #selector(showCompatibilityReport), target: self, to: file)
-    add("Create Archival Copy…", #selector(createArchivalCopy), target: self, to: file)
-    add("Convert Colors…", #selector(convertColors), target: self, to: file)
-    add("Place Graphical Signature…", #selector(placeGraphicalSignature), target: self, to: file)
-    add("Organize Pages…", #selector(organizePages), target: self, to: file)
-    add("Repair Document…", #selector(repairDocument), target: self, to: file)
-    add("Export Outline…", #selector(exportOutline), target: self, to: file)
-    add("Export Attachments…", #selector(exportAttachments), target: self, to: file)
-    add("Export Images…", #selector(exportImages), target: self, to: file)
-    file.addItem(.separator())
-    add("Print…", #selector(printDocument), key: "p", target: self, to: file)
-    add("Export Print PDF…", #selector(exportPrintPDF), target: self, to: file)
+      target: self, to: exports)
+    add("Export Page Images…", #selector(exportPageImages), target: self, to: exports)
+    add("Export HTML…", #selector(exportHTML), target: self, to: exports)
+    add("Export DOCX…", #selector(exportDOCX), target: self, to: exports)
+    add("Export Tables…", #selector(exportTables), target: self, to: exports)
+    exports.addItem(.separator())
+    add("Export Outline…", #selector(exportOutline), target: self, to: exports)
+    add("Export Attachments…", #selector(exportAttachments), target: self, to: exports)
+    add("Export Images…", #selector(exportImages), target: self, to: exports)
+    add("Export Print PDF…", #selector(exportPrintPDF), target: self, to: exports)
     add(
       "Export Review Summary…", #selector(exportReviewSummary), key: "e",
-      modifiers: [.command, .shift], target: self, to: file)
-    add("Export Form Values…", #selector(exportFormValues), target: self, to: file)
-    add("Import Form Values…", #selector(importFormValues), target: self, to: file)
-    add("Import Pages…", #selector(importPages), target: self, to: file)
+      modifiers: [.command, .shift], target: self, to: exports)
     file.addItem(.separator())
-    add("Save Sanitized Copy…", #selector(saveSanitizedCopy), target: self, to: file)
-    add("Export Encrypted Copy…", #selector(exportEncryptedCopy), target: self, to: file)
-    add("Sign Document…", #selector(signDocument), target: self, to: file)
-    add("Optimize Document…", #selector(optimizeDocument), target: self, to: file)
-    add("Compare With…", #selector(compareWithDocument), target: self, to: file)
+    add("Print…", #selector(printDocument), key: "p", target: self, to: file)
 
     let edit = submenu("Edit", in: bar)
     add("Undo Edit", #selector(undoEdit), key: "z", target: self, to: edit)
@@ -754,6 +760,9 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
       modifiers: [.command, .option], target: self, to: view)
 
     let page = submenu("Page", in: bar)
+    add("Organize Pages…", #selector(organizePages), target: self, to: page)
+    add("Import Pages…", #selector(importPages), target: self, to: page)
+    page.addItem(.separator())
     add(
       "Rotate Left", #selector(rotateLeft), key: "l", modifiers: [.command, .shift], target: self,
       to: page)
@@ -768,6 +777,9 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
     add("Delete Page…", #selector(deletePage), target: self, to: page)
 
     let form = submenu("Form", in: bar)
+    add("Import Form Values…", #selector(importFormValues), target: self, to: form)
+    add("Export Form Values…", #selector(exportFormValues), target: self, to: form)
+    form.addItem(.separator())
     add("Add Text Field…", #selector(addTextField), target: self, to: form)
     add("Add Checkbox…", #selector(addCheckbox), target: self, to: form)
     add("Add Radio Group…", #selector(addRadioGroup), target: self, to: form)
@@ -807,6 +819,7 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
     add(
       "Text Edit Tool", #selector(textEditTool), key: "2", modifiers: [.command, .control],
       target: self, to: annotate)
+    add("Add Text Tool", #selector(addTextTool), target: self, to: annotate)
     add(
       "Page Tool", #selector(pageTool), key: "3", modifiers: [.command, .control],
       target: self, to: annotate)
@@ -819,9 +832,28 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
     annotate.addItem(.separator())
     add("Flatten Annotations…", #selector(flattenAnnotations), target: self, to: annotate)
     add("Flatten Form…", #selector(flattenForm), target: self, to: annotate)
+    add("Place Graphical Signature…", #selector(placeGraphicalSignature), target: self, to: annotate)
     annotate.addItem(.separator())
     add("Recognize Text (OCR)…", #selector(runOCR), target: self, to: annotate)
     add("Recognize Text in All Pages…", #selector(runOCRAllPages), target: self, to: annotate)
+
+    let tools = submenu("Tools", in: bar)
+    add("Compare With…", #selector(compareWithDocument), target: self, to: tools)
+    add("Optimize Document…", #selector(optimizeDocument), target: self, to: tools)
+    add("Repair Document…", #selector(repairDocument), target: self, to: tools)
+    add("Review Tables…", #selector(reviewTables), target: self, to: tools)
+    add("Preview DOCX Reconstruction…", #selector(previewDOCX), target: self, to: tools)
+    let security = submenu("Security", in: tools)
+    add("Unlock Document…", #selector(unlockDocument), target: self, to: security)
+    add("Lock Document", #selector(lockDocument), target: self, to: security)
+    security.addItem(.separator())
+    add("Save Sanitized Copy…", #selector(saveSanitizedCopy), target: self, to: security)
+    add("Export Encrypted Copy…", #selector(exportEncryptedCopy), target: self, to: security)
+    add("Sign Document…", #selector(signDocument), target: self, to: security)
+    let production = submenu("Print Production", in: tools)
+    add("Compatibility Report…", #selector(showCompatibilityReport), target: self, to: production)
+    add("Create Archival Copy…", #selector(createArchivalCopy), target: self, to: production)
+    add("Convert Colors…", #selector(convertColors), target: self, to: production)
 
     let window = submenu("Window", in: bar)
     NSApp.windowsMenu = window
@@ -831,7 +863,7 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
     add("Bring All to Front", #selector(NSApplication.arrangeInFront(_:)), to: window)
     let help = submenu("Help", in: bar)
     NSApp.helpMenu = help
-    let item = NSMenuItem(title: "sPDF Editor 0.1 — PDF viewing", action: nil, keyEquivalent: "")
+    let item = NSMenuItem(title: "sPDF Editor — PDF editing", action: nil, keyEquivalent: "")
     help.addItem(item)
   }
 
@@ -859,11 +891,14 @@ private struct WelcomeView: View {
     VStack(spacing: 20) {
       Image(systemName: "doc.richtext").font(.system(size: 60)).foregroundStyle(.blue)
       Text("sPDF Editor").font(.largeTitle.weight(.semibold))
-      Text("Open a PDF to get started.").foregroundStyle(.secondary)
-      Button("Open PDF…") { NSDocumentController.shared.openDocument(nil) }
-        .buttonStyle(.borderedProminent)
-        .controlSize(.large)
-        .keyboardShortcut("o")
+      Text("Create a PDF or open one to edit.").foregroundStyle(.secondary)
+      HStack(spacing: 12) {
+        Button("New PDF") { NSDocumentController.shared.newDocument(nil) }
+          .buttonStyle(.borderedProminent).keyboardShortcut("n")
+        Button("Open PDF…") { NSDocumentController.shared.openDocument(nil) }
+          .buttonStyle(.bordered).keyboardShortcut("o")
+      }
+      .controlSize(.large)
     }
     .frame(maxWidth: .infinity, maxHeight: .infinity)
   }

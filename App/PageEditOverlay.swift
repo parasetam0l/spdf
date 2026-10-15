@@ -24,7 +24,7 @@ struct PageEditOverlay: NSViewRepresentable {
     viewer.pendingEditFinisher = { [weak nsView] in nsView?.commitEditing() ?? true }
     // P12-013: leaving the text tool finishes the pending edit instead of
     // abandoning it behind the new tool.
-    if viewer.activeTool != .textEdit {
+    if viewer.activeTool != .textEdit && viewer.activeTool != .addText {
       nsView.commitEditing()
     }
   }
@@ -38,11 +38,13 @@ final class PageEditOverlayView: NSView, NSTextFieldDelegate {
   enum EditTarget {
     case form(FormFieldTarget)
     case textRun(PageTextTarget)
+    case newText(pageIndex: Int, rect: [Double])
 
     var pageIndex: Int {
       switch self {
       case .form(let target): return target.pageIndex
       case .textRun(let target): return target.pageIndex
+      case .newText(let pageIndex, _): return pageIndex
       }
     }
 
@@ -50,6 +52,7 @@ final class PageEditOverlayView: NSView, NSTextFieldDelegate {
       switch self {
       case .form(let target): return target.rect
       case .textRun(let target): return target.rect
+      case .newText(_, let rect): return rect
       }
     }
 
@@ -57,6 +60,7 @@ final class PageEditOverlayView: NSView, NSTextFieldDelegate {
       switch self {
       case .form(let target): return target.value
       case .textRun(let target): return target.text
+      case .newText: return ""
       }
     }
 
@@ -66,6 +70,7 @@ final class PageEditOverlayView: NSView, NSTextFieldDelegate {
       switch self {
       case .form: return nil
       case .textRun(let target): return target.style
+      case .newText: return nil
       }
     }
 
@@ -73,6 +78,7 @@ final class PageEditOverlayView: NSView, NSTextFieldDelegate {
       switch self {
       case .form: return "spdf-form-editor"
       case .textRun: return "spdf-text-editor"
+      case .newText: return "spdf-new-text-editor"
       }
     }
   }
@@ -102,6 +108,8 @@ final class PageEditOverlayView: NSView, NSTextFieldDelegate {
       return self
     case .textRun:
       return viewer?.activeTool == .textEdit ? self : nil
+    case .newText:
+      return self
     }
   }
 
@@ -127,7 +135,11 @@ final class PageEditOverlayView: NSView, NSTextFieldDelegate {
       landed.pageIndex == pending.pageIndex
     else { return }
     // Editing arms the text tool; a vetoed switch aborts the edit.
-    guard viewer?.activateTool(.textEdit) != false else { return }
+    if case .newText = pending {
+      // Keep Add Text armed while the new inline field is being edited.
+    } else if viewer?.activateTool(.textEdit) == false {
+      return
+    }
     beginEditing(pending)
   }
 
@@ -140,6 +152,13 @@ final class PageEditOverlayView: NSView, NSTextFieldDelegate {
     let pagePoint = viewer.view.convert(point, to: page)
     let index = document.index(for: page)
     let values = [Double(pagePoint.x), Double(pagePoint.y)]
+    if viewer.activeTool == .addText {
+      let bounds = page.bounds(for: viewer.view.displayBox)
+      let x = min(max(pagePoint.x, bounds.minX), bounds.maxX - 24)
+      let top = min(max(pagePoint.y, bounds.minY + 20), bounds.maxY)
+      return .newText(pageIndex: index,
+        rect: [Double(x), Double(top - 20), Double(min(x + 300, bounds.maxX)), Double(top)])
+    }
     if let form = viewer.formFieldProvider?(index, values) {
       return .form(form)
     }
@@ -175,6 +194,10 @@ final class PageEditOverlayView: NSView, NSTextFieldDelegate {
     // on-screen size; form targets keep the previous system styling.
     field.font = target.style?.nativeFont(viewHeight: localRect.height)
       ?? .systemFont(ofSize: max(9, min(28, localRect.height * 0.62)))
+    if case .newText = target {
+      field.font = .systemFont(ofSize: 12 * viewer.view.scaleFactor)
+      field.placeholderString = "Type text, then press Return"
+    }
     if let color = target.style?.nativeTextColor {
       field.textColor = color
     }
@@ -206,6 +229,9 @@ final class PageEditOverlayView: NSView, NSTextFieldDelegate {
       accepted = viewer?.onFormFieldCommit?(form.fieldName, text) ?? false
     case .textRun(let run):
       accepted = viewer?.onTextRunCommit?(run.pageIndex, run.runIndex, text) ?? false
+    case .newText(let pageIndex, let rect):
+      if text.isEmpty { removeEditor(); return true }
+      accepted = viewer?.onAddPageText?(pageIndex, rect, text) ?? false
     }
     guard accepted else { return false }
     removeEditor()

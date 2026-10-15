@@ -111,6 +111,7 @@ public enum ViewerDocumentState: Sendable, Equatable {
 public enum ViewerToolMode: String, Sendable, Equatable, CaseIterable {
   case select
   case textEdit
+  case addText
   case imageEdit
   case annotate
   case page
@@ -203,6 +204,8 @@ public final class PDFViewingSession: NSObject, ObservableObject, PDFViewDelegat
   @Published public var sidebarMode: SidebarMode = .pages
   @Published public var isSidebarVisible = true
   @Published public var isInkToolActive = false
+  /// The document publishes its current core editing permission to the workspace.
+  @Published public var allowsContentEditing = false
   @Published public private(set) var activeTool: ViewerToolMode = .select
   /// P12-013: hook the app installs to finish (commit or cancel) a pending
   /// edit before the active tool changes. Returning false vetoes the switch
@@ -259,6 +262,8 @@ public final class PDFViewingSession: NSObject, ObservableObject, PDFViewDelegat
   public var textRunProvider: ((Int, [Double]) -> PageTextTarget?)?
   /// P18-021: commit an in-place text-run replacement.
   public var onTextRunCommit: ((Int, Int, String) -> Bool)?
+  /// Add real page text at a rectangle chosen in the workspace.
+  public var onAddPageText: ((Int, [Double], String) -> Bool)?
   /// P12-017: resolve an app-created graphic under a page point.
   public var graphicTargetProvider: ((Int, [Double]) -> AddedGraphicTarget?)?
   /// P12-017: list every selectable app-created graphic on a page, in

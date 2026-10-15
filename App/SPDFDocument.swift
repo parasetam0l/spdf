@@ -23,6 +23,7 @@ final class SPDFDocument: NSDocument {
   /// P23-023: the page organizer window and its model stay alive while open.
   private var pageOrganizerModel: PageOrganizerModel?
   private var pageOrganizerWindow: NSWindow?
+  private var signatureWindow: NSWindow?
   private var warnedXFA = false
   /// Test hook: where provisioned fonts are installed (defaults to
   /// ~/Library/Fonts, the Font Book-compatible location).
@@ -45,6 +46,7 @@ final class SPDFDocument: NSDocument {
   let jobCenter = JobProgressCenter()
   private var lastRecoverySnapshotAt: Date?
   private var recoveredRecoveryKey: String?
+  private let untitledRecoveryKey = "untitled-" + UUID().uuidString
   private var sourceFingerprint: SourceFingerprint?
   private(set) var viewer: PDFViewingSession?
   private(set) var coreInspection: CoreInspection?
@@ -130,7 +132,9 @@ final class SPDFDocument: NSDocument {
   }
 
   /// P10-022: the key follows the file's identity across moves and renames.
-  var recoveryKey: String { recoveredRecoveryKey ?? RecoveryStore.documentKey(for: fileURL) }
+  var recoveryKey: String {
+    recoveredRecoveryKey ?? (fileURL == nil ? untitledRecoveryKey : RecoveryStore.documentKey(for: fileURL))
+  }
 
   /// P10-016: bounded autosave — snapshot a dirty session at most once per
   /// policy interval, or on demand.
@@ -380,6 +384,10 @@ final class SPDFDocument: NSDocument {
     viewer.onTextRunCommit = { [weak self] pageIndex, runIndex, text in
       self?.replaceText(pageIndex: pageIndex, runIndex: runIndex, with: text) ?? false
     }
+    viewer.onAddPageText = { [weak self] pageIndex, rect, text in
+      self?.addPageText(pageIndex: pageIndex, rect: rect, text: text) ?? false
+    }
+    viewer.setContinuous(WorkspacePreferences.continuous)
     viewer.graphicTargetProvider = { [weak self] pageIndex, pagePoint in
       self?.graphicTarget(pageIndex: pageIndex, pagePoint: pagePoint)
     }
@@ -399,8 +407,9 @@ final class SPDFDocument: NSDocument {
       contentRect: NSRect(x: 0, y: 0, width: 1_080, height: 760),
       styleMask: [.titled, .closable, .miniaturizable, .resizable],
       backing: .buffered, defer: false)
-    window.minSize = NSSize(width: 740, height: 480)
-    window.contentView = NSHostingView(
+    window.isReleasedWhenClosed = false
+    window.contentMinSize = NSSize(width: 860, height: 540)
+    let hosting = NSHostingView(
       rootView: WorkspaceView(
         viewer: viewer, onOpenDroppedFile: { [weak self] url in self?.openDroppedFile(url) },
         comments: commentsModel, forms: formsModel,
@@ -451,7 +460,16 @@ final class SPDFDocument: NSDocument {
         },
         onDiscardStructureSuggestions: { [weak self] in
           self?.structureModel.review = nil
-        }))
+        },
+        onOrganizePages: { [weak self] in self?.organizePages() },
+        onInsertBlankPage: { [weak self] in self?.insertBlankPageAfterCurrent() },
+        onRotateRight: { [weak self] in self?.rotateCurrentPage(byDegrees: 90) },
+        onHighlight: { [weak self] in self?.addAnnotationFromSelection(.highlight) },
+        onNote: { [weak self] in self?.addAnnotationFromSelection(.note) }))
+    // AppKit owns the resizable workspace dimensions. A sidebar's intrinsic
+    // SwiftUI size must never become the document window's maximum size.
+    hosting.sizingOptions = []
+    window.contentView = hosting
     window.center()
     addWindowController(NSWindowController(window: window))
     restoreViewState(viewer: viewer)
@@ -472,6 +490,11 @@ final class SPDFDocument: NSDocument {
     inspectionTask = Task { [weak self] in
       self?.coreInspection = try? await PDFInspector().inspect(source)
     }
+  }
+
+  override func showWindows() {
+    super.showWindows()
+    (NSApp.delegate as? ApplicationDelegate)?.dismissWelcome()
   }
 
   // MARK: - Owned-core edits
@@ -768,6 +791,7 @@ final class SPDFDocument: NSDocument {
       defer: false)
     window.title =
       "Comparison — \(fileURL?.lastPathComponent ?? "document") vs \(url.lastPathComponent)"
+    window.isReleasedWhenClosed = false
     window.contentView = NSHostingView(
       rootView: ComparisonWindowView(
         session: session,
@@ -2808,6 +2832,7 @@ final class SPDFDocument: NSDocument {
       contentRect: NSRect(x: 0, y: 0, width: 460, height: 440),
       styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
     window.title = "Organize Pages"
+    window.isReleasedWhenClosed = false
     window.contentView = NSHostingView(rootView: PageOrganizerPanel(model: model))
     pageOrganizerModel = model
     pageOrganizerWindow = window
@@ -2817,17 +2842,22 @@ final class SPDFDocument: NSDocument {
   /// P29-001/P29-010/P29-016: draw a graphical signature and place it as a
   /// stamp annotation on the current page (explicit save to the palette only).
   func placeGraphicalSignature() {
+    if let window = signatureWindow, window.isVisible {
+      window.makeKeyAndOrderFront(nil)
+      return
+    }
     guard let graph = editSession.currentGraph, !editSession.pageIDs.isEmpty else { return }
     let canvas = SignatureCanvasView(
       frame: NSRect(x: 0, y: 0, width: 460, height: 200))
-    let model = SignatureCanvasModel(canvas: canvas)
     let window = NSWindow(
       contentRect: NSRect(x: 0, y: 0, width: 520, height: 320),
       styleMask: [.titled, .closable], backing: .buffered, defer: false)
     window.title = "Graphical Signature"
+    window.isReleasedWhenClosed = false
+    signatureWindow = window
     let panel = SignatureCanvasPanel(
       canvas: canvas,
-      onPlace: { [weak self] asset, saveToPalette in
+      onPlace: { [weak self, weak window] asset, saveToPalette in
         guard let self else { return }
         do {
           if saveToPalette {
@@ -2852,13 +2882,12 @@ final class SPDFDocument: NSDocument {
             ]))
           self.noteUserEdit()
           self.refreshViewer(preservingPage: self.viewer?.pageNumber ?? 1)
-          window.close()
+          window?.close()
         } catch {
           self.presentError(error)
         }
       },
-      onCancel: { window.close() })
-    model.retain(window: window)
+      onCancel: { [weak window] in window?.close() })
     window.contentView = NSHostingView(rootView: panel)
     window.makeKeyAndOrderFront(nil)
   }
@@ -2868,14 +2897,6 @@ final class SPDFDocument: NSDocument {
     formatter.locale = Locale(identifier: "en_US_POSIX")
     formatter.dateFormat = "yyyy-MM-dd"
     return formatter.string(from: Date())
-  }
-
-  /// Keeps the capture window and canvas alive while it is open.
-  final class SignatureCanvasModel {
-    let canvas: SignatureCanvasView
-    private var windows: [NSWindow] = []
-    init(canvas: SignatureCanvasView) { self.canvas = canvas }
-    func retain(window: NSWindow) { windows.append(window) }
   }
 
   /// P36-009: review detected tables in a native grid before exporting.
@@ -2898,6 +2919,7 @@ final class SPDFDocument: NSDocument {
       styleMask: [.titled, .closable, .miniaturizable, .resizable],
       backing: .buffered, defer: false)
     window.title = "Table Review"
+    window.isReleasedWhenClosed = false
     window.minSize = NSSize(width: 520, height: 360)
     window.contentView = NSHostingView(
       rootView: TableReviewPanel(
@@ -3161,6 +3183,24 @@ final class SPDFDocument: NSDocument {
     }
     _ = importPages(
       documentBytes: data, pageIndices: indices, atIndex: editSession.pageIDs.count)
+  }
+
+  @discardableResult
+  func addPageText(pageIndex: Int, rect: [Double], text: String) -> Bool {
+    guard editSession.canEdit, pageIndex >= 0, pageIndex < editSession.pageIDs.count else {
+      return false
+    }
+    do {
+      try editSession.apply(PDFTransaction([
+        AddTextObjectCommand(pageID: editSession.pageIDs[pageIndex], rect: rect, text: text)
+      ]))
+      noteUserEdit()
+      refreshViewer(preservingPage: pageIndex + 1)
+      return true
+    } catch {
+      presentError(error)
+      return false
+    }
   }
 
   @discardableResult
@@ -3993,6 +4033,7 @@ final class SPDFDocument: NSDocument {
   /// P12-020: install document facts for the info panel from the core
   /// inventory; cleared when no document content is available.
   func refreshDocumentInfo() {
+    viewer?.allowsContentEditing = editSession.canEdit
     guard let viewer, let graph = editSession.currentGraph, !editSession.pageIDs.isEmpty else {
       viewer?.documentInfo = nil
       return
@@ -4038,7 +4079,13 @@ final class SPDFDocument: NSDocument {
     }),
       let source = try? PDFSource(data: data)
     else { return }
+    let tool = viewer?.activeTool ?? .select
+    let scale = viewer?.view.scaleFactor ?? 1
+    let autoScales = viewer?.view.autoScales ?? true
     try? WorkspacePerformance.profile("renderer-reload") { try viewer?.open(source) }
+    viewer?.view.autoScales = autoScales
+    if !autoScales { viewer?.view.scaleFactor = scale }
+    viewer?.activateTool(tool)
     if page > 0 { viewer?.go(to: page) }
     refreshComments()
     refreshForms()
@@ -4112,6 +4159,17 @@ final class SPDFDocument: NSDocument {
 
   override func close() {
     isClosed = true
+    // Retire SwiftUI subscriptions while the document and viewer are still
+    // alive, before publishing the renderer's empty/closed state.
+    for controller in windowControllers { controller.window?.contentView = nil }
+    pageOrganizerWindow?.close()
+    pageOrganizerWindow = nil
+    pageOrganizerModel = nil
+    signatureWindow?.close()
+    signatureWindow = nil
+    for window in tableReviewWindows { window.close() }
+    tableReviewWindows.removeAll()
+    tableReviewModel = nil
     for job in jobCenter.jobs { jobCenter.requestCancel(id: job.id) }
     if let viewer { saveViewState(viewer: viewer) }
     // An explicit close means the user decided; stale recovery state is not

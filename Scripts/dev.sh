@@ -60,6 +60,10 @@ case "${1:-}" in
     mv -f "$output/second.pdf" "$output/renamed.pdf"
     "$app" --test-relaunch restore "$task_root/Tests/Fixtures" "$output" -ApplePersistenceIgnoreState YES
     ;;
+  workspace-smoke)
+    app="$task_root/Work/Build/Build/Products/Debug/sPDF Editor.app/Contents/MacOS/sPDF Editor"
+    "$app" --test-workspace "$task_root/Work/WorkspaceSmoke" -ApplePersistenceIgnoreState YES
+    ;;
   termination-smoke)
     app="$task_root/Work/Build/Build/Products/Debug/sPDF Editor.app/Contents/MacOS/sPDF Editor"
     if [[ ! -x "$app" ]]; then
@@ -115,7 +119,7 @@ case "${1:-}" in
     fi
     ;;
   *)
-    printf 'Usage: bash Scripts/dev.sh {test|fixtures|build [Debug|Release]|smoke|termination-smoke|relaunch-smoke|release}\n' >&2
+    printf 'Usage: bash Scripts/dev.sh {test|fixtures|build [Debug|Release]|smoke|workspace-smoke|termination-smoke|relaunch-smoke|release}\n' >&2
     exit 2
     ;;
 esac

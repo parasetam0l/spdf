@@ -1,4 +1,5 @@
 import AppKit
+import PDFCore
 
 /// AppKit can review and close documents for an Apple quit event before
 /// invoking NSApplication.terminate. Use the same atomic review as menu Quit
@@ -6,6 +7,23 @@ import AppKit
 /// still sees every approved document before any window closes.
 @MainActor
 final class DocumentController: NSDocumentController {
+  override func newDocument(_ sender: Any?) {
+    do {
+      guard let document = try makeUntitledDocument(ofType: "com.adobe.pdf") as? SPDFDocument
+      else { throw CocoaError(.fileReadUnknown) }
+      try document.read(
+        from: BlankPDF.data(format: WorkspacePreferences.paper,
+          landscape: WorkspacePreferences.landscape), ofType: "com.adobe.pdf")
+      document.updateChangeCount(.changeDone)
+      addDocument(document)
+      document.makeWindowControllers()
+      document.showWindows()
+      document.viewer?.activateTool(.addText)
+    } catch {
+      presentError(error)
+    }
+  }
+
   override func reviewUnsavedDocuments(
     withAlertTitle title: String?, cancellable: Bool, delegate: Any?,
     didReviewAllSelector selector: Selector?, contextInfo: UnsafeMutableRawPointer?
