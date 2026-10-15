@@ -74,6 +74,17 @@ struct WorkspaceTextInspector: View {
                   colorMenu
                 }
               }
+              if viewer.pageTextWidthApplier != nil {
+                HStack {
+                  Text("Width").font(.caption).foregroundStyle(.secondary)
+                  TextField("Paragraph width", value: Binding(
+                    get: { viewer.pageTextWidth },
+                    set: { viewer.pageTextWidthApplier?($0) }),
+                    format: .number.precision(.fractionLength(0...1)))
+                    .textFieldStyle(.roundedBorder).accessibilityLabel("Paragraph width")
+                  Text("pt").font(.caption).foregroundStyle(.secondary)
+                }
+              }
             }
             if viewer.isEditingPageText {
               Divider()

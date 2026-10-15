@@ -1,6 +1,7 @@
 import AppKit
 import Combine
 import MacServices
+import PDFEditing
 import PDFKit
 
 extension PDFViewingSession {
@@ -125,10 +126,41 @@ final class TextMoveHandle: NSView {
 }
 
 @MainActor
+final class TextWidthHandle: NSView {
+  var onDrag: ((Double, Bool) -> Void)?
+  private var start = 0.0
+  override init(frame: NSRect) {
+    super.init(frame: frame)
+    setAccessibilityElement(true)
+    setAccessibilityRole(.button)
+    setAccessibilityLabel("Resize text width")
+    setAccessibilityHelp("Drag horizontally to change paragraph wrapping.")
+  }
+  required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+  override func resetCursorRects() { addCursorRect(bounds, cursor: .resizeLeftRight) }
+  override func mouseDown(with event: NSEvent) { start = event.locationInWindow.x }
+  override func mouseDragged(with event: NSEvent) {
+    onDrag?(event.locationInWindow.x - start, false)
+  }
+  override func mouseUp(with event: NSEvent) {
+    onDrag?(event.locationInWindow.x - start, true)
+  }
+  override func draw(_ dirtyRect: NSRect) {
+    NSColor.controlBackgroundColor.setFill()
+    let box = NSBezierPath(roundedRect: bounds.insetBy(dx: 4, dy: 2), xRadius: 2, yRadius: 2)
+    box.fill()
+    NSColor.controlAccentColor.setStroke()
+    box.lineWidth = 1
+    box.stroke()
+  }
+}
+
+@MainActor
 final class InlinePageTextCanvas: NSView, NSTextViewDelegate {
   weak var viewer: PDFViewingSession?
   let textView = InlinePageTextView(frame: .zero)
   let moveHandle = TextMoveHandle(frame: .zero)
+  let widthHandle = TextWidthHandle(frame: .zero)
   let pageIndex: Int
   let sourceRect: CGRect
   let sourceTarget: PageTextTarget?
@@ -139,6 +171,8 @@ final class InlinePageTextCanvas: NSView, NSTextViewDelegate {
   private var style: PageTextStyle
   private var dx = 0.0
   private var dy = 0.0
+  private var textWidth = 0.0
+  private var resizeBase: Double?
   private var dragBase: (Double, Double)?
   private(set) var isDragging = false
   private var isFinishing = false
@@ -167,6 +201,7 @@ final class InlinePageTextCanvas: NSView, NSTextViewDelegate {
     self.pageIndex = pageIndex
     sourceRect = rect
     sourceTarget = target
+    textWidth = rect.width
     initialClickPoint = clickPoint
     originalDocument = document
     let attributed = page.selection(for: rect)?.attributedString
@@ -201,7 +236,7 @@ final class InlinePageTextCanvas: NSView, NSTextViewDelegate {
     textView.isContinuousSpellCheckingEnabled = false
     textView.textContainerInset = .zero
     textView.textContainer?.lineFragmentPadding = 0
-    textView.acceptsLineBreaks = target == nil
+    textView.acceptsLineBreaks = target == nil || target?.paragraph != nil
     textView.string = target?.text ?? ""
     textView.delegate = self
     textView.finish = { [weak self] in _ = self?.commit() }
@@ -210,6 +245,18 @@ final class InlinePageTextCanvas: NSView, NSTextViewDelegate {
     textView.onMagnify = { [weak viewer] event in viewer?.view.magnify(with: event) }
     addSubview(textView)
     addSubview(moveHandle)
+    addSubview(widthHandle)
+    widthHandle.isHidden = target?.paragraph == nil
+    widthHandle.onDrag = { [weak self] delta, finished in
+      guard let self, let viewer = self.viewer,
+        let page = viewer.view.document?.page(at: self.pageIndex) else { return }
+      if self.resizeBase == nil { self.resizeBase = self.textWidth }
+      self.isDragging = !finished
+      let zero = viewer.view.convert(NSPoint.zero, to: page)
+      let mapped = viewer.view.convert(NSPoint(x: delta, y: 0), to: page)
+      self.setTextWidth((self.resizeBase ?? self.textWidth) + mapped.x - zero.x)
+      if finished { self.resizeBase = nil }
+    }
     moveHandle.onDrag = { [weak self] delta, finished in
       self?.move(byWindowDelta: delta, finished: finished)
     }
@@ -236,6 +283,9 @@ final class InlinePageTextCanvas: NSView, NSTextViewDelegate {
       self.publishPendingChange()
     }
     viewer.pageTextStyleApplier = { [weak self] style in self?.applyStyle(style) }
+    viewer.pageTextWidthApplier = target?.paragraph == nil ? nil : { [weak self] width in
+      self?.setTextWidth(width)
+    }
     viewer.hasPendingTextGesture = { [weak self] in self?.isDragging ?? false }
     for name in [
       Notification.Name.NSUndoManagerDidUndoChange,
@@ -300,6 +350,7 @@ final class InlinePageTextCanvas: NSView, NSTextViewDelegate {
 
   override func hitTest(_ point: NSPoint) -> NSView? {
     if moveHandle.frame.contains(point) { return moveHandle }
+    if !widthHandle.isHidden, widthHandle.frame.contains(point) { return widthHandle }
     if textView.frame.contains(point) { return isTyping ? textView : self }
     return nil
   }
@@ -389,6 +440,13 @@ final class InlinePageTextCanvas: NSView, NSTextViewDelegate {
     publishPendingChange()
   }
 
+  func setTextWidth(_ width: Double) {
+    guard width.isFinite, (24...2_000).contains(width) else { return }
+    textWidth = width
+    synchronizeGeometry()
+    publishPendingChange()
+  }
+
   func synchronizeGeometry() {
     guard !isLayingOut, !isFinishing, let viewer,
       let page = viewer.view.document?.page(at: pageIndex)
@@ -410,10 +468,13 @@ final class InlinePageTextCanvas: NSView, NSTextViewDelegate {
     textView.font = scaled
     textView.textColor = color
     textView.insertionPointColor = color
-    var attributes: [NSAttributedString.Key: Any] = [.font: scaled, .foregroundColor: color]
-    if sourceTarget == nil {
+    var attributes: [NSAttributedString.Key: Any] = [
+      .font: scaled, .foregroundColor: color, .kern: 0, .ligature: 0,
+    ]
+    if sourceTarget == nil || sourceTarget?.paragraph != nil {
       let paragraph = NSMutableParagraphStyle()
-      paragraph.minimumLineHeight = style.fontSize * scale * 1.2
+      let spacing = sourceTarget?.paragraph?.lineSpacing ?? originalStyle.fontSize * 1.2
+      paragraph.minimumLineHeight = spacing * style.fontSize / originalStyle.fontSize * scale
       paragraph.maximumLineHeight = paragraph.minimumLineHeight
       attributes[.paragraphStyle] = paragraph
       if !textView.string.isEmpty {
@@ -422,18 +483,27 @@ final class InlinePageTextCanvas: NSView, NSTextViewDelegate {
           range: NSRange(location: 0, length: (textView.string as NSString).length))
       }
     }
+    if sourceTarget?.paragraph != nil, !textView.string.isEmpty {
+      textView.textStorage?.addAttributes(
+        [.kern: 0, .ligature: 0],
+        range: NSRange(location: 0, length: (textView.string as NSString).length))
+    }
     textView.typingAttributes = attributes
     let manager = textView.layoutManager
     let height = max(16, manager?.defaultLineHeight(for: scaled) ?? scaled.pointSize * 1.2)
     var baselineOffset = manager?.defaultBaselineOffset(for: scaled) ?? scaled.ascender
-    let originalBaseline =
-      sourceTarget == nil
-      ? sourceRect.maxY - style.fontSize * 0.8 : sourceRect.minY - font.descender
+    let originalBaseline: Double
+    if let paragraph = sourceTarget?.paragraph {
+      originalBaseline = paragraph.firstBaseline
+    } else {
+      originalBaseline = sourceTarget == nil
+        ? sourceRect.maxY - style.fontSize * 0.8 : sourceRect.minY - font.descender
+    }
     let baseline = viewer.view.convert(
       NSPoint(x: sourceRect.minX + dx, y: originalBaseline + dy), from: page)
     let availableWidth =
-      sourceTarget == nil
-      ? sourceRect.width * scale
+      sourceTarget == nil || sourceTarget?.paragraph != nil
+      ? textWidth * scale
       : max(
         sourceRect.width * scale + 8,
         (textView.string as NSString).size(withAttributes: [.font: scaled]).width + 8)
@@ -450,7 +520,7 @@ final class InlinePageTextCanvas: NSView, NSTextViewDelegate {
     textView.frame = NSRect(
       x: baseline.x, y: baseline.y - (height - baselineOffset),
       width: max(24, availableWidth), height: height)
-    if sourceTarget == nil, let container = textView.textContainer {
+    if sourceTarget == nil || sourceTarget?.paragraph != nil, let container = textView.textContainer {
       manager?.ensureLayout(for: container)
       let used = manager?.usedRect(for: container).height ?? height
       textView.frame.size.height = max(height, used)
@@ -459,8 +529,11 @@ final class InlinePageTextCanvas: NSView, NSTextViewDelegate {
     textView.setSelectedRange(selected)
     moveHandle.frame = NSRect(
       x: textView.frame.minX - 20, y: textView.frame.maxY - 16, width: 16, height: 16)
+    widthHandle.frame = NSRect(
+      x: textView.frame.maxX - 6, y: textView.frame.midY - 9, width: 12, height: 18)
     let position = [sourceRect.minX + dx, sourceRect.minY + dy]
     if viewer.pageTextPosition != position { viewer.pageTextPosition = position }
+    if viewer.pageTextWidth != textWidth { viewer.pageTextWidth = textWidth }
     window?.invalidateCursorRects(for: self)
     needsDisplay = true
   }
@@ -474,6 +547,7 @@ final class InlinePageTextCanvas: NSView, NSTextViewDelegate {
     let changed =
       textView.string != (sourceTarget?.text ?? "")
       || style != originalStyle || dx != 0 || dy != 0
+      || abs(textWidth - sourceRect.width) > 0.01
     viewer?.hasPendingPageTextChanges = changed
     viewer?.onPendingPageTextChange?(changed)
   }
@@ -499,7 +573,8 @@ final class InlinePageTextCanvas: NSView, NSTextViewDelegate {
     swapRenderer(to: originalDocument)
     let accepted: Bool
     if let target = sourceTarget {
-      accepted = viewer.onTextBlockCommit?(target, textView.string, style, dx, dy) ?? false
+      accepted = viewer.onTextBlockCommit?(
+        target, textView.string, style, dx, dy, target.paragraph == nil ? nil : pageLines()) ?? false
     } else if textView.string.isEmpty {
       accepted = true
     } else {
@@ -542,6 +617,7 @@ final class InlinePageTextCanvas: NSView, NSTextViewDelegate {
     viewer?.pageTextCancel = nil
     viewer?.pageTextPositionApplier = nil
     viewer?.pageTextStyleApplier = nil
+    viewer?.pageTextWidthApplier = nil
     viewer?.hasPendingTextGesture = nil
     textView.delegate = nil
     onFinish?(committed)
@@ -551,12 +627,33 @@ final class InlinePageTextCanvas: NSView, NSTextViewDelegate {
   override func draw(_ dirtyRect: NSRect) {
     NSColor.controlAccentColor.withAlphaComponent(0.6).setStroke()
     var box = textView.frame
-    if let container = textView.textContainer, let manager = textView.layoutManager {
+    if sourceTarget?.paragraph == nil, let container = textView.textContainer, let manager = textView.layoutManager {
       box.size.width = max(18, min(box.width, manager.usedRect(for: container).width + 4))
     }
     let outline = NSBezierPath(rect: box.insetBy(dx: -3, dy: -3))
     outline.lineWidth = 0.75
     outline.stroke()
+  }
+
+  /// Read the actual TextKit line fragments/caret geometry in page space.
+  /// Saving must use these exact baselines, widths and soft-wrap boundaries.
+  func pageLines() -> [PageTextLine] {
+    guard let viewer, let page = viewer.view.document?.page(at: pageIndex),
+      let manager = textView.layoutManager, let container = textView.textContainer else { return [] }
+    manager.ensureLayout(for: container)
+    let text = textView.string as NSString
+    var lines: [PageTextLine] = []
+    manager.enumerateLineFragments(forGlyphRange: NSRange(location: 0, length: manager.numberOfGlyphs)) {
+      [self] rect, _, _, glyphs, _ in
+      let range = manager.characterRange(forGlyphRange: glyphs, actualGlyphRange: nil)
+      let value = text.substring(with: range).trimmingCharacters(in: .newlines)
+      let location = manager.location(forGlyphAt: glyphs.location)
+      let native = textView.convert(
+        NSPoint(x: rect.minX + location.x, y: rect.minY + location.y), to: viewer.view)
+      let point = viewer.view.convert(native, to: page)
+      lines.append(PageTextLine(text: value, x: point.x, baseline: point.y))
+    }
+    return lines
   }
 
   override func scrollWheel(with event: NSEvent) { viewer?.scrollPage(with: event) }

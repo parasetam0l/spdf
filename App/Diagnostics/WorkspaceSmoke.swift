@@ -3,6 +3,7 @@
   import Foundation
   import MacServices
   import PDFCore
+  import PDFEditing
   import PDFKit
 
   /// Regressions for blank authoring, AppKit sizing and retained window closure.
@@ -150,6 +151,82 @@
         throw PDFError(.malformed, "Native composition cancellation changed the document")
       }
 
+      let paragraphText = "A natural paragraph can be edited directly on the page with automatic wrapping and predictable saved line positions."
+      guard let paragraphFont = NSFont(name: "Helvetica", size: 16) else {
+        throw PDFError(.malformed, "Missing paragraph test font")
+      }
+      let paragraphLines = NativeParagraphEditing.wrappedLines(
+        paragraphText, font: paragraphFont, width: 265)
+      guard document.addPageText(
+        pageIndex: 0, rect: [48, 350, 500, 590], text: paragraphLines.joined(separator: "\n"),
+        style: PageTextStyle(fontSize: 16)),
+        let paragraphPage = viewer.view.document?.page(at: 0),
+        let paragraphMatch = viewer.view.document?.findString(paragraphLines[0], withOptions: []).first
+      else { throw PDFError(.malformed, "Missing paragraph workflow fixture") }
+      let paragraphBaseline = try document.editSession.bytesForSave()
+      try paragraphBaseline.write(to: output.appendingPathComponent("paragraph-before.pdf"))
+      let paragraphBounds = paragraphMatch.bounds(for: paragraphPage)
+      let paragraphPointer = viewer.view.convert(
+        viewer.view.convert(NSPoint(x: paragraphBounds.midX, y: paragraphBounds.midY), from: paragraphPage), to: nil)
+      overlay.mouseDown(with: try mouse(.leftMouseDown, point: paragraphPointer))
+      overlay.mouseUp(with: try mouse(.leftMouseUp, point: paragraphPointer))
+      guard let paragraphCanvas = findCanvas(content),
+        paragraphCanvas.sourceTarget?.paragraph?.originalText.count == paragraphLines.count,
+        !viewer.isTypingPageText,
+        try document.editSession.bytesForSave() == paragraphBaseline
+      else { throw PDFError(.malformed, "A paragraph was not selected as one non-mutating object") }
+      paragraphCanvas.beginTyping()
+      let replacement = "A longer paragraph is edited directly on the page. Native wrapping follows the width of the text box, and the saved document keeps exactly the line positions shown while typing. Every unrelated line stays in its original place."
+      paragraphCanvas.textView.insertText(replacement,
+        replacementRange: NSRange(location: 0, length: (paragraphCanvas.textView.string as NSString).length))
+      let wideLines = paragraphCanvas.pageLines().count
+      paragraphCanvas.setTextWidth(195)
+      guard paragraphCanvas.pageLines().count > wideLines, document.isDocumentEdited else {
+        throw PDFError(.malformed, "Changing paragraph width did not rewrap the actual editor")
+      }
+      paragraphCanvas.move(byWindowDelta: NSPoint(x: 24, y: -14), finished: true)
+      let expectedLines = paragraphCanvas.pageLines()
+      try JSONSerialization.data(withJSONObject: expectedLines.map {
+        ["text": $0.text, "x": $0.x, "baseline": $0.baseline] as [String: Any]
+      }, options: [.prettyPrinted, .sortedKeys])
+        .write(to: output.appendingPathComponent("paragraph-native-lines.json"))
+      guard paragraphCanvas.commit(), !viewer.isEditingPageText else {
+        throw PDFError(.malformed, "Native paragraph commit did not finish")
+      }
+      let paragraphEdited = try document.editSession.bytesForSave()
+      let paragraphOutput = output.appendingPathComponent("paragraph-after.pdf")
+      try paragraphEdited.write(to: paragraphOutput)
+      guard let reopened = PDFDocument(url: paragraphOutput), let reopenedPage = reopened.page(at: 0),
+        reopened.string?.contains("A natural paragraph") == false,
+        reopened.string?.contains("Workspace authoring regression") == true
+      else { throw PDFError(.malformed, "Reopened paragraph retained old text or lost its neighbor") }
+      for line in expectedLines where !line.text.trimmingCharacters(in: .whitespaces).isEmpty {
+        let value = line.text.trimmingCharacters(in: .whitespaces)
+        guard let selection = reopened.findString(value, withOptions: []).first else {
+          throw PDFError(.malformed, "Saved paragraph is missing a native line")
+        }
+        let bounds = selection.bounds(for: reopenedPage)
+        guard abs(bounds.minX - line.x) < 0.1 else {
+          throw PDFError(.malformed, "Saved paragraph diverged from the native line position")
+        }
+      }
+      document.undoEdit()
+      guard try document.editSession.bytesForSave() == paragraphBaseline else {
+        throw PDFError(.malformed, "Paragraph Undo did not restore the complete source in one step")
+      }
+      document.redoEdit()
+      guard try document.editSession.bytesForSave() == paragraphEdited else {
+        throw PDFError(.malformed, "Paragraph Redo did not restore the exact edited layout")
+      }
+      guard let repeatPage = viewer.view.document?.page(at: 0),
+        let repeatSelection = viewer.view.document?.findString(
+          expectedLines[0].text.trimmingCharacters(in: .whitespaces), withOptions: []).first
+      else { throw PDFError(.malformed, "Cannot find the saved paragraph") }
+      let repeatBounds = repeatSelection.bounds(for: repeatPage)
+      guard viewer.textRunProvider?(
+        0, [repeatBounds.midX, repeatBounds.midY])?.paragraph != nil
+      else { throw PDFError(.malformed, "The saved paragraph cannot be selected for another edit") }
+
       window.setContentSize(NSSize(width: 960, height: 650))
       try await Task.sleep(for: .milliseconds(150))
       let originalFrame = window.frame
@@ -253,6 +330,8 @@
         KeyboardAudit.verify([
           .init(title: "New PDF", modifiers: [.command]),
           .init(title: "Settings…", modifiers: [.command]),
+          .init(title: "Cut", modifiers: [.command]),
+          .init(title: "Paste", modifiers: [.command]),
         ]).missing.isEmpty,
         let file = NSApp.mainMenu?.item(withTitle: "File")?.submenu,
         file.items.filter({ !$0.isSeparatorItem }).count <= 10,
@@ -262,6 +341,8 @@
       return [
         "directTextSelection":
           "single-click selection, body move/cancel, double-click typing, marked-text Save veto",
+        "paragraphWorkflow":
+          "longer native text, width reflow, move, exact saved lines, atomic Undo/Redo, reselection",
         "status": "passed", "blankAuthoring": "created, real text, saved, undo/redo",
         "sidebarModes": SidebarMode.allCases.map(\.rawValue),
         "windowSizing":

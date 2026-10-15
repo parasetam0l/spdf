@@ -717,7 +717,9 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
       "Redo Edit", #selector(redoEdit), key: "z", modifiers: [.command, .shift], target: self,
       to: edit)
     edit.addItem(.separator())
+    add("Cut", #selector(NSText.cut(_:)), key: "x", to: edit)
     add("Copy", #selector(NSText.copy(_:)), key: "c", to: edit)
+    add("Paste", #selector(NSText.paste(_:)), key: "v", to: edit)
     add("Copy as Rich Text", #selector(copyAsRichText), target: self, to: edit)
     add("Select All", #selector(NSText.selectAll(_:)), key: "a", to: edit)
     edit.addItem(.separator())

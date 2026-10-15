@@ -402,12 +402,17 @@ final class SPDFDocument: NSDocument {
       guard let self, self.editSession.canEdit, let graph = self.editSession.currentGraph,
         self.editSession.pageIDs.indices.contains(target.pageIndex)
       else { return nil }
-      return try? PDFWriter.write(
-        PageTextEditing.hidingBlock(
-          pageID: self.editSession.pageIDs[target.pageIndex], runIndex: target.runIndex, in: graph))
+      var preview = graph
+      do {
+        for run in target.runIndices {
+          preview = try PageTextEditing.hidingBlock(
+            pageID: self.editSession.pageIDs[target.pageIndex], runIndex: run, in: preview)
+        }
+        return try PDFWriter.write(preview)
+      } catch { return nil }
     }
-    viewer.onTextBlockCommit = { [weak self] target, text, style, dx, dy in
-      self?.commitTextBlock(target, text: text, style: style, dx: dx, dy: dy) ?? false
+    viewer.onTextBlockCommit = { [weak self] target, text, style, dx, dy, lines in
+      self?.commitTextBlock(target, text: text, style: style, dx: dx, dy: dy, lines: lines) ?? false
     }
     viewer.onNewTextBlockCommit = { [weak self] pageIndex, rect, text, style in
       self?.addPageText(pageIndex: pageIndex, rect: rect, text: text, style: style) ?? false
@@ -1315,13 +1320,17 @@ final class SPDFDocument: NSDocument {
     {
       let string = pageText as NSString
       var used = Set<Int>()
-      textBlockCache[pageIndex] =
+      let blocks: [PageTextTarget] =
         (try? PageTextEditing.blocks(
           pageID: editSession.pageIDs[pageIndex], in: graph))?.compactMap { block in
           var remaining = NSRange(location: 0, length: string.length)
           var matches: [(NSRange, CGRect)] = []
+          // Readers omit trailing wrap whitespace from extracted lines. Keep
+          // the original operand for rewriting, but match its visible text.
+          let needle = block.text.trimmingCharacters(in: .whitespacesAndNewlines)
+          guard !needle.isEmpty else { return nil }
           while remaining.length > 0 {
-            let found = string.range(of: block.text, range: remaining)
+            let found = string.range(of: needle, range: remaining)
             guard found.location != NSNotFound else { break }
             if !used.contains(found.location), let selection = page.selection(for: found) {
               matches.append((found, selection.bounds(for: page)))
@@ -1343,6 +1352,8 @@ final class SPDFDocument: NSDocument {
             rect: [rect.minX, rect.minY, rect.maxX, rect.maxY], text: block.text,
             style: block.style, runIndices: block.runIndices)
         } ?? []
+      textBlockCache[pageIndex] = NativeParagraphEditing.targets(
+        from: blocks, pageID: editSession.pageIDs[pageIndex], graph: graph, page: page)
     }
     return textBlockCache[pageIndex]?.first { target in
       let r = target.rect
@@ -3347,12 +3358,29 @@ final class SPDFDocument: NSDocument {
   @discardableResult
   func commitTextBlock(
     _ target: PageTextTarget, text: String, style: PageTextStyle,
-    dx: Double, dy: Double
+    dx: Double, dy: Double, lines: [PageTextLine]? = nil
   ) -> Bool {
-    guard editSession.canEdit, editSession.pageIDs.indices.contains(target.pageIndex),
-      !text.contains("\n"), !text.contains("\r")
+    guard editSession.canEdit, editSession.pageIDs.indices.contains(target.pageIndex)
     else { return false }
     let page = editSession.pageIDs[target.pageIndex]
+    if let paragraph = target.paragraph {
+      guard let lines else { return false }
+      if text == target.text, let original = target.style,
+        original.fontSize == style.fontSize, original.fillColor == style.color, dx == 0, dy == 0,
+        viewer?.hasPendingPageTextChanges != true { return true }
+      do {
+        try editSession.apply(PDFTransaction([
+          RewritePageTextCommand(
+            pageID: page, originalText: paragraph.originalText, lines: lines,
+            fontSize: style.fontSize, color: style.color,
+            standardFontAdvances: paragraph.standardFontAdvances)
+        ]))
+        noteUserEdit()
+        refreshViewer(preservingPage: target.pageIndex + 1)
+        return true
+      } catch { presentError(error); return false }
+    }
+    guard !text.contains("\n"), !text.contains("\r") else { return false }
     var commands: [any PDFEditCommand] = []
     if text != target.text, let first = target.runIndices.first, let last = target.runIndices.last {
       commands.append(

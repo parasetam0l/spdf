@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import MacServices
 import PDFCore
 import PDFEditing
 import PDFKit
@@ -7,6 +8,136 @@ import Testing
 
 @Suite("Direct page text editing interop")
 struct DirectTextInteropTests {
+  @Test @MainActor func standardFontParagraphErasurePreservesFollowingTextForEveryVariant() throws {
+    let text = "A paragraph with ordinary words."
+    for family in RewritePageTextCommand.standardFonts.sorted() {
+      let (base, pageID) = try graph(content: "BT /SPDFText 16 Tf 42 700 Td (\(text)) Tj ( Adjacent) Tj ET")
+      var source = base
+      guard case .dictionary(let page)? = source.objects[pageID],
+        case .dictionary(let resources)? = page[PDFName("Resources")],
+        case .dictionary(let fonts)? = resources[PDFName("Font")],
+        case .reference(let fontID)? = fonts.values.first,
+        case .dictionary(var font)? = source.objects[fontID]
+      else { throw CocoaError(.fileReadCorruptFile) }
+      font[PDFName("BaseFont")] = .name(PDFName(family))
+      source.objects[fontID] = .dictionary(font)
+      let advance = try #require(NativeParagraphEditing.standardAdvance(text, family: family, size: 16))
+      let edited = try PDFEditingEngine.commit(PDFTransaction([
+        RewritePageTextCommand(pageID: pageID, originalText: [0: text],
+          lines: [.init(text: "Replacement", x: 42, baseline: 600)],
+          fontSize: 16, color: [0, 0, 0], standardFontAdvances: [0: advance])
+      ]), to: source)
+      let before = try bounds("Adjacent", in: source)
+      let after = try bounds("Adjacent", in: edited)
+      #expect(abs(before.minX - after.minX) < 0.02, "\(family) adjacent pen must stay fixed")
+      #expect(abs(before.minY - after.minY) < 0.02, "\(family) adjacent baseline must stay fixed")
+    }
+  }
+  @Test @MainActor func paragraphRewriteRemovesOldTextAndPreservesAdjacentPenAndGraphics() throws {
+    let one = "Original first paragraph line"
+    let two = "Original second paragraph line"
+    let (original, pageID) = try graph(content: """
+      0.2 0.6 0.8 rg 30 620 480 100 re f 0 g
+      BT /SPDFText 16 Tf 42 700 Td (\(one)) Tj ( Neighbor one) Tj
+      0 -22 Td (\(two)) Tj ( Neighbor two) Tj ET
+      2 0 0 2 10 20 cm
+      """)
+    let advanceOne = try #require(NativeParagraphEditing.standardAdvance(one, family: "Helvetica", size: 16))
+    let advanceTwo = try #require(NativeParagraphEditing.standardAdvance(two, family: "Helvetica", size: 16))
+    let originalBytes = try PDFWriter.write(original)
+    let lines = [PageTextLine(text: "Longer edited paragraph", x: 68, baseline: 600),
+      PageTextLine(text: "with a second wrapped line.", x: 68, baseline: 578)]
+    let command = RewritePageTextCommand(
+      pageID: pageID, originalText: [0: one, 2: two], lines: lines,
+      fontSize: 18, color: [0.1, 0.2, 0.8], standardFontAdvances: [0: advanceOne, 2: advanceTwo])
+    let edited = try PDFEditingEngine.commit(PDFTransaction([command]), to: original)
+    #expect(try PDFWriter.write(original) == originalBytes)
+    let reader = try #require(PDFDocument(data: PDFWriter.write(edited)))
+    #expect(reader.string?.contains("Original") == false)
+    #expect(reader.string?.contains("Longer edited paragraph") == true)
+    for neighbor in ["Neighbor one", "Neighbor two"] {
+      let before = try bounds(neighbor, in: original)
+      let after = try bounds(neighbor, in: edited)
+      #expect(abs(before.minX - after.minX) < 0.02)
+      #expect(abs(before.minY - after.minY) < 0.02)
+    }
+    let replacement = try bounds("Longer edited paragraph", in: edited)
+    #expect(abs(replacement.minX - 68) < 0.01)
+    #expect(replacement.minY > 593 && replacement.maxY < 622)
+    // The final page cm must not double the saved position or font size.
+    let attributes = try #require(reader.page(at: 0)?.selection(for: replacement)?.attributedString)
+    let font = try #require(attributes.attribute(.font, at: 0, effectiveRange: nil) as? NSFont)
+    #expect(abs(font.pointSize - 18) < 0.1)
+  }
+
+  @Test @MainActor func paragraphRewriteRefusesStaleGlyphAndClippingState() throws {
+    let text = "A complete source paragraph line"
+    let (original, pageID) = try graph(content: """
+      q 30 600 400 140 re W n
+      BT /SPDFText 16 Tf 42 700 Td (\(text)) Tj ET Q
+      """)
+    let advance = try #require(NativeParagraphEditing.standardAdvance(text, family: "Helvetica", size: 16))
+    let command = RewritePageTextCommand(
+      pageID: pageID, originalText: [0: text],
+      lines: [.init(text: "Replacement", x: 42, baseline: 700)], fontSize: 16, color: [0, 0, 0],
+      standardFontAdvances: [0: advance])
+    #expect(throws: PDFError.self) { try command.validate(in: original) }
+    let (plain, _) = try graph(content: "BT /SPDFText 16 Tf 42 700 Td (Different text) Tj ET")
+    #expect(throws: PDFError.self) { try command.validate(in: plain) }
+    let (supported, _) = try graph(content: "BT /SPDFText 16 Tf 42 700 Td (\(text)) Tj ET")
+    let missingGlyph = RewritePageTextCommand(
+      pageID: pageID, originalText: [0: text],
+      lines: [.init(text: "Unavailable glyph: 🐈", x: 42, baseline: 700)],
+      fontSize: 16, color: [0, 0, 0], standardFontAdvances: [0: advance])
+    #expect(throws: PDFError.self) { try missingGlyph.validate(in: supported) }
+    var repeated = supported
+    if case .dictionary(var dictionary)? = repeated.objects[pageID],
+      let contents = dictionary[PDFName("Contents")]
+    {
+      if case .array(let streams) = contents {
+        dictionary[PDFName("Contents")] = .array(streams + streams)
+      } else {
+        dictionary[PDFName("Contents")] = .array([contents, contents])
+      }
+      repeated.objects[pageID] = .dictionary(dictionary)
+    }
+    let repeatedCommand = RewritePageTextCommand(
+      pageID: pageID, originalText: [0: text],
+      lines: [.init(text: "Replacement", x: 42, baseline: 700)],
+      fontSize: 16, color: [0, 0, 0], standardFontAdvances: [0: advance])
+    #expect(throws: PDFError.self) { try repeatedCommand.validate(in: repeated) }
+  }
+
+  @Test @MainActor func nativeParagraphGroupingRequiresAFullWrappingRoundTrip() throws {
+    let font = try #require(NSFont(name: "Helvetica", size: 16))
+    let text = "A natural paragraph can be edited directly on the page with automatic wrapping and predictable saved line positions."
+    let lines = NativeParagraphEditing.wrappedLines(text, font: font, width: 265)
+    #expect(lines.count >= 3)
+    let instructions = lines.enumerated().map { index, line in
+      "1 0 0 1 42 \(700 - index * 22) Tm (\(line)) Tj"
+    }.joined(separator: "\n")
+    let (original, pageID) = try graph(content: "BT /SPDFText 16 Tf\n\(instructions)\nET")
+    let reader = try #require(PDFDocument(data: PDFWriter.write(original)))
+    let page = try #require(reader.page(at: 0))
+    let blocks = try lines.enumerated().map { index, line in
+      let rect = try bounds(line, in: original)
+      return PageTextTarget(pageIndex: 0, runIndex: index,
+        rect: [rect.minX, rect.minY, rect.maxX, rect.maxY], text: line,
+        style: .init(fontFamily: "Helvetica", fontSize: 16, fillColor: [0, 0, 0]))
+    }
+    let grouped = NativeParagraphEditing.targets(from: blocks, pageID: pageID, graph: original, page: page)
+    let paragraph = try #require(grouped.first?.paragraph)
+    #expect(grouped.count == 1)
+    #expect(grouped[0].text == text)
+    #expect(paragraph.originalText.count == lines.count)
+    // Nearby short labels are separate objects even when aligned.
+    let labels = blocks.enumerated().map { index, block in
+      PageTextTarget(pageIndex: 0, runIndex: index, rect: block.rect,
+        text: "Label \(index)", style: block.style)
+    }
+    #expect(NativeParagraphEditing.targets(from: labels, pageID: pageID, graph: original, page: page)
+      .allSatisfy { $0.paragraph == nil })
+  }
   private func graph(content: String) throws -> (PDFGraph, PDFObjectID) {
     let parsed = try PDFParser.parse(BlankPDF.data())
     let page = parsed.pageIDs[0]

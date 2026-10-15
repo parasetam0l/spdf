@@ -37,10 +37,12 @@ public struct PageTextTarget: Sendable, Equatable {
   /// that predate style resolution (the overlay then uses system defaults).
   public let style: TextInputStyle?
   public let runIndices: [Int]
+  public let paragraph: PageTextParagraph?
 
   public init(
     pageIndex: Int, runIndex: Int, rect: [Double], text: String,
-    style: TextInputStyle? = nil, runIndices: [Int]? = nil
+    style: TextInputStyle? = nil, runIndices: [Int]? = nil,
+    paragraph: PageTextParagraph? = nil
   ) {
     self.pageIndex = pageIndex
     self.runIndex = runIndex
@@ -48,6 +50,7 @@ public struct PageTextTarget: Sendable, Equatable {
     self.text = text
     self.style = style
     self.runIndices = runIndices ?? [runIndex]
+    self.paragraph = paragraph
   }
 }
 
@@ -235,14 +238,16 @@ public final class PDFViewingSession: NSObject, ObservableObject, PDFViewDelegat
   @Published public var canUndoPageTyping = false
   @Published public var canRedoPageTyping = false
   @Published public var pageTextPosition = [0.0, 0.0]
+  @Published public var pageTextWidth = 0.0
   public var pageTextBeginTyping: (() -> Void)?
   public var pageTextCancel: (() -> Void)?
   public var pageTextPositionApplier: ((Double, Double) -> Void)?
+  public var pageTextWidthApplier: ((Double) -> Void)?
   public var pageTextStyleApplier: ((PageTextStyle) -> Void)?
   public var hasPendingTextGesture: (() -> Bool)?
   public var onTextBlockPreview: ((PageTextTarget) -> Data?)?
   /// A single atomic content transaction: replacement, formatting and movement.
-  public var onTextBlockCommit: ((PageTextTarget, String, PageTextStyle, Double, Double) -> Bool)?
+  public var onTextBlockCommit: ((PageTextTarget, String, PageTextStyle, Double, Double, [PageTextLine]?) -> Bool)?
   public var onNewTextBlockCommit: ((Int, [Double], String, PageTextStyle) -> Bool)?
   public var onPendingPageTextChange: ((Bool) -> Void)?
   public var textBlockEditStarter: ((PageTextTarget) -> Void)?
@@ -416,6 +421,7 @@ public final class PDFViewingSession: NSObject, ObservableObject, PDFViewDelegat
     pageTextBeginTyping = nil
     pageTextCancel = nil
     pageTextPositionApplier = nil
+    pageTextWidthApplier = nil
     pageTextStyleApplier = nil
     selectedObjectSummary = nil
     selectionDetails = nil
