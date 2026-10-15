@@ -35,6 +35,48 @@ public enum StandardTextFont: String, CaseIterable, Sendable {
       return String(data: data, encoding: .windowsCP1252) == String(scalar)
     }
   }
+
+  /// A familiar BaseFont name does not prove the source program or glyph
+  /// metrics match a standard font. Keep customized fonts on their own path.
+  public static func editableRunIndices(pageID: PDFObjectID, in graph: PDFGraph) throws -> [Int] {
+    let content = try PageContent.load(pageID: pageID, in: graph)
+    let runs = try TextRunIndexer.runs(in: content, graph: graph)
+    guard
+      case .dictionary(let fonts)? = (try AddedContent.pageResources(pageID: pageID, in: graph))?[
+        PDFName("Font")]
+    else { return [] }
+    var canonical: [PDFName: Bool] = [:]
+    for (resource, value) in fonts {
+      let dictionary: [PDFName: PDFValue]?
+      switch value {
+      case .reference(let id):
+        if case .dictionary(let resolved)? = graph.objects[id] {
+          dictionary = resolved
+        } else {
+          dictionary = nil
+        }
+      case .dictionary(let direct): dictionary = direct
+      default: dictionary = nil
+      }
+      guard let font = dictionary,
+        font[PDFName("Subtype")] == .name(PDFName("Type1")),
+        case .name(let base)? = font[PDFName("BaseFont")],
+        Self(rawValue: String(decoding: base.bytes, as: UTF8.self)) != nil,
+        font[PDFName("FontDescriptor")] == nil, font[PDFName("Widths")] == nil,
+        font[PDFName("ToUnicode")] == nil
+      else { continue }
+      switch font[PDFName("Encoding")] {
+      case nil: canonical[resource] = true
+      case .name(let name)?:
+        canonical[resource] = ["WinAnsiEncoding", "MacRomanEncoding", "StandardEncoding"]
+          .contains(String(decoding: name.bytes, as: UTF8.self))
+      default: break
+      }
+    }
+    return runs.indices.filter {
+      canonical[runs[$0].fontResource] == true && canEncode(runs[$0].text)
+    }
+  }
 }
 
 public struct PageTextFormat: Sendable, Equatable {

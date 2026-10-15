@@ -23,8 +23,10 @@ public enum NativeParagraphEditing {
   ) -> [PageTextTarget] {
     var owned: [PageTextTarget] = []
     var ownedRuns = Set<Int>()
+    let standardRuns = Set((try? StandardTextFont.editableRunIndices(pageID: pageID, in: graph)) ?? [])
     for authored in (try? AuthoredPageTextBoxes.read(pageID: pageID, in: graph)) ?? [] {
       let indices = authored.originalText.keys.sorted()
+      guard indices.allSatisfy(standardRuns.contains) else { continue }
       guard let first = indices.first, let initial = authored.fragments.first else { continue }
       let segments = authored.lines.flatMap(\.segments)
       var advances: [Int: Double] = [:]
@@ -62,6 +64,7 @@ public enum NativeParagraphEditing {
     var result: [PageTextTarget] = owned
     for (offset, first) in ordered.enumerated() where !consumed.contains(offset) {
       guard let style = first.style, first.runIndices.count == 1,
+        standardRuns.contains(first.runIndex),
         RewritePageTextCommand.standardFonts.contains(style.fontFamily ?? ""),
         let font = font(for: first, page: page)
       else {
@@ -71,6 +74,7 @@ public enum NativeParagraphEditing {
       var members = [(offset, first)]
       for (index, block) in ordered.enumerated().dropFirst(offset + 1) {
         guard !consumed.contains(index), block.style == style, block.runIndices.count == 1,
+          standardRuns.contains(block.runIndex),
           abs(block.rect[0] - first.rect[0]) <= 2,
           let previous = members.last?.1
         else { continue }

@@ -241,4 +241,46 @@ struct TextFormattingInteropTests {
     unbalanced.objects[streamID] = .stream(.init(dictionary: [:], bytes: Data("q\n".utf8)))
     #expect(throws: PDFError.self) { try command.validate(in: unbalanced) }
   }
+
+  @Test @MainActor func familiarFontNameDoesNotPermitSilentSourceSubstitution() throws {
+    let parsed = try PDFParser.parse(BlankPDF.data())
+    let page = parsed.pageIDs[0]
+    let source = try PDFEditingEngine.commit(
+      PDFTransaction([
+        AddTextObjectCommand(pageID: page, rect: [48, 600, 350, 720], text: "Keep the source font")
+      ]), to: parsed.graph)
+    #expect(try StandardTextFont.editableRunIndices(pageID: page, in: source) == [0])
+    guard case .dictionary(let pageObject)? = source.objects[page],
+      case .dictionary(let resources)? = pageObject[PDFName("Resources")],
+      case .dictionary(let fonts)? = resources[PDFName("Font")],
+      case .reference(let id)? = fonts.values.first,
+      case .dictionary(let originalFont)? = source.objects[id]
+    else {
+      Issue.record("Missing source font")
+      return
+    }
+    for customization: (PDFName, PDFValue) in [
+      (PDFName("Widths"), .array([.integer(900)])),
+      (PDFName("FontDescriptor"), .dictionary([:])),
+      (
+        PDFName("Encoding"),
+        .dictionary([PDFName("Differences"): .array([.integer(65), .name(PDFName("B"))])])
+      ),
+    ] {
+      var customized = source
+      var font = originalFont
+      font[customization.0] = customization.1
+      customized.objects[id] = .dictionary(font)
+      #expect(try StandardTextFont.editableRunIndices(pageID: page, in: customized).isEmpty)
+      let reader = try #require(PDFDocument(data: PDFWriter.write(customized)))
+      let nativePage = try #require(reader.page(at: 0))
+      let block = PageTextTarget(
+        pageIndex: 0, runIndex: 0, rect: [48, 690, 300, 720],
+        text: "Keep the source font", style: .init(fontFamily: "Helvetica", fontSize: 12, fillColor: [0, 0, 0]))
+      let target = NativeParagraphEditing.targets(
+        from: [block], pageID: page,
+        graph: customized, page: nativePage)
+      #expect(target.count == 1 && target[0].paragraph == nil)
+    }
+  }
 }
