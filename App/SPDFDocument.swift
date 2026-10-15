@@ -408,7 +408,6 @@ final class SPDFDocument: NSDocument {
       styleMask: [.titled, .closable, .miniaturizable, .resizable],
       backing: .buffered, defer: false)
     window.isReleasedWhenClosed = false
-    window.contentMinSize = NSSize(width: 860, height: 540)
     let hosting = NSHostingView(
       rootView: WorkspaceView(
         viewer: viewer, onOpenDroppedFile: { [weak self] url in self?.openDroppedFile(url) },
@@ -466,10 +465,16 @@ final class SPDFDocument: NSDocument {
         onRotateRight: { [weak self] in self?.rotateCurrentPage(byDegrees: 90) },
         onHighlight: { [weak self] in self?.addAnnotationFromSelection(.highlight) },
         onNote: { [weak self] in self?.addAnnotationFromSelection(.note) }))
-    // AppKit owns the resizable workspace dimensions. A sidebar's intrinsic
-    // SwiftUI size must never become the document window's maximum size.
+    // A plain AppKit content view owns the workspace dimensions. Keep the
+    // hosting view inside it so SwiftUI cannot reset the window constraints
+    // when a sidebar changes or the root is laid out again.
     hosting.sizingOptions = []
-    window.contentView = hosting
+    let content = NSView(frame: window.contentRect(forFrameRect: window.frame))
+    window.contentView = content
+    hosting.frame = content.bounds
+    hosting.autoresizingMask = [.width, .height]
+    content.addSubview(hosting)
+    window.contentMinSize = NSSize(width: 860, height: 540)
     window.center()
     addWindowController(NSWindowController(window: window))
     restoreViewState(viewer: viewer)

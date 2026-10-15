@@ -27,9 +27,10 @@
       let controller = NSDocumentController.shared
       let previous = Set(controller.documents.map(ObjectIdentifier.init))
       controller.newDocument(nil)
-      guard let document = controller.documents.first(where: {
-        !previous.contains(ObjectIdentifier($0))
-      }) as? SPDFDocument, let viewer = document.viewer,
+      guard
+        let document = controller.documents.first(where: {
+          !previous.contains(ObjectIdentifier($0))
+        }) as? SPDFDocument, let viewer = document.viewer,
         let window = document.windowControllers.first?.window,
         document.fileURL == nil, document.isDocumentEdited,
         viewer.pageCount == 1, viewer.activeTool == .addText
@@ -38,7 +39,9 @@
       let original = try document.editSession.bytesForSave()
       let firstUntitledKey = document.recoveryKey
       let top = Double(viewer.view.document?.page(at: 0)?.bounds(for: .mediaBox).maxY ?? 792) - 48
-      guard viewer.onAddPageText?(0, [48, top - 30, 400, top], "Workspace authoring regression") == true,
+      guard
+        viewer.onAddPageText?(0, [48, top - 30, 400, top], "Workspace authoring regression")
+          == true,
         viewer.activeTool == .addText
       else { throw PDFError(.malformed, "Add Text failed or reset its active mode") }
       let saved = output.appendingPathComponent("new-authored.pdf")
@@ -63,7 +66,11 @@
       window.setContentSize(NSSize(width: 960, height: 650))
       try await Task.sleep(for: .milliseconds(150))
       let originalFrame = window.frame
-      let minimum = window.contentMinSize, maximum = window.contentMaxSize
+      let minimum = window.contentMinSize
+      let maximum = window.contentMaxSize
+      guard minimum == NSSize(width: 860, height: 540) else {
+        throw PDFError(.malformed, "Workspace minimum size was reset: \(minimum)")
+      }
       for mode in SidebarMode.allCases {
         viewer.sidebarMode = mode
         try await Task.sleep(for: .milliseconds(70))
@@ -79,23 +86,51 @@
       }
       viewer.isSidebarVisible = true
       viewer.sidebarMode = .comments
-      window.setContentSize(NSSize(width: 1_000, height: 710))
+      // AppKit constrains windows to the available display. Exercise two
+      // distinct legal sizes even on the smaller hosted-runner display.
+      let available = window.contentRect(
+        forFrameRect: window.screen?.visibleFrame ?? originalFrame
+      ).size
+      let resized = NSSize(
+        width: min(minimum.width + 100, floor(available.width)),
+        height: min(minimum.height + 80, floor(available.height)))
+      guard resized.width > minimum.width, resized.height > minimum.height else {
+        throw PDFError(.malformed, "Display cannot accommodate two workspace sizes: \(available)")
+      }
+      window.setContentSize(minimum)
       try await Task.sleep(for: .milliseconds(70))
-      guard window.contentView?.bounds.size == NSSize(width: 1_000, height: 710) else {
-        throw PDFError(.malformed, "The Comments workspace could not be resized")
+      guard window.contentView?.bounds.size == minimum else {
+        throw PDFError(
+          .malformed,
+          "Comments minimum resize: expected \(minimum), got \(String(describing: window.contentView?.bounds.size))"
+        )
+      }
+      window.setContentSize(resized)
+      try await Task.sleep(for: .milliseconds(70))
+      guard window.contentView?.bounds.size == resized,
+        window.contentMinSize == minimum, window.contentMaxSize == maximum
+      else {
+        throw PDFError(
+          .malformed,
+          "Comments expanded resize: expected \(resized), got \(String(describing: window.contentView?.bounds.size))"
+        )
       }
       let beforeSecond = Set(controller.documents.map(ObjectIdentifier.init))
       controller.newDocument(nil)
-      guard let second = controller.documents.first(where: {
-        !beforeSecond.contains(ObjectIdentifier($0))
-      }) as? SPDFDocument, second.recoveryKey != firstUntitledKey,
+      guard
+        let second = controller.documents.first(where: {
+          !beforeSecond.contains(ObjectIdentifier($0))
+        }) as? SPDFDocument, second.recoveryKey != firstUntitledKey,
         second.viewer?.sidebarMode == .pages
       else { throw PDFError(.malformed, "New PDFs share recovery/view state") }
       second.close()
 
       for _ in 0..<3 {
         document.organizePages()
-        guard let auxiliary = NSApp.windows.first(where: { $0.title == "Organize Pages" && $0.isVisible }),
+        guard
+          let auxiliary = NSApp.windows.first(where: {
+            $0.title == "Organize Pages" && $0.isVisible
+          }),
           !auxiliary.isReleasedWhenClosed
         else { throw PDFError(.malformed, "Page organizer has unsafe window ownership") }
         auxiliary.close()
@@ -105,7 +140,10 @@
         }
       }
       document.placeGraphicalSignature()
-      guard let signature = NSApp.windows.first(where: { $0.title == "Graphical Signature" && $0.isVisible }),
+      guard
+        let signature = NSApp.windows.first(where: {
+          $0.title == "Graphical Signature" && $0.isVisible
+        }),
         !signature.isReleasedWhenClosed
       else { throw PDFError(.malformed, "Signature window has unsafe ownership") }
       signature.close()
@@ -117,7 +155,8 @@
         throw PDFError(.malformed, "Missing application delegate")
       }
       delegate.showUpdateSettings(nil)
-      guard let settings = NSApp.windows.first(where: { $0.title == "Settings" && $0.isVisible }) else {
+      guard let settings = NSApp.windows.first(where: { $0.title == "Settings" && $0.isVisible })
+      else {
         throw PDFError(.malformed, "Unified Settings did not open")
       }
       settings.close()
@@ -136,7 +175,11 @@
       return [
         "status": "passed", "blankAuthoring": "created, real text, saved, undo/redo",
         "sidebarModes": SidebarMode.allCases.map(\.rawValue),
-        "windowSizing": "frame/min/max preserved; Comments resized to 1000×710",
+        "windowSizing":
+          "frame/min/max preserved; Comments resized between two display-fitting sizes",
+        "minimumContentSize": [minimum.width, minimum.height],
+        "resizedContentSize": [resized.width, resized.height],
+        "availableContentSize": [available.width, available.height],
         "auxiliaryClosure": "3 organizers and signature closed with retained objects valid",
         "settings": "one reusable Settings window; Command-comma",
         "fileMenu": "New PDF/Command-N; at most 10 root commands; grouped exports",
