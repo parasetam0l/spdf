@@ -262,7 +262,9 @@ enum PageTextLineWriter {
   ) throws {
     try validate(lines, box: box)
     try validateFonts(lines, pageID: pageID, in: graph)
-    var bytes = Array("q\n".utf8)
+    // q/Q does not save the current path. Discard any unpainted source
+    // path before constructing our own clip, or it could enlarge that clip.
+    var bytes = Array("q\nn\n".utf8)
     if let rect = clippingRect {
       guard rect.count == 4, rect.allSatisfy(\.isFinite), rect[2] > rect[0], rect[3] > rect[1] else {
         throw PDFError(.malformed, "Invalid paragraph clipping region")

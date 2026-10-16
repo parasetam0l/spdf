@@ -519,7 +519,7 @@ struct ImportedParagraphInteropTests {
       guard case .stream(let stream)? = graph.objects[PDFObjectID(5)] else { return }
       // Two nested clips, one under a transformed CTM, have one intersection.
       let prefix = "q 20 660 360 80 re W n q 2 0 0 2 0 0 cm 20 336 140 21 re W* n 0.5 0 0 0.5 0 0 cm\n"
-      graph.objects[PDFObjectID(5)] = .stream(PDFStream(bytes: Data(prefix.utf8) + stream.bytes + Data("\nQ Q".utf8)))
+      graph.objects[PDFObjectID(5)] = .stream(PDFStream(bytes: Data(prefix.utf8) + stream.bytes + Data("\nQ Q\n0 0 500 790 re".utf8)))
       let target = try #require(targets(graph, pageID: pageID).first { $0.paragraph != nil })
       let paragraph = try #require(target.paragraph)
       #expect(paragraph.originalText.count == 2)
@@ -604,6 +604,7 @@ struct ImportedParagraphInteropTests {
     #expect(issue("ABC ABC ABC") != nil)
     #expect(issue("ABC", x: 20) != nil)
     #expect(issue("ABC", y: 684) != nil)
+    #expect(issue("j", x: 40, format: .init(font: .timesItalic, size: 16)) != nil)
     var large = format; large.size = 36
     #expect(issue("ABC", format: large) != nil)
     #expect(issue("ABC") == nil)
