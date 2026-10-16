@@ -81,15 +81,22 @@ public enum StandardTextFont: String, CaseIterable, Sendable {
 
 public struct PageTextFormat: Sendable, Equatable {
   public var font: StandardTextFont
+  public var sourceFont: PageTextSourceFont?
+  public var characterSpacing: Double
+  public var fontName: String { sourceFont?.name ?? font.rawValue }
   public var size: Double
   public var color: [Double]
-  public init(font: StandardTextFont = .helvetica, size: Double = 12, color: [Double] = [0, 0, 0]) {
+  public init(font: StandardTextFont = .helvetica, size: Double = 12, color: [Double] = [0, 0, 0],
+    sourceFont: PageTextSourceFont? = nil, characterSpacing: Double = 0) {
     self.font = font
+    self.sourceFont = sourceFont
+    self.characterSpacing = characterSpacing
     self.size = size
     self.color = color
   }
   public var isValid: Bool {
-    size.isFinite && (2...144).contains(size) && color.count == 3
+    size.isFinite && (2...144).contains(size) && characterSpacing.isFinite
+      && abs(characterSpacing) <= 144 && color.count == 3
       && color.allSatisfy { $0.isFinite && (0...1).contains($0) }
   }
 }
@@ -158,6 +165,26 @@ public struct AuthoredPageTextBox: Sendable {
 }
 
 enum PageTextLineWriter {
+  static func validateFonts(_ lines: [PageTextLine], pageID: PDFObjectID, in graph: PDFGraph) throws {
+    guard case .dictionary(let page)? = graph.objects[pageID] else {
+      throw PDFError(.malformed, "Missing text page")
+    }
+    var profiles: [PDFName: PageTextFontProfile] = [:]
+    for segment in lines.flatMap(\.segments) {
+      if let source = segment.format.sourceFont {
+        guard let font = IndexedTextFont.resolve(resource: source.resource, page: page, in: graph),
+          font.isInlineEditable, font.encode(segment.text) != nil,
+          PageTextSourceFont.canWriteInline(segment.text) else {
+          throw PDFError(.unsupported, "The embedded font does not contain these characters. Choose another font for them.")
+        }
+        if profiles[source.resource] == nil { profiles[source.resource] = font.profile }
+        guard let profile = profiles[source.resource],
+          segment.text.unicodeScalars.allSatisfy({ profile.glyphs[String($0)] != nil }) else {
+          throw PDFError(.unsupported, "The embedded font does not contain these characters. Choose another font for them.")
+        }
+      }
+    }
+  }
   static func originalContent(pageID: PDFObjectID, in graph: PDFGraph) throws -> PageContent {
     let content = try PageContent.load(pageID: pageID, in: graph)
     guard content.segments.allSatisfy(\.isEditable),
@@ -214,7 +241,7 @@ enum PageTextLineWriter {
           line.segments.allSatisfy({
             $0.x.isFinite && abs($0.x) <= 1_000_000 && $0.format.isValid
               && !$0.text.contains("\n") && !$0.text.contains("\r")
-              && StandardTextFont.canEncode($0.text)
+              && ($0.format.sourceFont != nil || StandardTextFont.canEncode($0.text))
           })
         else {
           throw PDFError(.unsupported, "The selected PDF font cannot encode these characters")
@@ -230,9 +257,10 @@ enum PageTextLineWriter {
 
   static func append(
     _ lines: [PageTextLine], box: PageTextBox?, pageID: PDFObjectID,
-    defaultFont: SimpleFont?, defaultSize: Double, defaultColor: [Double], in graph: inout PDFGraph
+    defaultFont: IndexedTextFont?, defaultSize: Double, defaultColor: [Double], in graph: inout PDFGraph
   ) throws {
     try validate(lines, box: box)
+    try validateFonts(lines, pageID: pageID, in: graph)
     var bytes = Array("q\nBT\n0 Tc 0 Tw 100 Tz 0 Ts 0 Tr\n".utf8)
     var lineRecords: [PDFValue] = []
     for line in lines {
@@ -247,16 +275,18 @@ enum PageTextLineWriter {
       } else {
         for segment in line.segments where !segment.text.isEmpty {
           let face = segment.format.font
-          let resource = try AddedContent.registerStandardFont(
+          let resource = try segment.format.sourceFont?.resource ?? AddedContent.registerStandardFont(
             family: face.family, bold: face.isBold, italic: face.isItalic, pageID: pageID,
             in: &graph)
           guard case .dictionary(let page)? = graph.objects[pageID],
-            let font = SimpleFont.resolve(resource: resource, page: page, in: graph),
+            let font = IndexedTextFont.resolve(resource: resource, page: page, in: graph),
+            font.isInlineEditable,
             let codes = font.encode(segment.text)
           else { throw PDFError(.unsupported, "The selected font cannot encode these characters") }
           try emit(
             codes, x: segment.x, baseline: line.baseline, resource: resource,
-            size: segment.format.size, color: segment.format.color, to: &bytes)
+            size: segment.format.size, color: segment.format.color,
+            spacing: segment.format.characterSpacing, to: &bytes)
           count += 1
         }
       }
@@ -265,6 +295,8 @@ enum PageTextLineWriter {
           .array([
             .name(PDFName(format.font.rawValue)), .real(format.size),
             .array(format.color.map { .real($0) }),
+            format.sourceFont.map { .name($0.resource) } ?? .null,
+            .real(format.characterSpacing),
           ])
         } ?? .null
       lineRecords.append(
@@ -302,8 +334,9 @@ enum PageTextLineWriter {
 
   private static func emit(
     _ codes: [UInt8], x: Double, baseline: Double, resource: PDFName,
-    size: Double, color: [Double], to bytes: inout [UInt8]
+    size: Double, color: [Double], spacing: Double = 0, to bytes: inout [UInt8]
   ) throws {
+    bytes += Array("\(AnnotationSupport.number(spacing)) Tc\n".utf8)
     bytes += Array(try PDFWriter.serializedValue(.name(resource)))
     bytes += Array(" \(AnnotationSupport.number(size)) Tf\n".utf8)
     bytes += Array((color.map(AnnotationSupport.number).joined(separator: " ") + " rg\n").utf8)
@@ -320,6 +353,9 @@ public enum AuthoredPageTextBoxes {
   public static func read(pageID: PDFObjectID, in graph: PDFGraph) throws -> [AuthoredPageTextBox] {
     let content = try PageContent.load(pageID: pageID, in: graph)
     let allRuns = try TextRunIndexer.runs(in: content, graph: graph)
+    let profiles = try PageTextEditing.fontProfiles(pageID: pageID, in: graph)
+    let standard = Set(try StandardTextFont.editableRunIndices(pageID: pageID, in: graph)
+      .map { allRuns[$0].fontResource })
     func number(_ value: PDFValue) -> Double? {
       switch value {
       case .real(let n): return n
@@ -362,7 +398,7 @@ public enum AuthoredPageTextBoxes {
         }
         var breakFormat: PageTextFormat?
         if fields.count == 5, fields[4] != .null {
-          guard hard, case .array(let style) = fields[4], style.count == 3,
+          guard hard, case .array(let style) = fields[4], [3, 5].contains(style.count),
             case .name(let name) = style[0],
             let font = StandardTextFont(rawValue: String(decoding: name.bytes, as: UTF8.self)),
             let size = number(style[1]), case .array(let components) = style[2],
@@ -371,7 +407,16 @@ public enum AuthoredPageTextBoxes {
             valid = false
             break
           }
-          let format = PageTextFormat(font: font, size: size, color: components.compactMap(number))
+          var format = PageTextFormat(font: font, size: size, color: components.compactMap(number))
+          if style.count == 5 {
+            guard let spacing = number(style[4]) else { valid = false; break }
+            format.characterSpacing = spacing
+            if case .name(let resource) = style[3],
+              case .dictionary(let page)? = graph.objects[pageID],
+              let source = IndexedTextFont.resolve(resource: resource, page: page, in: graph)?.profile?.source {
+              format.sourceFont = source
+            } else if style[3] != .null { valid = false; break }
+          }
           guard format.isValid else {
             valid = false
             break
@@ -382,7 +427,9 @@ public enum AuthoredPageTextBoxes {
         for index in indices[cursor..<(cursor + Int(count))] {
           let run = allRuns[index]
           let style = TextEditTargeting.inputStyle(runIndex: index, runs: allRuns, in: graph)
-          guard let family = style.fontFamily, let face = StandardTextFont(rawValue: family),
+          guard let family = style.fontFamily,
+            let format = PageTextEditing.format(for: run, family: family, pageID: pageID, in: graph,
+              standard: standard, profiles: profiles),
             abs(run.baselineY - lineY) < 0.002
           else {
             valid = false
@@ -392,7 +439,7 @@ public enum AuthoredPageTextBoxes {
           segments.append(
             .init(
               text: run.text, x: run.baselineX,
-              format: .init(font: face, size: style.fontSize, color: style.fillColor)))
+              format: format))
         }
         cursor += Int(count)
         if let first = segments.first, abs(first.x - lineX) >= 0.005 { valid = false }
@@ -436,6 +483,7 @@ public struct AddPageTextLinesCommand: PDFEditCommand, Sendable, Equatable {
       lines.allSatisfy({ $0.text.isEmpty || !$0.segments.isEmpty })
     else { throw PDFError(.malformed, "Missing text page or formatted lines") }
     try PageTextLineWriter.validate(lines, box: box)
+    try PageTextLineWriter.validateFonts(lines, pageID: pageID, in: graph)
     _ = try PageTextLineWriter.originalContent(pageID: pageID, in: graph)
   }
   public func apply(to graph: PDFGraph) throws -> PDFGraph {

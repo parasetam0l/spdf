@@ -429,9 +429,7 @@ struct TextEditTests {
   @Test func fallbackWrapsSharedFontScope() throws {
     // P18-007: two runs sharing one font selection — replacing the first
     // with fallback text wraps only the target, so the following run keeps
-    // the original font and still decodes. (Line-level order across separate
-    // Tj instructions is the known P18-016 pen limitation, present even
-    // pristine; the run-level mapping is exact.)
+    // the original font, decoded text and actual laid-out position.
     var graph = try PDFParser.parse(PDFFixtures.textWidthsPages()).graph
     let pageID = try PDFPageTree.pageIDs(in: graph)[0]
     graph.objects[PDFObjectID(5)] = .stream(

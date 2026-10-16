@@ -404,9 +404,15 @@ final class SPDFDocument: NSDocument {
       else { return nil }
       var preview = graph
       do {
-        for run in target.runIndices {
-          preview = try PageTextEditing.hidingBlock(
-            pageID: self.editSession.pageIDs[target.pageIndex], runIndex: run, in: preview)
+        if let paragraph = target.paragraph {
+          preview = try PageTextEditing.hidingParagraph(
+            pageID: self.editSession.pageIDs[target.pageIndex], originalText: paragraph.originalText,
+            standardFontAdvances: paragraph.standardFontAdvances, in: preview)
+        } else {
+          for run in target.runIndices {
+            preview = try PageTextEditing.hidingBlock(
+              pageID: self.editSession.pageIDs[target.pageIndex], runIndex: run, in: preview)
+          }
         }
         return try PDFWriter.write(preview)
       } catch { return nil }
@@ -3373,8 +3379,10 @@ final class SPDFDocument: NSDocument {
     let page = editSession.pageIDs[target.pageIndex]
     if let paragraph = target.paragraph {
       guard let lines else { return false }
-      if text == target.text, let original = target.style,
-        original.fontSize == style.fontSize, original.fillColor == style.color, dx == 0, dy == 0,
+      // The inspector follows the selected characters or caret. That style
+      // may differ from the first span without any actual edit to the box.
+      // Canonical span/width changes are tracked by the native formatter.
+      if text == target.text, dx == 0, dy == 0,
         viewer?.hasPendingPageTextChanges != true { return true }
       do {
         try editSession.apply(PDFTransaction([

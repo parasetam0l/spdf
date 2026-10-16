@@ -1,4 +1,6 @@
 import AppKit
+import CoreText
+import PDFCore
 import PDFEditing
 
 public enum PageTextFormatChange: Sendable {
@@ -18,9 +20,14 @@ public final class NativeTextFormatting {
   private let original: [PageTextFragment]
   private var fallback: PageTextFormat
   private var scale = 1.0
+  private let sourceFonts: [PDFName: NSFont]
+  private let profiles: [PDFName: PageTextFontProfile]
   public var onChange: (() -> Void)?
 
-  public init(view: NSTextView, fragments: [PageTextFragment], initial: PageTextFormat) {
+  public init(view: NSTextView, fragments: [PageTextFragment], initial: PageTextFormat,
+    profiles: [PDFName: PageTextFontProfile] = [:]) {
+    sourceFonts = NativeParagraphEditing.fonts(profiles: profiles)
+    self.profiles = profiles
     self.view = view
     original = Self.coalesced(fragments)
     fallback = initial
@@ -56,6 +63,24 @@ public final class NativeTextFormatting {
 
   public var hasChanges: Bool { fragments() != original }
 
+  public func insertionIssue(_ text: String) -> String? {
+    guard let view else { return nil }
+    let format = Self.format(view.typingAttributes, fallback: fallback)
+    let visible = text.unicodeScalars.filter { $0 != "\n" && $0 != "\r" }
+    if let source = format.sourceFont {
+      guard PageTextSourceFont.canWriteInline(String(String.UnicodeScalarView(visible))) else {
+        return "This text needs shaping that inline editing does not yet support. The text was kept."
+      }
+      guard let profile = profiles[source.resource],
+        visible.allSatisfy({ profile.glyphs[String($0)] != nil }) else {
+        return "This embedded font does not contain those characters. Choose another font for the new text."
+      }
+    } else if !StandardTextFont.canEncode(text) {
+      return "This font cannot represent those characters. The text was kept."
+    }
+    return nil
+  }
+
   private static func coalesced(_ fragments: [PageTextFragment]) -> [PageTextFragment] {
     var result: [PageTextFragment] = []
     for fragment in fragments where !fragment.text.isEmpty {
@@ -70,29 +95,31 @@ public final class NativeTextFormatting {
   }
 
   public func selection(isTyping: Bool) -> (
-    format: PageTextFormat, mixed: Set<String>, scope: String
+    format: PageTextFormat, mixed: Set<String>, scope: String, usesSourceFont: Bool
   ) {
-    guard let view else { return (fallback, [], "Text") }
+    guard let view else { return (fallback, [], "Text", fallback.sourceFont != nil) }
     let range =
       isTyping
       ? view.selectedRange() : NSRange(location: 0, length: (view.string as NSString).length)
     if range.length == 0 {
       return (
         Self.format(view.typingAttributes, fallback: fallback), [],
-        isTyping ? "Typing style" : "Whole text box"
+        isTyping ? "Typing style" : "Whole text box",
+        Self.format(view.typingAttributes, fallback: fallback).sourceFont != nil
       )
     }
     let formats = fragments(in: range).map(\.format)
     let first = formats.first ?? fallback
     var mixed = Set<String>()
     for format in formats {
-      if format.font.family != first.font.family { mixed.insert("family") }
+      if format.sourceFont != first.sourceFont || format.font.family != first.font.family { mixed.insert("family") }
       if format.font.isBold != first.font.isBold { mixed.insert("bold") }
       if format.font.isItalic != first.font.isItalic { mixed.insert("italic") }
       if format.size != first.size { mixed.insert("size") }
       if format.color != first.color { mixed.insert("color") }
     }
-    return (first, mixed, isTyping ? "Selected characters" : "Whole text box")
+    return (first, mixed, isTyping ? "Selected characters" : "Whole text box",
+      formats.contains { $0.sourceFont != nil })
   }
 
   @discardableResult
@@ -102,13 +129,25 @@ public final class NativeTextFormatting {
     let selection = view.selectedRange()
     let range = isTyping ? selection : NSRange(location: 0, length: storage.length)
     let selectedText = (view.string as NSString).substring(with: range)
-    guard StandardTextFont.canEncode(selectedText) else {
+    let changesFont: Bool
+    switch change { case .family, .bold, .italic: changesFont = true; default: changesFont = false }
+    let sources = range.length == 0 ? [Self.format(view.typingAttributes, fallback: fallback)]
+      : fragments(in: range).map(\.format)
+    if sources.contains(where: { $0.sourceFont != nil }) {
+      switch change {
+      case .bold, .italic: return "Choose a font family before changing this embedded font's weight or slant."
+      default: break
+      }
+    }
+    guard !changesFont || StandardTextFont.canEncode(selectedText) else {
       return "These PDF fonts cannot represent every selected character. The format was kept."
     }
     func changed(_ source: PageTextFormat) -> PageTextFormat {
       var result = source
       switch change {
       case .family(let family):
+        result.sourceFont = nil
+        result.characterSpacing = 0
         result.font = .face(family: family, bold: source.font.isBold, italic: source.font.isItalic)
       case .bold(let enabled):
         result.font = .face(family: source.font.family, bold: enabled, italic: source.font.isItalic)
@@ -123,7 +162,7 @@ public final class NativeTextFormatting {
     guard initial.isValid else { return "Choose a valid font size and color." }
     if range.length == 0 {
       fallback = initial
-      view.typingAttributes = Self.attributes(initial, scale: scale)
+      view.typingAttributes = attributes(initial, scale: scale)
       onChange?()
       return nil
     }
@@ -139,7 +178,7 @@ public final class NativeTextFormatting {
       let format = changed(piece.format)
       let length = (piece.text as NSString).length
       storage.addAttributes(
-        Self.attributes(format, scale: scale), range: NSRange(location: offset, length: length))
+        attributes(format, scale: scale), range: NSRange(location: offset, length: length))
       offset += length
     }
     storage.endEditing()
@@ -184,32 +223,41 @@ public final class NativeTextFormatting {
     paragraph.lineBreakMode = .byWordWrapping
     storage.beginEditing()
     for (range, format) in pieces {
-      storage.addAttributes(Self.attributes(format, scale: scale), range: range)
+      storage.addAttributes(attributes(format, scale: scale), range: range)
     }
     storage.addAttribute(
       .paragraphStyle, value: paragraph, range: NSRange(location: 0, length: storage.length))
     storage.endEditing()
-    var attributes = Self.attributes(typing, scale: scale)
+    var attributes = attributes(typing, scale: scale)
     attributes[.paragraphStyle] = paragraph
     view.typingAttributes = attributes
     view.insertionPointColor = NSColor(
       srgbRed: typing.color[0], green: typing.color[1], blue: typing.color[2], alpha: 1)
   }
 
-  private static func attributes(_ format: PageTextFormat, scale: Double) -> [NSAttributedString
+  private func attributes(_ format: PageTextFormat, scale: Double) -> [NSAttributedString
     .Key: Any]
   {
-    guard let font = NSFont(name: format.font.rawValue, size: format.size * scale) else {
-      return [:]
-    }
+    let font: NSFont?
+    if let source = format.sourceFont, let embedded = sourceFonts[source.resource] {
+      font = CTFontCreateCopyWithAttributes(embedded, format.size * scale, nil, nil) as NSFont
+    } else if format.sourceFont != nil { font = nil }
+    else { font = NSFont(name: format.font.rawValue, size: format.size * scale) }
+    guard let font else { return [:] }
     return [
-      key: dictionary(format), .font: font, .kern: 0, .ligature: 0,
+      Self.key: Self.dictionary(format), .font: font, .kern: format.characterSpacing * scale, .ligature: 0,
       .foregroundColor: NSColor(
         srgbRed: format.color[0], green: format.color[1], blue: format.color[2], alpha: 1),
     ]
   }
   private static func dictionary(_ format: PageTextFormat) -> NSDictionary {
-    ["font": format.font.rawValue, "size": format.size, "color": format.color] as NSDictionary
+    var result: [String: Any] = ["font": format.font.rawValue, "size": format.size,
+      "color": format.color, "spacing": format.characterSpacing]
+    if let source = format.sourceFont {
+      result["resource"] = String(decoding: source.resource.bytes, as: UTF8.self)
+      result["sourceName"] = source.name
+    }
+    return result as NSDictionary
   }
   private static func format(_ attrs: [NSAttributedString.Key: Any], fallback: PageTextFormat)
     -> PageTextFormat
@@ -218,6 +266,11 @@ public final class NativeTextFormatting {
       let name = dictionary["font"] as? String, let font = StandardTextFont(rawValue: name),
       let size = dictionary["size"] as? Double, let color = dictionary["color"] as? [Double]
     else { return fallback }
-    return .init(font: font, size: size, color: color)
+    let source: PageTextSourceFont?
+    if let resource = dictionary["resource"] as? String, let name = dictionary["sourceName"] as? String {
+      source = .init(resource: PDFName(resource), name: name)
+    } else { source = nil }
+    return .init(font: font, size: size, color: color, sourceFont: source,
+      characterSpacing: dictionary["spacing"] as? Double ?? 0)
   }
 }

@@ -8,6 +8,18 @@ import Testing
 /// mapping cache.
 @Suite("Composite fonts")
 struct CompositeFontTests {
+  @Test func identityCMapArrayRangesAndAdjacentTokensDecodeWithoutGuessing() throws {
+    var (source, id) = graph(withToUnicode: true)
+    source.objects[PDFObjectID(14)] = .stream(PDFStream(bytes: Data("""
+      1 begincodespacerange <0000><FFFF> endcodespacerange
+      1 beginbfrange <0001><0003>[<0041><0042><00660069>] endbfrange
+      """.utf8)))
+    guard case .dictionary(let dictionary)? = source.objects[id],
+      let font = CompositeFont.parse(dictionary, in: source, objectID: id) else {
+      Issue.record("Missing font"); return
+    }
+    #expect(try font.decode([0, 1, 0, 2, 0, 3]).text == "ABfi")
+  }
   private func graph(withToUnicode: Bool) -> (PDFGraph, PDFObjectID) {
     var objects: [PDFObjectID: PDFValue] = [
       PDFObjectID(1): .dictionary([

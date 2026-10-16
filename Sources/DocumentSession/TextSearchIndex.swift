@@ -71,6 +71,10 @@ public final class TextSearchIndex: @unchecked Sendable {
       for match in TextSearch.search(query: query, in: entry.layout, options: options) {
         guard match.clusterRange.lowerBound < entry.layout.clusters.count else { continue }
         let runIndex = entry.layout.clusters[match.clusterRange.lowerBound].runIndex
+        // CID indexing can now see generated OCR glyphs too. Keep layer
+        // results on the provenance-aware path below instead of duplicating
+        // them as geometry-owned document text.
+        if entry.recognizedRuns.contains(runIndex) { continue }
         let result = Match(
           pageID: pageID, pageIndex: index, clusterRange: match.clusterRange,
           bounds: match.bounds,
@@ -81,8 +85,7 @@ public final class TextSearchIndex: @unchecked Sendable {
         // keep the partial results.
         if let onMatch, onMatch(result) == false { return results }
       }
-      // P16-021: generated-layer text is outside the owned layout profile
-      // (composite fonts), so a layer hit is reported with its provenance
+      // P16-021: a layer hit is reported with its provenance
       // and no owned geometry; the independent renderer supplies highlights.
       if let layerText = entry.recognizedText,
         Self.matches(query: query, in: layerText, options: options)

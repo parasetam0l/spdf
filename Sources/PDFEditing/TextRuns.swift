@@ -36,7 +36,7 @@ enum TextRunIndexer {
   private typealias Matrix = [Double]
 
   private struct TextState {
-    var font: SimpleFont?
+    var font: IndexedTextFont?
     var fontSize = 0.0
     var charSpacing = 0.0
     var wordSpacing = 0.0
@@ -68,6 +68,8 @@ enum TextRunIndexer {
     var stateStack: [TextState] = []
     var matrix: Matrix = [1, 0, 0, 1, 0, 0]
     var lineMatrix: Matrix = [1, 0, 0, 1, 0, 0]
+    var fonts: [PDFName: IndexedTextFont] = [:]
+    var knownFonts = Set<PDFName>()
 
     func number(_ operand: ContentOperand?) -> Double? {
       switch operand?.value {
@@ -98,6 +100,13 @@ enum TextRunIndexer {
           textSpaceOffset: textSpaceOffset, hasKnownOffset: hasKnownOffset))
     }
 
+    func advancePen(_ codes: [UInt8]) {
+      guard let amount = state.font?.advance(of: codes, fontSize: state.fontSize,
+        charSpacing: state.charSpacing, wordSpacing: state.wordSpacing,
+        horizontalScale: state.horizontalScale) else { return }
+      matrix[4] += amount * matrix[0]
+      matrix[5] += amount * matrix[1]
+    }
     for (index, instruction) in content.instructions.enumerated() {
       try Task.checkCancellation()
       switch instruction.operatorName {
@@ -120,7 +129,10 @@ enum TextRunIndexer {
         guard case .name(let name)? = instruction.operands.first?.value,
           let size = number(instruction.operands.count > 1 ? instruction.operands[1] : nil)
         else { break }
-        state.font = SimpleFont.resolve(resource: name, page: page, in: graph)
+        if knownFonts.insert(name).inserted {
+          fonts[name] = IndexedTextFont.resolve(resource: name, page: page, in: graph)
+        }
+        state.font = fonts[name]
         state.fontSize = size
       case "Tc":
         state.charSpacing = number(instruction.operands.first) ?? state.charSpacing
@@ -184,6 +196,7 @@ enum TextRunIndexer {
           let span = instruction.operands.first?.span
         {
           appendRun(instructionIndex: index, path: [0], span: span, codes: [UInt8](codes))
+          advancePen([UInt8](codes))
         }
       case "TJ":
         let spans = arrayMemberSpans(in: content, instructionIndex: index)
@@ -216,6 +229,10 @@ enum TextRunIndexer {
               offsetKnown = false
             }
           }
+          if offsetKnown {
+            matrix[4] += offset * matrix[0]
+            matrix[5] += offset * matrix[1]
+          }
         }
       case "'":
         lineMatrix = translate(0, -state.leading, lineMatrix)
@@ -224,6 +241,7 @@ enum TextRunIndexer {
           let span = instruction.operands.first?.span
         {
           appendRun(instructionIndex: index, path: [0], span: span, codes: [UInt8](codes))
+          advancePen([UInt8](codes))
         }
       case "\"":
         state.wordSpacing = number(instruction.operands.first) ?? state.wordSpacing
@@ -238,6 +256,7 @@ enum TextRunIndexer {
           appendRun(
             instructionIndex: index, path: [2], span: instruction.operands[2].span,
             codes: [UInt8](codes))
+          advancePen([UInt8](codes))
         }
       default:
         break

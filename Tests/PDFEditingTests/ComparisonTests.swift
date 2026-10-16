@@ -143,6 +143,7 @@ struct ComparisonTests {
     let excluded = try PDFComparison.compare(
       left: left, right: right, options: PDFComparisonOptions(includeOCRText: false))
     #expect(excluded.changes.filter { $0.isOCRSourced }.isEmpty)
+    #expect(excluded.changes(kinds: [.textAdded, .textRemoved, .textChanged]).isEmpty)
   }
 
   @Test func signatureAndEncryptionStatusStayVisible() throws {

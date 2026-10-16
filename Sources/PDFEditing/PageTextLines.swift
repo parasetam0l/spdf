@@ -56,7 +56,7 @@ public struct RewritePageTextCommand: PDFEditCommand, Equatable, Sendable {
   public func validate(in graph: PDFGraph) throws { _ = try resolved(in: graph) }
 
   private func resolved(in graph: PDFGraph) throws -> (
-    content: PageContent, runs: [TextRun], font: SimpleFont, advances: [Double]
+    content: PageContent, runs: [TextRun], font: IndexedTextFont, advances: [Double]
   ) {
     guard !originalText.isEmpty, originalText.count <= 500,
       fontSize.isFinite, (2...144).contains(fontSize), color.count == 3,
@@ -101,24 +101,30 @@ public struct RewritePageTextCommand: PDFEditCommand, Equatable, Sendable {
     let allRuns = try TextRunIndexer.runs(in: content, graph: graph)
     var selected: [TextRun] = []
     var advances: [Double] = []
-    var firstFont: SimpleFont?
+    var firstFont: IndexedTextFont?
+    var fonts: [PDFName: IndexedTextFont] = [:]
+    var standardIndices: Set<Int>?
     for index in originalText.keys.sorted() {
       guard allRuns.indices.contains(index) else {
         throw PDFError(.malformed, "The paragraph's text runs changed")
       }
       let run = allRuns[index]
       let instruction = content.instructions[run.instructionIndex]
-      guard run.text == originalText[index], instruction.operatorName == "Tj",
+      let transform = TextCanvasSupport.concatenate(run.ctm, run.matrix)
+      if fonts[run.fontResource] == nil {
+        fonts[run.fontResource] = IndexedTextFont.resolve(resource: run.fontResource, page: page, in: graph)
+      }
+      guard run.text == originalText[index], ["Tj", "TJ"].contains(instruction.operatorName),
         run.fontSize.isFinite, run.fontSize > 0,
-        run.ctm == [1, 0, 0, 1, 0, 0],
-        abs(run.matrix[0] - 1) < 1e-6, abs(run.matrix[3] - 1) < 1e-6,
-        abs(run.matrix[1]) < 1e-6, abs(run.matrix[2]) < 1e-6,
-        abs(run.charSpacing) < 1e-6, abs(run.wordSpacing) < 1e-6,
+        transform[0] > 0, abs(transform[0] - transform[3]) < 1e-6,
+        abs(transform[1]) < 1e-6, abs(transform[2]) < 1e-6,
+        run.charSpacing.isFinite, abs(run.charSpacing) <= 144,
+        run.wordSpacing.isFinite, abs(run.wordSpacing) <= 144,
         abs(run.horizontalScale - 100) < 1e-6, abs(run.rise) < 1e-6,
         TextCanvasSupport.renderingMode(at: run.instructionIndex, in: content) == 0,
         safeGraphics(at: run.instructionIndex, in: content),
-        let font = SimpleFont.resolve(resource: run.fontResource, page: page, in: graph),
-        font.isEditable, !font.isType3,
+        let font = fonts[run.fontResource],
+        font.isInlineEditable,
         let segment = content.segmentIndex(for: run.stringSpan),
         content.segments[segment].isEditable
       else {
@@ -126,30 +132,43 @@ public struct RewritePageTextCommand: PDFEditCommand, Equatable, Sendable {
       }
       let advance: Double
       if let measured = font.advance(
-        of: run.rawCodes, fontSize: run.fontSize, charSpacing: 0,
-        wordSpacing: 0, horizontalScale: 100)
+        of: run.rawCodes, fontSize: run.fontSize, charSpacing: run.charSpacing,
+        wordSpacing: run.wordSpacing, horizontalScale: 100)
       {
         advance = measured
       } else {
+        if standardIndices == nil {
+          standardIndices = Set(try StandardTextFont.editableRunIndices(pageID: pageID, in: graph))
+        }
         let family =
           TextEditTargeting.inputStyle(
             runIndex: 0, runs: [run], in: graph
           ).fontFamily ?? ""
-        guard Self.standardFonts.contains(family), font.differences.isEmpty, font.toUnicode == nil,
+        guard standardIndices?.contains(index) == true, Self.standardFonts.contains(family),
+          font.simple?.differences.isEmpty == true,
+          font.simple?.toUnicode == nil,
           let measured = standardFontAdvances[index], measured.isFinite, measured >= 0
         else {
           throw PDFError(.unsupported, "The paragraph's original glyph advances are unavailable")
         }
-        advance = measured
+        advance = measured + Double(run.rawCodes.count) * run.charSpacing
+          + Double(run.rawCodes.filter { $0 == 32 }.count) * run.wordSpacing
       }
       guard advance.isFinite else {
         throw PDFError(.unsupported, "The paragraph's glyph advances are invalid")
       }
       selected.append(run)
       advances.append(advance)
-      firstFont = font
+      if firstFont == nil { firstFont = font }
+    }
+    for run in selected {
+      guard allRuns.indices.filter({ allRuns[$0].instructionIndex == run.instructionIndex })
+        .allSatisfy({ originalText[$0] != nil }) else {
+        throw PDFError(.unsupported, "Select the complete text-show instruction before editing")
+      }
     }
     try PageTextLineWriter.validate(lines, box: box)
+    try PageTextLineWriter.validateFonts(lines, pageID: pageID, in: graph)
     guard let font = firstFont,
       lines.allSatisfy({ !$0.segments.isEmpty || font.encode($0.text) != nil }) else {
       throw PDFError(.unsupported, "The PDF font cannot encode the replacement characters")
@@ -175,8 +194,22 @@ public struct RewritePageTextCommand: PDFEditCommand, Equatable, Sendable {
     let graph = try PageContentCopy.makePrivate(pageID: pageID, in: graph)
     let context = try resolved(in: graph)
     var ranges: [(range: Range<Int>, replacement: [UInt8])] = []
-    for (run, advance) in zip(context.runs, context.advances) {
-      let instruction = context.content.instructions[run.instructionIndex]
+    let groups = Dictionary(grouping: context.runs.indices, by: { context.runs[$0].instructionIndex })
+    for instructionIndex in groups.keys.sorted() {
+      let indices = groups[instructionIndex]!
+      let run = context.runs[indices[0]]
+      let instruction = context.content.instructions[instructionIndex]
+      var advance = indices.reduce(0.0) { $0 + context.advances[$1] }
+      if case .array(let entries)? = instruction.operands.first?.value {
+        for entry in entries {
+          switch entry {
+          case .integer(let n): advance -= Double(n) * run.fontSize / 1_000
+          case .real(let n): advance -= n * run.fontSize / 1_000
+          case .string: break
+          default: throw PDFError(.malformed, "Invalid text adjustment")
+          }
+        }
+      }
       let number = AnnotationSupport.number(-advance * 1_000 / run.fontSize)
       ranges.append((TextStyleSupport.fullSpan(of: instruction), Array("[\(number)] TJ".utf8)))
     }

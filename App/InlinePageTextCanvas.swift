@@ -279,10 +279,12 @@ final class InlinePageTextCanvas: NSView, NSTextViewDelegate {
     textView.textContainer?.lineFragmentPadding = 0
     textView.acceptsLineBreaks = wrapsText
     textView.string = target?.text ?? ""
-    if let face = StandardTextFont(rawValue: family), target == nil || target?.paragraph != nil {
-      let initial = PageTextFormat(font: face, size: pointSize, color: style.color)
+    let initialFormat = target?.paragraph?.fragments.first?.format
+      ?? StandardTextFont(rawValue: family).map { PageTextFormat(font: $0, size: pointSize, color: style.color) }
+    if let initial = initialFormat, target == nil || target?.paragraph != nil {
       formatting = NativeTextFormatting(view: textView,
-        fragments: target?.paragraph?.fragments ?? [], initial: initial)
+        fragments: target?.paragraph?.fragments ?? [], initial: initial,
+        profiles: target?.paragraph?.fontProfiles ?? [:])
       formatting?.onChange = { [weak self] in self?.formattingChanged() }
       textView.toggleBold = { [weak self] in self?.toggleFormat(italic: false) }
       textView.toggleItalic = { [weak self] in self?.toggleFormat(italic: true) }
@@ -624,6 +626,15 @@ final class InlinePageTextCanvas: NSView, NSTextViewDelegate {
     publishFormattingSelection()
   }
 
+  func textView(_ textView: NSTextView, shouldChangeTextIn affectedCharRange: NSRange,
+    replacementString: String?) -> Bool {
+    guard let replacementString, let formatting else { return true }
+    let issue = formatting.insertionIssue(replacementString)
+    viewer?.pageTextFormattingIssue = issue
+    if issue != nil { NSSound.beep() }
+    return issue == nil
+  }
+
   func textViewDidChangeSelection(_ notification: Notification) {
     guard !isLayingOut else { return }
     publishFormattingSelection()
@@ -646,11 +657,12 @@ final class InlinePageTextCanvas: NSView, NSTextViewDelegate {
 
   private func publishFormattingSelection() {
     guard let selection = formatting?.selection(isTyping: isTyping), let viewer else { return }
-    style = PageTextStyle(fontFamily: selection.format.font.rawValue,
+    style = PageTextStyle(fontFamily: selection.format.fontName,
       fontSize: selection.format.size, color: selection.format.color)
     if viewer.pageTextStyle != style { viewer.pageTextStyle = style }
     if viewer.pageTextMixedFormatting != selection.mixed { viewer.pageTextMixedFormatting = selection.mixed }
     if viewer.pageTextSelectionScope != selection.scope { viewer.pageTextSelectionScope = selection.scope }
+    viewer.canChangePageTextTraits = !selection.usesSourceFont
   }
 
   private func publishPendingChange() {
@@ -734,6 +746,7 @@ final class InlinePageTextCanvas: NSView, NSTextViewDelegate {
     viewer?.pageTextMixedFormatting = []
     viewer?.pageTextFormattingIssue = nil
     viewer?.canFormatPageText = false
+    viewer?.canChangePageTextTraits = true
     viewer?.hasPendingTextGesture = nil
     textView.delegate = nil
     onFinish?(committed)

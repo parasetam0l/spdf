@@ -244,6 +244,7 @@ public final class PDFViewingSession: NSObject, ObservableObject, PDFViewDelegat
   @Published public var pageTextSelectionScope = "Whole text box"
   @Published public var pageTextFormattingIssue: String?
   public var pageTextFormattingApplier: ((PageTextFormatChange) -> Void)?
+  @Published public var canChangePageTextTraits = true
   public var pageTextBeginTyping: (() -> Void)?
   public var pageTextCancel: (() -> Void)?
   public var pageTextPositionApplier: ((Double, Double) -> Void)?

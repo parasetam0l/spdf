@@ -29,6 +29,7 @@
           FileHandle.standardError.write(Data("[smoke] \(name)\n".utf8))
         }
         checkpoint("opening fixtures")
+        try await ImportedParagraphSmoke.checks(fixtures: fixtures, output: output.appendingPathComponent("ImportedParagraph"))
         let firstURL = fixtures.appendingPathComponent("three-pages.pdf")
         let secondURL = fixtures.appendingPathComponent("one-page.pdf")
         let thirdURL = fixtures.appendingPathComponent("image-pages.pdf")

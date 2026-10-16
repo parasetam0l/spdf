@@ -19,7 +19,7 @@ a 9-glyph subset of DejaVu Sans 2.37 (space, A, B, C, a, acircumflex, circumflex
 `Scripts/make-font-fixtures.py` with fontTools. The script also generates a
 multilingual companion subset (Greek U+0391–U+0393, Cyrillic U+0411–U+0412,
 Hebrew U+05D0–U+05E9, space) used by the multilingual verification fixture, and a
-CFF conversion of the first subset. DejaVu Fonts are under the
+CFF conversion of the first subset. `Scripts/make-paragraph-font-fixture.py` generates an ASCII CID subset without a Unicode cmap for imported-paragraph tests, recorded in `Tools/PDFFixtures/ParagraphFontFixture.swift`. DejaVu Fonts are under the
 permissive Bitstream Vera license; the full license text travels with the
 fixtures in `Tests/Fixtures/DejaVu-LICENSE.txt`. The subsets are used only by
 automated tests and are never packaged with the app.

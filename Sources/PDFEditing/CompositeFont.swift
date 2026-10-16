@@ -23,7 +23,11 @@ struct MultiByteToUnicodeCMap {
 
   init?(bytes: [UInt8], limits: PDFLimits = PDFLimits()) {
     let text = String(decoding: bytes, as: UTF8.self)
-    let tokens = text.split(whereSeparator: { $0.isWhitespace })
+    // CMaps commonly omit whitespace between hex strings and array brackets.
+    let clean = text.replacingOccurrences(of: "%[^\\r\\n]*", with: "", options: .regularExpression)
+    let expression = try? NSRegularExpression(pattern: "<[0-9A-Fa-f\\s]*>|\\[|\\]|[^\\s<>\\[\\]]+")
+    let tokens: [Substring] = expression?.matches(in: clean, range: NSRange(clean.startIndex..., in: clean))
+      .compactMap { Range($0.range, in: clean).map { clean[$0] } } ?? []
     var index = 0
     var entries = 0
     while index < tokens.count, entries < 65_536 {
@@ -54,7 +58,16 @@ struct MultiByteToUnicodeCMap {
           guard let low = Self.hexValue(tokens[index]),
             let high = Self.hexValue(tokens[index + 1])
           else { break }
-          if case .some(let token) = tokens[safe: index + 2], token.hasPrefix("<") {
+          guard high.value >= low.value, high.value - low.value < 65_536 - entries else { return nil }
+          if tokens[index + 2] == "[" {
+            index += 3
+            for code in low.value...high.value {
+              guard index < tokens.count, let destination = Self.hexString(tokens[index]) else { return nil }
+              map[code] = destination; entries += 1; index += 1
+            }
+            guard index < tokens.count, tokens[index] == "]" else { return nil }
+            index += 1
+          } else if case .some(let token) = tokens[safe: index + 2], token.hasPrefix("<") {
             guard let startScalar = Self.firstScalar(token) else { break }
             for (offset, value) in (low.value...max(low.value, high.value)).enumerated() {
               if let scalar = UnicodeScalar(startScalar + UInt32(offset)) {
@@ -92,6 +105,11 @@ struct MultiByteToUnicodeCMap {
   }
 
   func unicode(for code: Int) -> String? { map[code] }
+
+  var identityMappings: [Int: String]? {
+    guard codespaces.allSatisfy({ $0.byteLength == 2 }) else { return nil }
+    return map.filter { (0...65_535).contains($0.key) }
+  }
 
   static func hexValue(_ token: Substring) -> (value: Int, byteLength: Int)? {
     guard token.hasPrefix("<"), token.hasSuffix(">") else { return nil }
@@ -141,6 +159,10 @@ extension Array {
 /// prefixes, and a codespace-aware ToUnicode decoder with an explicit
 /// missing-mapping policy (never a silent wrong character).
 public struct CompositeFont: Sendable {
+  var identityMappings: [Int: String]? {
+    guard encodingName == "Identity-H", !hasVerticalMetrics else { return nil }
+    return cmap?.identityMappings
+  }
   public enum MissingMappingPolicy: String, Sendable, Equatable {
     /// Decoding fails for unmapped codes (default).
     case fail
@@ -191,15 +213,12 @@ public struct CompositeFont: Sendable {
     if case .name(let name)? = dictionary[PDFName("BaseFont")] {
       baseFont = String(decoding: name.bytes, as: UTF8.self)
     }
-    var encodingName = "Identity-H"
-    var embeddedCMap: PDFStream?
+    var encodingName = "Unknown"
     switch dictionary[PDFName("Encoding")] {
     case .name(let name)?:
       encodingName = String(decoding: name.bytes, as: UTF8.self)
-    case .reference(let id)?:
-      if case .stream(let stream)? = graph.objects[id] { embeddedCMap = stream }
-    case .stream(let stream)?:
-      embeddedCMap = stream
+    case .reference?, .stream?:
+      encodingName = "Embedded CMap"
     default:
       break
     }

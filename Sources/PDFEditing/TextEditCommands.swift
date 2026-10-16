@@ -521,10 +521,13 @@ public struct ReplaceTextCommand: PDFEditCommand, Equatable, Sendable {
     var ranges = [(
       range: run.stringSpan.lowerBound..<run.stringSpan.lowerBound, replacement: selection)]
     ranges.append((range: run.stringSpan, replacement: Self.literalStringBytes(codes)))
-    if !restore.isEmpty {
-      ranges.append((
-        range: instruction.span.upperBound..<instruction.span.upperBound, replacement: restore))
-    }
+    // A Tj advances the real text pen as well as an array member. Preserve
+    // that advance before restoring the font, without resetting the line
+    // matrix used by subsequent Td/T* instructions.
+    let em = run.fontSize / 1_000 * run.horizontalScale / 100
+    let correction = em == 0 ? 0 : (newAdvance - oldAdvance) / em
+    let suffix = Array("\n[\(AnnotationSupport.number(correction))] TJ".utf8) + restore
+    ranges.append((range: instruction.span.upperBound..<instruction.span.upperBound, replacement: suffix))
     return try content.replacing(ranges: ranges, in: graph, limits: limits)
   }
 

@@ -63,12 +63,14 @@ public struct PageTextLayout: Sendable {
     // P14-016: parse each embedded program once per build; misses are
     // cached too so a missing program is not re-resolved per glyph.
     var metricsCache: [PDFObjectID: TrueTypeOutlineMetrics?] = [:]
+    var fonts: [PDFName: IndexedTextFont] = [:]
     var glyphs: [TextCluster] = []
     for (runIndex, run) in runs.enumerated() {
       let matrix = TextCanvasSupport.concatenate(run.ctm, run.matrix)
-      guard
-        let font = SimpleFont.resolve(
-          resource: run.fontResource, page: effectivePage, in: graph),
+      if fonts[run.fontResource] == nil {
+        fonts[run.fontResource] = IndexedTextFont.resolve(resource: run.fontResource, page: effectivePage, in: graph)
+      }
+      guard let font = fonts[run.fontResource],
         font.isSupported
       else { continue }
       let metrics: TrueTypeOutlineMetrics?
@@ -80,10 +82,11 @@ public struct PageTextLayout: Sendable {
         metrics = resolved
       }
       var position = 0.0
-      for (glyphIndex, code) in run.rawCodes.enumerated() {
-        let decoded = font.decode([code])
+      for (glyphIndex, glyph) in (font.glyphs(run.rawCodes) ?? []).enumerated() {
+        let code = glyph.codes.count == 1 ? glyph.codes.first : nil
+        let decoded = glyph.text
         let advance = font.advance(
-          of: [code], fontSize: run.fontSize, charSpacing: run.charSpacing,
+          of: glyph.codes, fontSize: run.fontSize, charSpacing: run.charSpacing,
           wordSpacing: run.wordSpacing, horizontalScale: run.horizontalScale)
         let base = run.hasKnownOffset ? run.textSpaceOffset : 0
         let origin = [

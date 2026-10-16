@@ -80,7 +80,7 @@ public struct TrueTypeInspector: Sendable, Equatable {
     return Array(bytes[table.offset..<end])
   }
 
-  public static func inspect(_ data: Data) throws -> TrueTypeInspector {
+  public static func inspect(_ data: Data, requireUnicodeMap: Bool = true) throws -> TrueTypeInspector {
     let bytes = [UInt8](data)
     guard bytes.count >= 12 else {
       throw PDFError(.malformed, "TrueType program is too short for a directory")
@@ -188,10 +188,11 @@ public struct TrueTypeInspector: Sendable, Equatable {
     }
 
     // cmap: merge format-4 segments, then format-12 groups (winning ties).
-    let cmap = try table(bytes, tables: tables, tag: "cmap", offset: 0, length: 4)
-    _ = cmap
-    let cmapTable = tables["cmap"]!
-    let subtableCount = try u16(bytes, at: cmapTable.offset + 2)
+    if requireUnicodeMap && tables["cmap"] == nil {
+      throw PDFError(.malformed, "TrueType program lacks the cmap table")
+    }
+    let cmapTable = tables["cmap"]
+    let subtableCount = try cmapTable.map { try u16(bytes, at: $0.offset + 2) } ?? 0
     guard subtableCount <= 32 else {
       throw PDFError(.malformed, "TrueType cmap subtable count is implausible")
     }
@@ -216,6 +217,7 @@ public struct TrueTypeInspector: Sendable, Equatable {
       }
     }
     for index in 0..<subtableCount {
+      guard let cmapTable else { break }
       let record = cmapTable.offset + 4 + index * 8
       guard record + 8 <= bytes.count else {
         throw PDFError(.malformed, "TrueType cmap record runs past the program")
@@ -619,18 +621,18 @@ public enum TrueTypeSubsetter {
     return out
   }
 
-  private static func u16Bytes(_ value: Int) -> [UInt8] {
+  static func u16Bytes(_ value: Int) -> [UInt8] {
     [UInt8((value >> 8) & 0xFF), UInt8(value & 0xFF)]
   }
 
-  private static func u32Bytes(_ value: Int) -> [UInt8] {
+  static func u32Bytes(_ value: Int) -> [UInt8] {
     [
       UInt8((value >> 24) & 0xFF), UInt8((value >> 16) & 0xFF),
       UInt8((value >> 8) & 0xFF), UInt8(value & 0xFF),
     ]
   }
 
-  private static func checksum(_ bytes: [UInt8]) -> Int {
+  static func checksum(_ bytes: [UInt8]) -> Int {
     var sum = 0
     var index = 0
     while index < bytes.count {

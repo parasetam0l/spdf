@@ -238,7 +238,11 @@ public enum PDFComparison {
         if case .integer(let raw)? = page[PDFName("Rotate")] { rotation = Int(raw) }
       }
       let images = (try? ImageInventory.placements(in: graph, pageID: pageID)) ?? []
-      let normalizedText = normalize(lineTexts.joined(separator: "\n"), collapse: true)
+      // Adding a generated OCR layer must not turn the same scanned page
+      // into an unrelated delete/insert pair now that CID text is indexed.
+      let alignmentText = Self.lineTexts(layout, options: PDFComparisonOptions(),
+        excludingRuns: try ocrRunIndices(pageID: pageID, in: graph)).map(\.text)
+      let normalizedText = normalize(alignmentText.joined(separator: "\n"), collapse: true)
       // P32-015: rotation and box changes must still match pages, so the
       // alignment signature uses text, or rotation-independent dimensions for
       // textless pages.
@@ -407,8 +411,10 @@ public enum PDFComparison {
       let leftLayout = try PageTextLayout.build(pageID: leftPageID, in: left.graph, limits: limits)
       let rightLayout = try PageTextLayout.build(
         pageID: rightPageID, in: right.graph, limits: limits)
-      let leftLines = lineTexts(leftLayout, options: options)
-      let rightLines = lineTexts(rightLayout, options: options)
+      let leftLines = try lineTexts(leftLayout, options: options,
+        excludingRuns: options.includeOCRText ? [] : ocrRunIndices(pageID: leftPageID, in: left.graph))
+      let rightLines = try lineTexts(rightLayout, options: options,
+        excludingRuns: options.includeOCRText ? [] : ocrRunIndices(pageID: rightPageID, in: right.graph))
       changes.append(
         contentsOf: textChanges(
           left: leftLines, right: rightLines, leftPageIndex: leftIndex,
@@ -464,10 +470,20 @@ public enum PDFComparison {
     let bounds: [Double]
   }
 
-  static func lineTexts(_ layout: PageTextLayout, options: PDFComparisonOptions) -> [LineText] {
-    layout.lines.map { range in
-      let text = layout.text(in: range)
-      let bounds = unionBounds(range.compactMap { layout.clusters[$0].bounds })
+  static func ocrRunIndices(pageID: PDFObjectID, in graph: PDFGraph) throws -> Set<Int> {
+    let names = Set(OCRLayer.layerFontNames(in: graph, pageID: pageID))
+    guard !names.isEmpty else { return [] }
+    let runs = try TextRunIndexer.runs(in: PageContent.load(pageID: pageID, in: graph), graph: graph)
+    return Set(runs.indices.filter { names.contains(runs[$0].fontResource) })
+  }
+
+  static func lineTexts(_ layout: PageTextLayout, options: PDFComparisonOptions,
+    excludingRuns: Set<Int> = []) -> [LineText] {
+    layout.lines.compactMap { range in
+      let indices = range.filter { !excludingRuns.contains(layout.clusters[$0].runIndex) }
+      guard !indices.isEmpty else { return nil }
+      let text = indices.map { layout.clusters[$0].text }.joined()
+      let bounds = unionBounds(indices.map { layout.clusters[$0].bounds })
       return LineText(
         text: options.ignoreWhitespace ? normalize(text, collapse: true) : text, bounds: bounds)
     }

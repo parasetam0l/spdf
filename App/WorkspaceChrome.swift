@@ -107,6 +107,7 @@ struct WorkspaceTextInspector: View {
                     }
                     Spacer()
                   }
+                  .disabled(viewer.isEditingPageText && !viewer.canChangePageTextTraits)
                   if viewer.isEditingPageText {
                     Text(viewer.pageTextSelectionScope).font(.caption).foregroundStyle(.secondary)
                   }
@@ -239,7 +240,9 @@ struct WorkspaceTextInspector: View {
       Button("Courier") { apply(.family(.courier)) }
     } label: {
       HStack {
-        Text(viewer.pageTextMixedFormatting.contains("family") ? "Mixed fonts" : face.family.rawValue.capitalized)
+        Text(viewer.pageTextMixedFormatting.contains("family") ? "Mixed fonts"
+          : StandardTextFont(rawValue: viewer.pageTextStyle.fontFamily) == nil
+            ? viewer.pageTextStyle.fontFamily : face.family.rawValue.capitalized)
         Spacer()
       }
       .font(.system(size: 12)).frame(maxWidth: .infinity)

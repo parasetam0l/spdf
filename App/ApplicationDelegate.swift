@@ -20,6 +20,19 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
       return
     }
     #if DEBUG
+      if let index = CommandLine.arguments.firstIndex(of: "--survey-imported-paragraphs"),
+        CommandLine.arguments.count > index + 2 {
+        ImportedParagraphSmoke.survey(directory: URL(fileURLWithPath: CommandLine.arguments[index + 1]),
+          output: URL(fileURLWithPath: CommandLine.arguments[index + 2]))
+        return
+      }
+      if let index = CommandLine.arguments.firstIndex(of: "--test-imported-paragraphs"),
+        CommandLine.arguments.count > index + 2 {
+        let fixtures = URL(fileURLWithPath: CommandLine.arguments[index + 1], isDirectory: true)
+        let output = URL(fileURLWithPath: CommandLine.arguments[index + 2], isDirectory: true)
+        Task { await ImportedParagraphSmoke.run(fixtures: fixtures, output: output) }
+        return
+      }
       if let index = CommandLine.arguments.firstIndex(of: "--test-workspace"),
         CommandLine.arguments.count > index + 1
       {
@@ -142,6 +155,8 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
         || CommandLine.arguments.contains("--test-termination-ui")
         || CommandLine.arguments.contains("--test-relaunch")
         || CommandLine.arguments.contains("--test-workspace")
+        || CommandLine.arguments.contains("--test-imported-paragraphs")
+        || CommandLine.arguments.contains("--survey-imported-paragraphs")
       {
         sender.reply(toOpenOrPrint: .success)
         return
