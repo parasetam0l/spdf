@@ -22,8 +22,10 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
     #if DEBUG
       if let index = CommandLine.arguments.firstIndex(of: "--test-corpus-paragraphs"),
         CommandLine.arguments.count > index + 2 {
+        let matchIndex = CommandLine.arguments.firstIndex(of: "--text-prefix")
+        let matching = matchIndex.flatMap { CommandLine.arguments.indices.contains($0 + 1) ? CommandLine.arguments[$0 + 1] : nil }
         Task { await CorpusParagraphSmoke.run(source: URL(fileURLWithPath: CommandLine.arguments[index + 1]),
-          output: URL(fileURLWithPath: CommandLine.arguments[index + 2])) }
+          output: URL(fileURLWithPath: CommandLine.arguments[index + 2]), matching: matching) }
         return
       }
       if let index = CommandLine.arguments.firstIndex(of: "--survey-imported-paragraphs"),

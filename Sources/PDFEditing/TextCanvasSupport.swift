@@ -12,6 +12,61 @@ public struct PageTextBlock: Sendable, Equatable {
 }
 
 public enum PageTextEditing {
+  public struct ListMarker: Sendable, Equatable {
+    public let runIndex: Int
+    public let x: Double
+    public let baseline: Double
+    public let fontSize: Double
+    public let isStandalone: Bool
+  }
+
+  /// List markers remain useful boundaries even when their symbol font is
+  /// outside the writable profile. Discover them without rewriting the glyph.
+  public static func listMarkers(pageID: PDFObjectID, in graph: PDFGraph) throws -> [ListMarker] {
+    let content = try PageContent.load(pageID: pageID, in: graph)
+    let runs = try TextRunIndexer.runs(in: content, graph: graph)
+    guard case .dictionary(let page)? = graph.objects[pageID] else { return [] }
+    let bulletSymbols = Set(["•", "◦", "▪", "‣", "⁃", "∙", "●", "○", "➢", "➤", "►", "▶"])
+    let symbolFamilies = Set(["wingdings", "wingdings2", "wingdings3", "webdings", "zapfdingbats"])
+    var names: [PDFName: String] = [:]
+    var result: [ListMarker] = []
+    for (index, run) in runs.enumerated() {
+      let text = run.text.trimmingCharacters(in: .whitespacesAndNewlines)
+      let token = String(text.prefix { !$0.isWhitespace })
+      guard !token.isEmpty else { continue }
+      var isMarker = bulletSymbols.contains(token)
+      if !isMarker, token.count >= 2, token.count <= 8, let end = token.last,
+        end == "." || end == ")" {
+        let label = token.dropLast()
+        let digits = label.count <= 3 && label.allSatisfy { $0.isASCII && $0.isNumber }
+        let letter = label.count == 1 && label.allSatisfy { $0.isASCII && $0.isLetter }
+        let roman = String(label).range(of: "^M{0,3}(CM|CD|D?C{0,3})(XC|XL|L?X{0,3})(IX|IV|V?I{0,3})$",
+          options: [.regularExpression, .caseInsensitive]) != nil
+        isMarker = digits || letter || roman
+      }
+      if !isMarker, text.unicodeScalars.count == 1, let scalar = text.unicodeScalars.first,
+        (0xE000...0xF8FF).contains(scalar.value) {
+        if names[run.fontResource] == nil {
+          names[run.fontResource] = IndexedTextFont.resolve(resource: run.fontResource, page: page, in: graph)?
+            .baseFont.split(separator: "+").last.map { String($0).lowercased() } ?? ""
+        }
+        isMarker = symbolFamilies.contains(names[run.fontResource] ?? "")
+      }
+      guard isMarker, run.hasKnownOffset, abs(run.rise) < 1e-6,
+        TextCanvasSupport.renderingMode(at: run.instructionIndex, in: content) == 0 else { continue }
+      let transform = TextCanvasSupport.concatenate(run.ctm, run.matrix)
+      let size = run.fontSize * transform[0]
+      let x = transform[4] + run.textSpaceOffset * transform[0]
+      guard transform[0] > 0, abs(transform[0] - transform[3]) < 1e-6,
+        abs(transform[1]) < 1e-6, abs(transform[2]) < 1e-6,
+        [x, transform[5], size].allSatisfy(\.isFinite), (2...144).contains(size) else { continue }
+      result.append(.init(runIndex: index, x: x, baseline: transform[5], fontSize: size,
+        isStandalone: token == text))
+      guard result.count <= 4_096 else { throw PDFError(.limitExceeded, "Too many list markers for paragraph discovery") }
+    }
+    return result
+  }
+
   /// Painted horizontal rules separate table rows and sections even when the
   /// words on either side happen to round-trip as a wrapped paragraph.
   public static func paragraphSeparators(pageID: PDFObjectID, in graph: PDFGraph) throws -> [[Double]] {

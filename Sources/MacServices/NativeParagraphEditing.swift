@@ -75,6 +75,7 @@ public enum NativeParagraphEditing {
     let visible = blocks.filter { !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
     guard let validator = try? PageTextRewriteValidator(pageID: pageID, in: graph) else { return visible }
     guard let separators = try? PageTextEditing.paragraphSeparators(pageID: pageID, in: graph) else { return visible }
+    guard let markers = try? PageTextEditing.listMarkers(pageID: pageID, in: graph) else { return visible }
     let standardRuns = Set((try? StandardTextFont.editableRunIndices(pageID: pageID, in: graph)) ?? [])
     let profiles = (try? PageTextEditing.fontProfiles(pageID: pageID, in: graph)) ?? [:]
     let embedded = fonts(profiles: profiles)
@@ -117,7 +118,7 @@ public enum NativeParagraphEditing {
     }
     let imported = importedTargets(from: blocks.filter { ownedRuns.isDisjoint(with: $0.runIndices) },
       pageID: pageID, graph: graph, profiles: profiles, embedded: embedded, validator: validator,
-      separators: separators)
+      separators: separators, markers: markers)
     owned += imported
     ownedRuns.formUnion(imported.flatMap(\.runIndices))
     let ordered = blocks.filter { ownedRuns.isDisjoint(with: $0.runIndices) }.sorted {
@@ -141,6 +142,8 @@ public enum NativeParagraphEditing {
           abs(block.rect[0] - first.rect[0]) <= 2,
           let previous = members.last?.1
         else { continue }
+        if startsListItem(runIndices: block.runIndices, x: block.rect[0],
+          baseline: block.rect[1] - font.descender, size: style.fontSize, markers: markers) { break }
         let gap = previous.rect[1] - block.rect[1]
         guard !separators.contains(where: { rule in
           let y = (rule[1] + rule[3]) / 2
@@ -242,9 +245,22 @@ public enum NativeParagraphEditing {
     }
   }
 
+  private static func startsListItem(runIndices: [Int], x: Double, baseline: Double, size: Double,
+    markers: [PageTextEditing.ListMarker]) -> Bool {
+    markers.contains { marker in
+      // An inline prefix must belong to this line. A standalone marker can
+      // sit just to its left, on the same baseline and within a bounded indent.
+      if runIndices.contains(marker.runIndex), abs(marker.x - x) <= 0.75 { return true }
+      let gap = x - marker.x
+      return marker.isStandalone && gap > 0.75 && gap <= max(size, marker.fontSize) * 3
+        && abs(marker.baseline - baseline) <= max(0.5, min(size, marker.fontSize) * 0.08)
+    }
+  }
+
   private static func importedTargets(from blocks: [PageTextTarget], pageID: PDFObjectID,
     graph: PDFGraph, profiles: [PDFName: PageTextFontProfile], embedded: [PDFName: NSFont],
-    validator: PageTextRewriteValidator, separators: [[Double]]) -> [PageTextTarget] {
+    validator: PageTextRewriteValidator, separators: [[Double]],
+    markers: [PageTextEditing.ListMarker]) -> [PageTextTarget] {
     struct Span {
       let source: PageTextEditing.SourceRun
       let block: PageTextTarget
@@ -322,6 +338,8 @@ public enum NativeParagraphEditing {
         let gap = members.last!.y - line.y
         if gap < 0.25 { continue }
         let lineSize = line.spans.map { $0.source.format.size }.max() ?? size
+        if startsListItem(runIndices: line.spans.map { $0.source.index }, x: line.x,
+          baseline: line.y, size: lineSize, markers: markers) { break }
         let previous = members.last!.text
         let words = previous.split(whereSeparator: \.isWhitespace).count
         let previousLine = members.last!

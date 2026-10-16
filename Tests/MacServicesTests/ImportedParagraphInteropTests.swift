@@ -610,4 +610,85 @@ struct ImportedParagraphInteropTests {
     #expect(issue("ABC") == nil)
   }
 
+  @Test @MainActor func separateSymbolMarkersKeepWrappedItemsApart() throws {
+    var (graph, pageID) = try fixture(composite: false)
+    guard case .dictionary(var page)? = graph.objects[pageID],
+      case .dictionary(var resources)? = page[PDFName("Resources")],
+      case .dictionary(var fonts)? = resources[PDFName("Font")] else { return }
+    fonts[PDFName("Marker")] = .reference(PDFObjectID(40))
+    resources[PDFName("Font")] = .dictionary(fonts); page[PDFName("Resources")] = .dictionary(resources)
+    graph.objects[pageID] = .dictionary(page)
+    // An unsupported symbol mapping still provides a list boundary. It must
+    // never need to become writable or be substituted to detect that boundary.
+    graph.objects[PDFObjectID(40)] = .dictionary([
+      PDFName("Type"): .name(PDFName("Font")), PDFName("Subtype"): .name(PDFName("TrueType")),
+      PDFName("BaseFont"): .name(PDFName("ABCDEF+Wingdings")), PDFName("FirstChar"): .integer(65),
+      PDFName("LastChar"): .integer(65), PDFName("Widths"): .array([.integer(684)]),
+      PDFName("FontDescriptor"): .reference(PDFObjectID(6)), PDFName("Encoding"): .name(PDFName("WinAnsiEncoding")),
+      PDFName("ToUnicode"): .reference(PDFObjectID(41))])
+    graph.objects[PDFObjectID(41)] = .stream(PDFStream(bytes: Data("""
+      /CIDInit /ProcSet findresource begin 12 dict begin begincmap
+      1 begincodespacerange <00> <FF> endcodespacerange
+      1 beginbfchar <41> <F0D8> endbfchar endcmap end end
+      """.utf8)))
+    graph.objects[PDFObjectID(5)] = .stream(PDFStream(bytes: Data("""
+      BT /Marker 16 Tf 1 0 0 1 20 700 Tm (A) Tj ET
+      BT /F1 16 Tf 1 0 0 1 42 700 Tm (ABC ABC ABC ABC ABC ABC) Tj 0 -22 Td (ABC ABC ABC ABC ABC ABC) Tj ET
+      BT /Marker 16 Tf 3 Tr 1 0 0 1 20 678 Tm (A) Tj 0 Tr ET
+      BT /Marker 16 Tf 1 0 0 1 350 678 Tm (A) Tj ET
+      BT /Marker 16 Tf 1 0 0 1 20 656 Tm (A) Tj ET
+      BT /F1 16 Tf 1 0 0 1 42 656 Tm (ABC ABC ABC ABC ABC ABC) Tj 0 -22 Td (ABC ABC ABC ABC ABC ABC) Tj ET
+      """.utf8)))
+    let found = try targets(graph, pageID: pageID).filter { $0.paragraph != nil }
+    #expect(found.count == 2)
+    #expect(found.allSatisfy { $0.paragraph?.originalText.count == 2 && $0.paragraph?.wraps == true })
+    #expect(Set(found.flatMap(\.runIndices)) == [1,2,6,7])
+    #expect(try PageTextEditing.listMarkers(pageID: pageID, in: graph).count == 3)
+  }
+
+  @Test @MainActor func inlineNumberedItemsDoNotMergeThroughStandardFontFallback() throws {
+    var (graph, pageID) = try fixture(composite: false)
+    guard case .dictionary(var page)? = graph.objects[pageID],
+      case .dictionary(var resources)? = page[PDFName("Resources")],
+      case .dictionary(var fonts)? = resources[PDFName("Font")] else { return }
+    fonts[PDFName("Std")] = .reference(PDFObjectID(60))
+    resources[PDFName("Font")] = .dictionary(fonts); page[PDFName("Resources")] = .dictionary(resources)
+    graph.objects[pageID] = .dictionary(page)
+    graph.objects[PDFObjectID(60)] = .dictionary([PDFName("Type"): .name(PDFName("Font")),
+      PDFName("Subtype"): .name(PDFName("Type1")), PDFName("BaseFont"): .name(PDFName("Helvetica")),
+      PDFName("Encoding"): .name(PDFName("WinAnsiEncoding"))])
+    let font = try #require(NSFont(name: "Helvetica", size: 16))
+    let texts = ["1. This first item has enough words to wrap into more than one line while keeping its own place.",
+      "2. This second item also has enough words to wrap into more than one line in the same column."]
+    var baseline = 700.0, body = ""
+    for text in texts {
+      for line in NativeParagraphEditing.wrappedLines(text, font: font, width: 260) {
+        body += "BT /Std 16 Tf 1 0 0 1 42 \(baseline) Tm (\(line)) Tj ET\n"
+        baseline -= 22
+      }
+    }
+    graph.objects[PDFObjectID(5)] = .stream(PDFStream(bytes: Data(body.utf8)))
+    let found = try targets(graph, pageID: pageID).filter { $0.paragraph != nil }
+    #expect(found.map(\.text) == texts)
+    #expect(found.allSatisfy { $0.paragraph?.wraps == true })
+  }
+
+  @Test func listMarkerPrefixesDistinguishItemsFromDecimalsAndOrdinaryText() throws {
+    var (graph, pageID) = try fixture(composite: false)
+    graph.objects[PDFObjectID(5)] = .stream(PDFStream(bytes: Data()))
+    let tokens = ["• First item", "1. First item", "a) First item", "iv. First item",
+      "3.14 is a decimal", "A regular paragraph", "- literal hyphen", "Item 1. inside prose", "civil. A word, not a list number"]
+    let lines = tokens.enumerated().map { index, text in
+      PageTextLine(text: text, x: 42, baseline: 700 - Double(index) * 22,
+        segments: [.init(text: text, x: 42, format: .init(size: 16))])
+    }
+    graph = try PDFEditingEngine.commit(PDFTransaction([
+      AddPageTextLinesCommand(pageID: pageID, lines: lines,
+        box: .init(x: 42, firstBaseline: 700, width: 500, lineSpacing: 22))
+    ]), to: graph)
+    let markers = try PageTextEditing.listMarkers(pageID: pageID, in: graph)
+    #expect(markers.map(\.runIndex) == [0,1,2,3])
+    #expect(markers.allSatisfy { !$0.isStandalone && $0.x == 42 && $0.fontSize == 16 })
+  }
+
 }

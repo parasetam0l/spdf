@@ -209,6 +209,58 @@
       try PDFWriter.write(clipped).write(to: clippedSource)
       document.close()
       try await CorpusParagraphSmoke.checks(source: clippedSource, output: clippedOutput)
+      // Two adjacent bullet items must select separately while each item's
+      // wrapped continuation remains one object. Keep this in hosted smoke.
+      let listOutput = output.appendingPathComponent("ListItems")
+      try FileManager.default.createDirectory(at: listOutput, withIntermediateDirectories: true)
+      let listParsed = try PDFParser.parse(Data(contentsOf: source))
+      let listPage = listParsed.pageIDs[0]
+      let sourceLines = try PageTextEditing.sourceRuns(pageID: listPage, in: listParsed.graph)
+        .filter { $0.format.sourceFont != nil && $0.baseline >= 656 && $0.baseline <= 700 }
+      guard sourceLines.count == 3 else { throw PDFError(.malformed, "Missing list fixture source lines") }
+      var listGraph = listParsed.graph
+      listGraph.objects[PDFObjectID(5)] = .stream(PDFStream(bytes: Data()))
+      var listLines: [PageTextLine] = []
+      for shift in [0.0, -66.0] {
+        listLines.append(.init(text: "•", x: 18, baseline: 700 + shift,
+          segments: [.init(text: "•", x: 18, format: .init(size: 16))]))
+        listLines += sourceLines.map { run in
+          .init(text: run.text, x: run.x, baseline: run.baseline + shift,
+            segments: [.init(text: run.text, x: run.x, format: run.format)])
+        }
+      }
+      listGraph = try PDFEditingEngine.commit(PDFTransaction([
+        AddPageTextLinesCommand(pageID: listPage, lines: listLines.filter { $0.text != "•" },
+          box: .init(x: 42, firstBaseline: 700, width: 340, lineSpacing: 22)),
+        AddPageTextLinesCommand(pageID: listPage, lines: listLines.filter { $0.text == "•" },
+          box: .init(x: 18, firstBaseline: 700, width: 24, lineSpacing: 66))
+      ]), to: listGraph)
+      // Imported lists have no sPDF authoring hints; discovery must infer the
+      // boundary from the independently painted marker and body geometry.
+      for (id, value) in listGraph.objects {
+        if case .stream(let stream) = value {
+          var dictionary = stream.dictionary
+          for key in ["SPDFTextVersion", "SPDFTextBox", "SPDFTextLines"] { dictionary[PDFName(key)] = nil }
+          listGraph.objects[id] = .stream(PDFStream(dictionary: dictionary, bytes: stream.bytes))
+        }
+      }
+      let listBytes = try PDFWriter.write(listGraph)
+      guard let listReader = PDFDocument(data: listBytes), let listPDFPage = listReader.page(at: 0) else {
+        throw PDFError(.malformed, "Missing list fixture reader")
+      }
+      let listBlocks = try PageTextEditing.blocks(pageID: listPage, in: listGraph).map {
+        PageTextTarget(pageIndex: 0, runIndex: $0.runIndices[0], rect: $0.rect,
+          text: $0.text, style: $0.style, runIndices: $0.runIndices)
+      }
+      let listTargets = NativeParagraphEditing.targets(from: listBlocks, pageID: listPage,
+        graph: listGraph, page: listPDFPage).filter { $0.paragraph?.wraps == true }
+      guard listTargets.count == 2, listTargets.allSatisfy({ $0.paragraph?.originalText.count == 3 }) else {
+        throw PDFError(.malformed, "Adjacent bullet items merged or lost their wrapped continuations")
+      }
+      let listSource = listOutput.appendingPathComponent("source.pdf")
+      try listBytes.write(to: listSource)
+      try await CorpusParagraphSmoke.checks(source: listSource, output: listOutput,
+        matching: "This imported paragraph")
       try JSONSerialization.data(withJSONObject: ["status": "passed", "font": "DejaVuSans",
         "sourceRuns": paragraph.originalText.count, "savedLines": lines.count,
         "savedWidth": expectedBox.width, "nativeText": expectedText,

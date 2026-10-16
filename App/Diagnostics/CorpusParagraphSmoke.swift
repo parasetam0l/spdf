@@ -10,9 +10,9 @@
   /// reports stay outside source; CI uses the distributable fixture suite.
   @MainActor
   enum CorpusParagraphSmoke {
-    static func run(source: URL, output: URL) async {
+    static func run(source: URL, output: URL, matching: String? = nil) async {
       do {
-        try await checks(source: source, output: output)
+        try await checks(source: source, output: output, matching: matching)
         print("sPDF corpus paragraph check passed")
         exit(0)
       } catch {
@@ -21,7 +21,7 @@
       }
     }
 
-    static func checks(source: URL, output: URL) async throws {
+    static func checks(source: URL, output: URL, matching: String? = nil) async throws {
       try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
       let sourceBytes = try Data(contentsOf: source)
       let priorRecovery = SPDFDocument.recoveryDirectoryOverride
@@ -42,7 +42,10 @@
             text: $0.text, style: $0.style, runIndices: $0.runIndices)
         }
         chosen = NativeParagraphEditing.targets(from: blocks, pageID: pageID, graph: graph, page: page)
-          .first { $0.paragraph?.wraps == true && $0.text.count >= 50 && $0.rect[1] > 100 }
+          .first {
+            if let matching { return $0.paragraph != nil && $0.text.hasPrefix(matching) }
+            return $0.paragraph?.wraps == true && $0.text.count >= 50 && $0.rect[1] > 100
+          }
         if chosen != nil { break }
       }
       guard let target = chosen else { throw PDFError(.unsupported, "No representative editable paragraph") }
@@ -100,7 +103,7 @@
           if type == .leftMouseDown { overlay.mouseDown(with: event) } else { overlay.mouseUp(with: event) }
         }
         guard let canvas = find(InlinePageTextCanvas.self, in: content),
-          canvas.sourceTarget?.paragraph?.wraps == true else {
+          canvas.sourceTarget?.paragraph != nil else {
           throw PDFError(.malformed, "The actual workspace did not select the detected paragraph")
         }
         return canvas
@@ -164,6 +167,8 @@
         guard viewer.pageTextFormattingIssue == nil else {
           throw PDFError(.malformed, "Returning text inside its boundary did not clear overflow")
         }
+      }
+      if matching != nil || clippingRect != nil {
         let text = canvas.textView.string as NSString
         let range = text.range(of: word, options: .backwards)
         canvas.textView.setSelectedRange(range)
@@ -216,6 +221,7 @@
         "sourceRuns": selectedRuns, "reopenPositionError": positionError,
         "clippingRect": clippingRect as Any? ?? NSNull(),
         "clippedOverflowBlockedAndRepaired": clippingRect != nil,
+        "matchedTarget": matching != nil,
         "sourceFileUnchanged": true, "fontProgramsAndMappingsUnchanged": true],
         options: [.prettyPrinted, .sortedKeys]).write(to: output.appendingPathComponent("result.json"))
     }
