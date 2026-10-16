@@ -37,6 +37,14 @@ public enum PDFWriter {
     }
 
     let previousStartXRef = try finalStartXRef(in: original.source)
+    var previousSection = try ByteCursor(Array(original.source), offset: previousStartXRef)
+    previousSection.skipTrivia()
+    guard previousSection.matches("xref") else {
+      // Appending a classic table over a stream-based cross-reference chain
+      // is not interoperable with Apple's renderer. Until this writer emits
+      // cross-reference streams, let the session use its verified full rewrite.
+      throw PDFError(.unsupported, "A cross-reference-stream base requires a full rewrite")
+    }
     var output = original.source
     if output.last != 0x0A { output.append(0x0A) }
     let baseLength = output.count

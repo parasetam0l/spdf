@@ -33,6 +33,9 @@ public enum NativeParagraphEditing {
   ) -> [PageTextTarget] {
     var owned: [PageTextTarget] = []
     var ownedRuns = Set<Int>()
+    let visible = blocks.filter { !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+    guard let validator = try? PageTextRewriteValidator(pageID: pageID, in: graph) else { return visible }
+    guard let separators = try? PageTextEditing.paragraphSeparators(pageID: pageID, in: graph) else { return visible }
     let standardRuns = Set((try? StandardTextFont.editableRunIndices(pageID: pageID, in: graph)) ?? [])
     let profiles = (try? PageTextEditing.fontProfiles(pageID: pageID, in: graph)) ?? [:]
     let embedded = fonts(profiles: profiles)
@@ -46,9 +49,9 @@ public enum NativeParagraphEditing {
           family: segment.format.sourceFont == nil ? segment.format.font.rawValue : nil, size: segment.format.size)
       }
       guard authored.fragments.allSatisfy({ nativeFont($0.format, embedded: embedded) != nil }) else { continue }
-      guard (try? RewritePageTextCommand(pageID: pageID, originalText: authored.originalText,
-        lines: [], fontSize: initial.format.size, color: initial.format.color,
-        standardFontAdvances: advances).validate(in: graph)) != nil else { continue }
+      guard (try? validator.validate(originalText: authored.originalText,
+        fontSize: initial.format.size, color: initial.format.color,
+        standardFontAdvances: advances)) != nil else { continue }
       var bottom = authored.box.firstBaseline
       var top = authored.box.firstBaseline
       for line in authored.lines {
@@ -71,7 +74,8 @@ public enum NativeParagraphEditing {
       ownedRuns.formUnion(indices)
     }
     let imported = importedTargets(from: blocks.filter { ownedRuns.isDisjoint(with: $0.runIndices) },
-      pageID: pageID, graph: graph, profiles: profiles, embedded: embedded)
+      pageID: pageID, graph: graph, profiles: profiles, embedded: embedded, validator: validator,
+      separators: separators)
     owned += imported
     ownedRuns.formUnion(imported.flatMap(\.runIndices))
     let ordered = blocks.filter { ownedRuns.isDisjoint(with: $0.runIndices) }.sorted {
@@ -96,6 +100,12 @@ public enum NativeParagraphEditing {
           let previous = members.last?.1
         else { continue }
         let gap = previous.rect[1] - block.rect[1]
+        guard !separators.contains(where: { rule in
+          let y = (rule[1] + rule[3]) / 2
+          return y > block.rect[1] && y < previous.rect[1]
+            && min(rule[0], rule[2]) <= first.rect[0] + 2
+            && max(rule[0], rule[2]) >= min(previous.rect[2], block.rect[2]) - 2
+        }) else { break }
         guard gap >= style.fontSize * 0.95, gap <= style.fontSize * 1.75 else { continue }
         if members.count > 1 {
           let spacing = members[0].1.rect[1] - members[1].1.rect[1]
@@ -107,7 +117,7 @@ public enum NativeParagraphEditing {
         if members.count == 100 { break }
       }
       guard members.count >= 2 else {
-        result.append(editableSingle(first, pageID: pageID, graph: graph, font: font))
+        result.append(editableSingle(first, validator: validator, font: font))
         continue
       }
       let width = (members.map { $0.1.rect[2] }.max() ?? first.rect[2]) - first.rect[0] + 0.75
@@ -117,7 +127,7 @@ public enum NativeParagraphEditing {
       guard width >= 120,
         nativeLines == members.map({ $0.1.text.trimmingCharacters(in: .whitespacesAndNewlines) })
       else {
-        result.append(editableSingle(first, pageID: pageID, graph: graph, font: font))
+        result.append(editableSingle(first, validator: validator, font: font))
         continue
       }
       let original = Dictionary(uniqueKeysWithValues: members.map { ($0.1.runIndex, $0.1.text) })
@@ -128,10 +138,8 @@ public enum NativeParagraphEditing {
           advances[member.runIndex] = value
         }
       }
-      let probe = RewritePageTextCommand(
-        pageID: pageID, originalText: original, lines: [], fontSize: style.fontSize,
-        color: style.fillColor, standardFontAdvances: advances)
-      guard (try? probe.validate(in: graph)) != nil else {
+      guard (try? validator.validate(originalText: original, fontSize: style.fontSize,
+        color: style.fillColor, standardFontAdvances: advances)) != nil else {
         result.append(first)
         continue
       }
@@ -153,7 +161,7 @@ public enum NativeParagraphEditing {
               size: style.fontSize, color: style.fillColor))], wraps: true)))
       consumed.formUnion(members.dropFirst().map(\.0))
     }
-    return result
+    return result.filter { !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
   }
 
   static func nativeFont(_ format: PageTextFormat, embedded: [PDFName: NSFont]) -> NSFont? {
@@ -164,8 +172,28 @@ public enum NativeParagraphEditing {
     return NSFont(name: format.font.rawValue, size: format.size)
   }
 
+  /// TextKit measures hmtx advances; PDF paints with its declared /Widths or
+  /// /W advances. Apply their verified, bounded difference only to the native
+  /// preview. Canonical character spacing stays unchanged for PDF output.
+  static func applySourceAdvances(to text: NSMutableAttributedString, range: NSRange,
+    format: PageTextFormat, font: NSFont, profiles: [PDFName: PageTextFontProfile], scale: Double = 1) {
+    guard let source = format.sourceFont, let profile = profiles[source.resource] else { return }
+    let string = text.string as NSString
+    for index in range.location..<NSMaxRange(range) {
+      let value = string.substring(with: NSRange(location: index, length: 1))
+      guard let mapping = profile.glyphs[value], let code = value.utf16.first else { continue }
+      var character = code, glyph: CGGlyph = 0, advance = CGSize.zero
+      guard CTFontGetGlyphsForCharacters(font, &character, &glyph, 1), glyph != 0 else { continue }
+      _ = CTFontGetAdvancesForGlyphs(font, .horizontal, &glyph, &advance, 1)
+      let correction = mapping.width * format.size * scale / 1_000 - advance.width
+      text.addAttribute(.kern, value: format.characterSpacing * scale + correction,
+        range: NSRange(location: index, length: 1))
+    }
+  }
+
   private static func importedTargets(from blocks: [PageTextTarget], pageID: PDFObjectID,
-    graph: PDFGraph, profiles: [PDFName: PageTextFontProfile], embedded: [PDFName: NSFont]) -> [PageTextTarget] {
+    graph: PDFGraph, profiles: [PDFName: PageTextFontProfile], embedded: [PDFName: NSFont],
+    validator: PageTextRewriteValidator, separators: [[Double]]) -> [PageTextTarget] {
     struct Span {
       let source: PageTextEditing.SourceRun
       let block: PageTextTarget
@@ -198,13 +226,15 @@ public enum NativeParagraphEditing {
           guard CTFontGetGlyphsForCharacters(font, &code, &glyph, 1), glyph != 0 else { valid = false; break }
           var size = CGSize.zero
           _ = CTFontGetAdvancesForGlyphs(font, .horizontal, &glyph, &size, 1)
+          var advance = size.width
           if let reference = piece.format.sourceFont {
             guard let mapping = profiles[reference.resource]?.glyphs[piece.text],
               mapping.id == nil || mapping.id == Int(glyph),
               abs(size.width * 1_000 / piece.format.size - mapping.width) <= 1.1
             else { valid = false; break }
+            advance = mapping.width * piece.format.size / 1_000
           }
-          width += size.width + piece.format.characterSpacing
+          width += advance + piece.format.characterSpacing
         }
         guard valid else { candidate = []; break }
         let x = source.format.sourceFont == nil && source.index == block.runIndices.first ? block.rect[0] : source.x
@@ -223,20 +253,41 @@ public enum NativeParagraphEditing {
       } else { lines.append(Line(spans: [span])) }
     }
     var result: [PageTextTarget] = []
-    var offset = 0
-    while offset < lines.count {
+    var consumed = Set<Int>()
+    for offset in lines.indices where !consumed.contains(offset) {
       let first = lines[offset]
       var members = [first]
-      var next = offset + 1
-      while next < lines.count, members.last!.text.split(whereSeparator: \.isWhitespace).count >= 4 {
+      var indices = [offset]
+      let size = first.spans.map { $0.source.format.size }.max() ?? 12
+      for next in lines.indices.dropFirst(offset + 1) where !consumed.contains(next) {
         let line = lines[next]
-        let size = first.spans.map { $0.source.format.size }.max() ?? 12
+        // Other columns can interleave at every baseline. They are neither
+        // members nor a reason to stop following this column's prose.
+        if abs(line.x - first.x) > 2 {
+          if line.x + line.width < first.x - 2 || line.x > first.x + first.width + 2 { continue }
+          if line.y < members.last!.y - 0.25 { break }
+          continue
+        }
         let gap = members.last!.y - line.y
-        guard abs(line.x - first.x) <= 2, gap >= size * 0.95, gap <= size * 1.75,
+        if gap < 0.25 { continue }
+        let lineSize = line.spans.map { $0.source.format.size }.max() ?? size
+        let previous = members.last!.text
+        let words = previous.split(whereSeparator: \.isWhitespace).count
+        let previousLine = members.last!
+        if separators.contains(where: { rule in
+          let y = (rule[1] + rule[3]) / 2
+          return y > line.y && y < previousLine.y
+            && min(rule[0], rule[2]) <= first.x + 2
+            && max(rule[0], rule[2]) >= min(previousLine.x + previousLine.width, line.x + line.width) - 2
+        }) { break }
+        guard words >= 4 || (words >= 3 && previous.count >= 24),
+          abs(lineSize - size) <= 0.5, gap >= size * 0.95, gap <= size * 1.75,
           members.count == 1 || abs(gap - (first.y - members[1].y)) < 0.5 else { break }
-        members.append(line); next += 1
+        members.append(line); indices.append(next)
+        if members.count == 100 { break }
       }
       func target(_ members: [Line]) -> PageTextTarget? {
+        let first = members[0]
         let all = members.flatMap(\.spans)
         let formats = all.flatMap(\.fragments).map(\.format)
         guard let initial = formats.first,
@@ -249,7 +300,11 @@ public enum NativeParagraphEditing {
             var pieces = span.fragments
             if index + 1 < line.spans.count, let last = pieces.popLast() {
               var format = last.format
-              format.characterSpacing += line.spans[index + 1].x - span.x - span.width
+              let gap = line.spans[index + 1].x - span.x - span.width
+              // Arithmetic noise at a contiguous source boundary must not
+              // create a separate style that disappears when PDF numbers save.
+              if abs(gap) > 1e-6 { format.characterSpacing += gap }
+              if abs(format.characterSpacing) < 1e-6 { format.characterSpacing = 0 }
               pieces.append(.init(text: last.text, format: format))
             }
             parts += pieces
@@ -257,14 +312,14 @@ public enum NativeParagraphEditing {
           while parts.last?.text.allSatisfy(\.isWhitespace) == true { parts.removeLast() }
           while parts.first?.text.allSatisfy(\.isWhitespace) == true { parts.removeFirst() }
           fragments += parts
-          if index + 1 < members.count, let last = parts.last {
+          if index + 1 < members.count, let last = parts.last, !line.text.hasSuffix("-") {
             var format = last.format; format.characterSpacing = 0
             fragments.append(.init(text: " ", format: format))
           }
         }
         let width = max(24, members.map(\.width).max()! + 0.75)
         let spacing = members.count > 1 ? first.y - members[1].y : initial.size * 1.2
-        guard let layout = nativeLayout(fragments, embedded: embedded, width: width, spacing: spacing),
+        guard let layout = nativeLayout(fragments, embedded: embedded, profiles: profiles, width: width, spacing: spacing),
           layout.text == members.map(\.text),
           zip(layout.baselines, members).allSatisfy({ abs($0.0 - (first.y - $0.1.y)) < 0.5 }) else { return nil }
         let original = Dictionary(uniqueKeysWithValues: all.map { ($0.source.index, $0.source.text) })
@@ -273,8 +328,8 @@ public enum NativeParagraphEditing {
           advances[span.source.index] = standardAdvance(span.source.text,
             family: span.source.format.font.rawValue, size: span.source.format.size / span.source.textScale)
         }
-        guard (try? RewritePageTextCommand(pageID: pageID, originalText: original, lines: [],
-          fontSize: initial.size, color: initial.color, standardFontAdvances: advances).validate(in: graph)) != nil
+        guard (try? validator.validate(originalText: original,
+          fontSize: initial.size, color: initial.color, standardFontAdvances: advances)) != nil
         else { return nil }
         return PageTextTarget(pageIndex: all[0].block.pageIndex, runIndex: all[0].source.index,
           rect: [first.x, all.map { $0.block.rect[1] }.min()!, first.x + width,
@@ -284,23 +339,42 @@ public enum NativeParagraphEditing {
             lineSpacing: spacing, firstBaseline: first.y, standardFontAdvances: advances,
             fragments: fragments, wraps: members.count > 1, fontProfiles: profiles))
       }
-      if let grouped = target(members) { result.append(grouped); offset = next }
-      else { if let single = target([first]) { result.append(single) }; offset += 1 }
+      // A short final line may be followed immediately by a new paragraph.
+      // Find the longest prefix that actually reproduces the source wrapping;
+      // never turn the whole column into one box just because its leading fits.
+      var accepted: PageTextTarget?
+      var count = members.count
+      while count >= 2 {
+        if let grouped = target(Array(members.prefix(count))) { accepted = grouped; break }
+        count -= 1
+      }
+      if let accepted {
+        result.append(accepted)
+        consumed.formUnion(indices.prefix(count))
+      } else if let single = target([first]) {
+        result.append(single)
+        consumed.insert(offset)
+      }
     }
     return result
   }
 
   private static func nativeLayout(_ fragments: [PageTextFragment], embedded: [PDFName: NSFont],
-    width: Double, spacing: Double) -> (text: [String], baselines: [Double])? {
+    profiles: [PDFName: PageTextFontProfile], width: Double, spacing: Double) -> (text: [String], baselines: [Double])? {
     let attributed = NSMutableAttributedString(string: "")
     let paragraph = NSMutableParagraphStyle(); paragraph.minimumLineHeight = spacing
+    paragraph.maximumLineHeight = max(spacing, fragments.map { $0.format.size }.max() ?? spacing)
     for fragment in fragments {
       guard let font = nativeFont(fragment.format, embedded: embedded) else { return nil }
+      let start = attributed.length
       attributed.append(NSAttributedString(string: fragment.text, attributes: [
         .font: font, .kern: fragment.format.characterSpacing, .ligature: 0, .paragraphStyle: paragraph]))
+      applySourceAdvances(to: attributed, range: NSRange(location: start, length: (fragment.text as NSString).length),
+        format: fragment.format, font: font, profiles: profiles)
     }
     let storage = NSTextStorage(attributedString: attributed)
     let manager = NSLayoutManager()
+    manager.usesFontLeading = false
     let container = NSTextContainer(containerSize: NSSize(width: width, height: 1_000_000))
     container.lineFragmentPadding = 0; storage.addLayoutManager(manager); manager.addTextContainer(container)
     manager.ensureLayout(for: container)
@@ -315,17 +389,17 @@ public enum NativeParagraphEditing {
     return (text, baselines.map { $0 - first })
   }
 
-  private static func editableSingle(_ target: PageTextTarget, pageID: PDFObjectID,
-    graph: PDFGraph, font: NSFont) -> PageTextTarget {
+  private static func editableSingle(_ target: PageTextTarget, validator: PageTextRewriteValidator,
+    font: NSFont) -> PageTextTarget {
     guard let style = target.style, let family = style.fontFamily,
       let face = StandardTextFont(rawValue: family), target.runIndices.count == 1,
       let advance = standardAdvance(target.text, family: family, size: style.fontSize)
     else { return target }
     let original = [target.runIndex: target.text]
     let advances = [target.runIndex: advance]
-    guard (try? RewritePageTextCommand(pageID: pageID, originalText: original,
-      lines: [], fontSize: style.fontSize, color: style.fillColor,
-      standardFontAdvances: advances).validate(in: graph)) != nil else { return target }
+    guard (try? validator.validate(originalText: original,
+      fontSize: style.fontSize, color: style.fillColor,
+      standardFontAdvances: advances)) != nil else { return target }
     var rect = target.rect
     rect[2] = rect[0] + max(24, rect[2] - rect[0] + 0.75)
     return PageTextTarget(pageIndex: target.pageIndex, runIndex: target.runIndex,

@@ -55,20 +55,11 @@ struct IndexedTextFont {
 
   static func resolve(resource: PDFName, page: [PDFName: PDFValue], in graph: PDFGraph) -> Self? {
     func dictionary(_ value: PDFValue?) -> [PDFName: PDFValue]? {
-      switch value {
-      case .dictionary(let d)?: return d
-      case .reference(let id)?:
-        if case .dictionary(let d)? = graph.objects[id] { return d }
-        return nil
-      default: return nil
-      }
+      guard case .dictionary(let d)? = FontValue.resolve(value, in: graph) else { return nil }
+      return d
     }
     func stream(_ value: PDFValue?) -> Data? {
-      let value = value.flatMap { value -> PDFValue? in
-        if case .reference(let id) = value { return graph.objects[id] }
-        return value
-      }
-      guard case .stream(let stream)? = value else { return nil }
+      guard case .stream(let stream)? = FontValue.resolve(value, in: graph) else { return nil }
       return try? PDFFilters.decoded(stream)
     }
     guard let resources = dictionary(page[PDFName("Resources")]),
@@ -90,37 +81,42 @@ struct IndexedTextFont {
     } else {
       guard let composite = CompositeFont.parse(font, in: graph, objectID: fontID),
         let mapping = composite.identityMappings, !mapping.isEmpty,
-        case .array(let descendants)? = font[PDFName("DescendantFonts")],
+        case .array(let descendants)? = FontValue.resolve(font[PDFName("DescendantFonts")], in: graph),
         let descendant = dictionary(descendants.first),
         descendant[PDFName("Subtype")] == .name(PDFName("CIDFontType2")),
         composite.defaultWidth.isFinite, composite.defaultWidth >= 0
       else { return nil }
       name = composite.baseFont; mappings = mapping; fallback = composite.defaultWidth
       descriptor = dictionary(descendant[PDFName("FontDescriptor")])
-      switch descendant[PDFName("CIDToGIDMap")] {
+      switch FontValue.resolve(descendant[PDFName("CIDToGIDMap")], in: graph) {
       case nil, .name(PDFName("Identity"))?: break
-      case .reference?, .stream?:
+      case .stream?:
         guard let data = stream(descendant[PDFName("CIDToGIDMap")]), data.count <= 131_072,
           data.count.isMultiple(of: 2) else { return nil }
         gids = [UInt8](data)
       default: return nil
       }
-      if case .array(let values)? = descendant[PDFName("W")] {
+      if descendant[PDFName("CIDToGIDMap")] != nil &&
+        FontValue.resolve(descendant[PDFName("CIDToGIDMap")], in: graph) == nil { return nil }
+      if descendant[PDFName("W")] != nil {
+        guard case .array(let values)? = FontValue.resolve(descendant[PDFName("W")], in: graph) else { return nil }
         var cursor = 0
         while cursor < values.count {
-          guard case .integer(let first) = values[cursor], (0...65_535).contains(first),
+          guard case .integer(let first)? = FontValue.resolve(values[cursor], in: graph), (0...65_535).contains(first),
             cursor + 1 < values.count else { return nil }
           cursor += 1
-          if case .array(let entries) = values[cursor] {
+          if case .array(let entries)? = FontValue.resolve(values[cursor], in: graph) {
             guard first + Int64(entries.count) <= 65_536 else { return nil }
             for (offset, value) in entries.enumerated() {
-              guard let width = number(value), width.isFinite, width >= 0 else { return nil }
+              guard let resolved = FontValue.resolve(value, in: graph),
+                let width = number(resolved), width.isFinite, width >= 0 else { return nil }
               widths[Int(first) + offset] = width
             }
             cursor += 1
           } else {
-            guard case .integer(let last) = values[cursor], last >= first, last <= 65_535,
-              cursor + 1 < values.count, let width = number(values[cursor + 1]),
+            guard case .integer(let last)? = FontValue.resolve(values[cursor], in: graph), last >= first, last <= 65_535,
+              cursor + 1 < values.count, let resolved = FontValue.resolve(values[cursor + 1], in: graph),
+              let width = number(resolved),
               width.isFinite, width >= 0 else { return nil }
             for code in Int(first)...Int(last) { widths[code] = width }
             cursor += 2

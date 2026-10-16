@@ -12,6 +12,57 @@ public struct PageTextBlock: Sendable, Equatable {
 }
 
 public enum PageTextEditing {
+  /// Painted horizontal rules separate table rows and sections even when the
+  /// words on either side happen to round-trip as a wrapped paragraph.
+  public static func paragraphSeparators(pageID: PDFObjectID, in graph: PDFGraph) throws -> [[Double]] {
+    let content = try PageContent.load(pageID: pageID, in: graph)
+    var transform = [1.0, 0, 0, 1, 0, 0]
+    var stack: [[Double]] = []
+    var current: [Double]?
+    var start: [Double]?
+    var path: [[Double]] = []
+    var result: [[Double]] = []
+    func point(_ x: Double, _ y: Double) -> [Double] {
+      [transform[0] * x + transform[2] * y + transform[4],
+        transform[1] * x + transform[3] * y + transform[5]]
+    }
+    func line(_ a: [Double], _ b: [Double]) { path.append(a + b) }
+    for instruction in content.instructions {
+      let numbers = instruction.operands.compactMap { operand -> Double? in
+        switch operand.value { case .integer(let n): return Double(n); case .real(let n): return n; default: return nil }
+      }
+      switch instruction.operatorName {
+      case "q": stack.append(transform)
+      case "Q": transform = stack.popLast() ?? transform
+      case "cm": if numbers.count == 6 { transform = TextCanvasSupport.concatenate(transform, numbers) }
+      case "m": if numbers.count == 2 { current = point(numbers[0], numbers[1]); start = current }
+      case "l":
+        if numbers.count == 2, let a = current {
+          let b = point(numbers[0], numbers[1]); line(a, b); current = b
+        }
+      case "re":
+        if numbers.count == 4 {
+          let x = numbers[0], y = numbers[1], w = numbers[2], h = numbers[3]
+          let corners = [point(x, y), point(x + w, y), point(x + w, y + h), point(x, y + h)]
+          for index in 0..<4 { line(corners[index], corners[(index + 1) % 4]) }
+          current = corners[0]; start = current
+        }
+      case "h": if let a = current, let b = start { line(a, b); current = b }
+      case "S", "s", "f", "F", "f*", "B", "B*", "b", "b*":
+        if ["s", "b", "b*"].contains(instruction.operatorName), let a = current, let b = start { line(a, b) }
+        result += path.filter { abs($0[1] - $0[3]) <= 0.75 && abs($0[0] - $0[2]) >= 12 }
+        path.removeAll(keepingCapacity: true); current = nil; start = nil
+      case "n": path.removeAll(keepingCapacity: true); current = nil; start = nil
+      case "c", "v", "y": current = nil
+      default: break
+      }
+      guard path.count <= 16_384, result.count <= 4_096 else {
+        throw PDFError(.limitExceeded, "Too many vector rules for paragraph discovery")
+      }
+    }
+    return result
+  }
+
   public struct SourceRun: Sendable {
     public let index: Int
     public let instruction: Int

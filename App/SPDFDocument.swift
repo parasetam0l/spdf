@@ -1342,7 +1342,13 @@ final class SPDFDocument: NSDocument {
           // Readers omit trailing wrap whitespace from extracted lines. Keep
           // the original operand for rewriting, but match its visible text.
           let needle = block.text.trimmingCharacters(in: .whitespacesAndNewlines)
-          guard !needle.isEmpty else { return nil }
+          // Some producers paint spaces in their own text-show instructions.
+          // Keep them for paragraph reconstruction even though PDFKit offers
+          // no visible selection to match for a whitespace-only operand.
+          if needle.isEmpty {
+            return PageTextTarget(pageIndex: pageIndex, runIndex: block.runIndices[0],
+              rect: block.rect, text: block.text, style: block.style, runIndices: block.runIndices)
+          }
           while remaining.length > 0 {
             let found = string.range(of: needle, range: remaining)
             guard found.location != NSNotFound else { break }

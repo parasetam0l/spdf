@@ -223,16 +223,9 @@ public struct CompositeFont: Sendable {
       break
     }
     var descendant: [PDFName: PDFValue] = [:]
-    if case .array(let fonts)? = dictionary[PDFName("DescendantFonts")],
-      case .reference(let id)? = fonts.first,
-      case .dictionary(let parsed)? = graph.objects[id]
-    {
-      descendant = parsed
-    } else if case .array(let fonts)? = dictionary[PDFName("DescendantFonts")],
-      case .dictionary(let parsed)? = fonts.first
-    {
-      descendant = parsed
-    }
+    if case .array(let fonts)? = FontValue.resolve(dictionary[PDFName("DescendantFonts")], in: graph),
+      let first = fonts.first,
+      case .dictionary(let parsed)? = FontValue.resolve(first, in: graph) { descendant = parsed }
     var cidToGIDIdentity = false
     var hasCIDToGID = false
     if case .name(let map)? = descendant[PDFName("CIDToGIDMap")] {
@@ -242,9 +235,9 @@ public struct CompositeFont: Sendable {
       hasCIDToGID = true
     }
     let defaultWidth: Double
-    if case .integer(let width)? = descendant[PDFName("DW")] {
+    if case .integer(let width)? = FontValue.resolve(descendant[PDFName("DW")], in: graph) {
       defaultWidth = Double(width)
-    } else if case .real(let width)? = descendant[PDFName("DW")] {
+    } else if case .real(let width)? = FontValue.resolve(descendant[PDFName("DW")], in: graph) {
       defaultWidth = width
     } else {
       defaultWidth = 1_000

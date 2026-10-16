@@ -80,7 +80,9 @@ enum TextRunIndexer {
     }
 
     func translate(_ tx: Double, _ ty: Double, _ matrix: Matrix) -> Matrix {
-      [matrix[0], matrix[1], matrix[2], matrix[3], matrix[4] + tx, matrix[5] + ty]
+      [matrix[0], matrix[1], matrix[2], matrix[3],
+        matrix[4] + tx * matrix[0] + ty * matrix[2],
+        matrix[5] + tx * matrix[1] + ty * matrix[3]]
     }
 
     func appendRun(

@@ -144,6 +144,53 @@ struct ImportedParagraphInteropTests {
     }
   }
 
+  @Test @MainActor func indirectFontMetricsAndDescendantsKeepGlyphCoverageAndEditingGeometry() throws {
+    for composite in [false, true] {
+      let (direct, pageID) = try fixture(composite: composite)
+      let expected = try PageTextEditing.fontProfiles(pageID: pageID, in: direct)
+      var graph = direct
+      guard case .dictionary(var font)? = graph.objects[PDFObjectID(4)] else {
+        Issue.record("Missing fixture font"); return
+      }
+      if composite {
+        guard case .dictionary(var descendant)? = graph.objects[PDFObjectID(20)] else {
+          Issue.record("Missing fixture descendant"); return
+        }
+        graph.objects[PDFObjectID(40)] = descendant[PDFName("W")]
+        descendant[PDFName("W")] = .reference(PDFObjectID(40))
+        graph.objects[PDFObjectID(20)] = .dictionary(descendant)
+        graph.objects[PDFObjectID(41)] = font[PDFName("DescendantFonts")]
+        font[PDFName("DescendantFonts")] = .reference(PDFObjectID(41))
+      } else {
+        graph.objects[PDFObjectID(40)] = font[PDFName("Widths")]
+        font[PDFName("Widths")] = .reference(PDFObjectID(40))
+        graph.objects[PDFObjectID(41)] = .dictionary([
+          PDFName("BaseEncoding"): .name(PDFName("WinAnsiEncoding"))])
+        font[PDFName("Encoding")] = .reference(PDFObjectID(41))
+      }
+      graph.objects[PDFObjectID(4)] = .dictionary(font)
+      #expect(try PageTextEditing.fontProfiles(pageID: pageID, in: graph) == expected)
+      #expect(try PageTextEditing.blocks(pageID: pageID, in: graph)
+        == PageTextEditing.blocks(pageID: pageID, in: direct))
+      let paragraph = try #require(targets(graph, pageID: pageID).first?.paragraph)
+      #expect(paragraph.originalText.count == 2)
+      let format = paragraph.fragments[0].format
+      let edited = try PDFEditingEngine.commit(PDFTransaction([
+        RewritePageTextCommand(pageID: pageID, originalText: paragraph.originalText,
+          lines: [.init(text: "CBA ABC", x: 42, baseline: 700,
+            segments: [.init(text: "CBA ABC", x: 42, format: format)])], fontSize: 16,
+          color: [0, 0, 0], box: .init(x: 42, firstBaseline: 700, width: 240, lineSpacing: 22))
+      ]), to: graph)
+      let bytes = try PDFWriter.write(edited)
+      #expect(PDFDocument(data: bytes)?.string?.contains("CBA ABC") == true)
+      #expect(edited.objects[PDFObjectID(7)] == graph.objects[PDFObjectID(7)])
+      #expect(try targets(PDFParser.parse(bytes).graph, pageID: pageID).first?.paragraph != nil)
+      // A broken metric reference must not turn into guessed advances.
+      graph.objects[PDFObjectID(40)] = .reference(PDFObjectID(40))
+      #expect(try PageTextEditing.fontProfiles(pageID: pageID, in: graph).values.allSatisfy { $0.glyphs.isEmpty })
+    }
+  }
+
   @Test @MainActor func importedProseGroupsMixedStylesWithoutAdoptingTheHeadingOrNeighbor() throws {
     let parsed = try PDFParser.parse(PDFFixtures.importedParagraphPages())
     let blocks = try targets(parsed.graph, pageID: parsed.pageIDs[0])
@@ -169,6 +216,175 @@ struct ImportedParagraphInteropTests {
     #expect(formatting.fragments().first?.format.sourceFont == nil)
     #expect(formatting.fragments().dropFirst().contains { $0.format.sourceFont != nil })
     #expect(formatting.apply(.bold(true), isTyping: true) == nil)
+  }
+
+  @Test @MainActor func tightLeadingAndInterleavedColumnsKeepSeparateParagraphs() throws {
+    let parsed = try PDFParser.parse(PDFFixtures.importedParagraphPages())
+    var graph = parsed.graph
+    let pageID = parsed.pageIDs[0]
+    graph.objects[PDFObjectID(5)] = .stream(PDFStream(bytes: Data()))
+    // Discover the existing source profile before removing the fixture text.
+    let profiles = try PageTextEditing.fontProfiles(pageID: pageID, in: parsed.graph)
+    let source = try #require(profiles[PDFName("Body")])
+    let fonts = NativeParagraphEditing.fonts(profiles: profiles)
+    let base = try #require(fonts[source.source.resource])
+    let font = CTFontCreateCopyWithAttributes(base, 10, nil, nil) as NSFont
+    let format = PageTextFormat(size: 10, sourceFont: source.source)
+    let first = "This first paragraph contains enough words to wrap over several lines while keeping its own column and original font."
+    let second = "Another paragraph starts immediately below the short final line."
+    let right = "The separate right column must keep its own text and never become part of the paragraph on the left."
+    let width = 190.0, spacing = 10.98
+    let firstLines = NativeParagraphEditing.wrappedLines(first, font: font, width: width)
+    let secondLines = NativeParagraphEditing.wrappedLines(second, font: font, width: width)
+    let rightLines = NativeParagraphEditing.wrappedLines(right, font: font, width: width)
+    #expect(firstLines.count >= 3)
+    func lines(_ text: [String], x: Double, start: Int = 0) -> [PageTextLine] {
+      text.enumerated().map { index, value in
+        .init(text: value, x: x, baseline: 650 - Double(start + index) * spacing,
+          segments: [.init(text: value, x: x, format: format)])
+      }
+    }
+    for (values, x, start) in [(firstLines, 42.0, 0), (secondLines, 42.0, firstLines.count), (rightLines, 320.0, 0)] {
+      graph = try PDFEditingEngine.commit(PDFTransaction([
+        AddPageTextLinesCommand(pageID: pageID, lines: lines(values, x: x, start: start),
+          box: .init(x: x, firstBaseline: 650 - Double(start) * spacing, width: width, lineSpacing: spacing))
+      ]), to: graph)
+    }
+    for (id, value) in graph.objects {
+      if case .stream(let stream) = value {
+        var dictionary = stream.dictionary
+        for key in ["SPDFAdded", "SPDFTextVersion", "SPDFTextBox", "SPDFTextLines"] { dictionary[PDFName(key)] = nil }
+        graph.objects[id] = .stream(PDFStream(dictionary: dictionary, bytes: stream.bytes))
+      }
+    }
+    let found = try targets(graph, pageID: pageID)
+    let selected = try #require(found.first { $0.text == first })
+    let paragraph = try #require(selected.paragraph)
+    #expect(paragraph.wraps)
+    #expect(abs(paragraph.lineSpacing - spacing) < 0.001)
+    #expect(found.contains { $0.text == second && $0.paragraph?.wraps == true })
+    #expect(found.contains { $0.text == right && $0.paragraph?.wraps == true })
+    let view = NSTextView(frame: .init(x: 0, y: 0, width: selected.rect[2] - selected.rect[0], height: 1_000))
+    let formatting = NativeTextFormatting(view: view, fragments: paragraph.fragments,
+      initial: format, profiles: paragraph.fontProfiles)
+    view.textContainer?.lineFragmentPadding = 0
+    view.textContainer?.widthTracksTextView = false
+    view.textContainer?.containerSize = .init(width: selected.rect[2] - selected.rect[0], height: 10_000)
+    formatting.render(scale: 1, minimumLineSpacing: paragraph.lineSpacing)
+    let manager = try #require(view.layoutManager), container = try #require(view.textContainer)
+    manager.ensureLayout(for: container)
+    var baselines: [Double] = []
+    manager.enumerateLineFragments(forGlyphRange: .init(location: 0, length: manager.numberOfGlyphs)) {
+      rect, _, _, glyphs, _ in baselines.append(rect.minY + manager.location(forGlyphAt: glyphs.location).y)
+    }
+    #expect(baselines.count == firstLines.count)
+    for pair in zip(baselines, baselines.dropFirst()) { #expect(abs(pair.1 - pair.0 - spacing) < 0.001) }
+    #expect(!formatting.hasChanges)
+  }
+
+  @Test @MainActor func opaqueDefaultGraphicsStatesAreEditableButTransparencyAndUnknownStatesRefuse() throws {
+    let (base, pageID) = try fixture(composite: true)
+    let states: [[PDFName: PDFValue]] = [
+      [PDFName("BM"): .name(PDFName("Normal")), PDFName("ca"): .real(1)],
+      [PDFName("ca"): .real(0.5)], [PDFName("Font"): .array([.reference(PDFObjectID(4)), .integer(16)])]
+    ]
+    for state in states {
+      var graph = base
+      guard case .dictionary(var page)? = graph.objects[pageID],
+        case .dictionary(var resources)? = page[PDFName("Resources")],
+        case .stream(let content)? = graph.objects[PDFObjectID(5)] else {
+        Issue.record("Missing fixture resources"); return
+      }
+      resources[PDFName("ExtGState")] = .dictionary([PDFName("GS"): .reference(PDFObjectID(40))])
+      page[PDFName("Resources")] = .dictionary(resources)
+      graph.objects[pageID] = .dictionary(page)
+      graph.objects[PDFObjectID(40)] = .dictionary(state)
+      graph.objects[PDFObjectID(5)] = .stream(PDFStream(bytes: Data("/GS gs\n".utf8) + content.bytes))
+      let hasParagraph = try targets(graph, pageID: pageID).contains { $0.paragraph != nil }
+      #expect(hasParagraph == (state[PDFName("BM")] != nil))
+    }
+  }
+
+  @Test @MainActor func sourceWidthCorrectionsAffectPreviewWithoutChangingCanonicalSpacing() throws {
+    var (graph, pageID) = try fixture(composite: true)
+    let program = try #require(Data(base64Encoded: FontFixtureData.subsetProgramBase64))
+    let info = try TrueTypeInspector.inspect(program)
+    guard case .dictionary(var descendant)? = graph.objects[PDFObjectID(20)] else {
+      Issue.record("Missing descendant"); return
+    }
+    descendant[PDFName("W")] = .array(try [32, 65, 66, 67].flatMap { value -> [PDFValue] in
+      let gid = try #require(info.unicodeToGlyph[value]), advance = try #require(info.advances[gid])
+      return [.integer(Int64(gid)), .array([.real(Double(advance) * 1000 / Double(info.unitsPerEm) + 1)])]
+    })
+    graph.objects[PDFObjectID(20)] = .dictionary(descendant)
+    let paragraph = try #require(targets(graph, pageID: pageID).first?.paragraph)
+    let initial = paragraph.fragments[0].format
+    let view = NSTextView(frame: .init(x: 0, y: 0, width: 600, height: 400))
+    view.textContainer?.lineFragmentPadding = 0
+    let formatting = NativeTextFormatting(view: view, fragments: paragraph.fragments,
+      initial: initial, profiles: paragraph.fontProfiles)
+    formatting.render(scale: 1, minimumLineSpacing: paragraph.lineSpacing)
+    let manager = try #require(view.layoutManager), container = try #require(view.textContainer)
+    manager.ensureLayout(for: container)
+    let profile = try #require(paragraph.fontProfiles[PDFName("F1")])
+    var x = 0.0
+    for index in 0..<12 {
+      let glyph = manager.glyphIndexForCharacter(at: index)
+      #expect(abs(manager.location(forGlyphAt: glyph).x - x) < 0.001)
+      let value = (view.string as NSString).substring(with: .init(location: index, length: 1))
+      x += try #require(profile.glyphs[value]).width * initial.size / 1_000
+    }
+    #expect(!formatting.hasChanges)
+    #expect(formatting.fragments().allSatisfy { $0.format.characterSpacing == 0 })
+  }
+
+  @Test @MainActor func scaledTextMatricesApplyLineTranslationsInTextSpace() throws {
+    var (graph, pageID) = try fixture(composite: true)
+    guard case .dictionary(let page)? = graph.objects[pageID] else { Issue.record("Missing page"); return }
+    let font = try #require(IndexedTextFont.resolve(resource: PDFName("F1"), page: page, in: graph))
+    let codes = try #require(font.encode("ABC ABC ABC ABC ABC ABC"))
+    let operand = "<" + codes.map { String(format: "%02X", $0) }.joined() + ">"
+    graph.objects[PDFObjectID(5)] = .stream(PDFStream(bytes: Data("""
+      BT /F1 1.6 Tf 10 0 0 10 42 700 Tm
+      \(operand) Tj 0 -2.2 TD \(operand) Tj ET
+      """.utf8)))
+    let source = try PageTextEditing.sourceRuns(pageID: pageID, in: graph)
+    #expect(source.count == 2)
+    #expect(abs(source[0].baseline - 700) < 0.001)
+    #expect(abs(source[1].baseline - 678) < 0.001)
+    #expect(source.allSatisfy { abs($0.x - 42) < 0.001 && $0.format.size == 16 })
+    #expect(try targets(graph, pageID: pageID).contains { $0.paragraph?.originalText.count == 2 })
+  }
+
+  @Test @MainActor func paintedRulesSeparateRowsButUnpaintedPathsDoNot() throws {
+    let (base, pageID) = try fixture(composite: true)
+    for painted in [true, false] {
+      var graph = base
+      guard case .stream(let content)? = graph.objects[PDFObjectID(5)] else { Issue.record("Missing content"); return }
+      let rule = "\nq 1 0 0 1 10 20 cm 20 669 m 300 669 l \(painted ? "S" : "n") Q\n"
+      graph.objects[PDFObjectID(5)] = .stream(PDFStream(bytes: content.bytes + Data(rule.utf8)))
+      #expect(try PageTextEditing.paragraphSeparators(pageID: pageID, in: graph).count == (painted ? 1 : 0))
+      #expect(try targets(graph, pageID: pageID).contains { $0.paragraph?.wraps == true } == !painted)
+    }
+  }
+
+  @Test @MainActor func standaloneSpaceOperandsKeepWordBoundariesWithoutSeparateHitTargets() throws {
+    var (graph, pageID) = try fixture(composite: true)
+    guard case .dictionary(let page)? = graph.objects[pageID] else { Issue.record("Missing page"); return }
+    let font = try #require(IndexedTextFont.resolve(resource: PDFName("F1"), page: page, in: graph))
+    func show(_ value: String) throws -> String {
+      let codes = try #require(font.encode(value))
+      return "<" + codes.map { String(format: "%02X", $0) }.joined() + "> Tj"
+    }
+    let line = try (0..<6).map { _ in try show("ABC") + " " + show(" ") }.joined(separator: " ")
+    graph.objects[PDFObjectID(5)] = .stream(PDFStream(bytes: Data("""
+      BT /F1 16 Tf 1 0 0 1 42 700 Tm \(line) 0 -22 Td \(line) ET
+      """.utf8)))
+    let found = try targets(graph, pageID: pageID)
+    let target = try #require(found.first { $0.paragraph?.wraps == true })
+    #expect(target.text == Array(repeating: "ABC", count: 12).joined(separator: " "))
+    #expect(target.paragraph?.originalText.count == 24)
+    #expect(found.allSatisfy { !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty })
   }
 
   @Test @MainActor func sourceGlyphMismatchAndUnknownEncodingDoNotBecomeEditableParagraphs() throws {

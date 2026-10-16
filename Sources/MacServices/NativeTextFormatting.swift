@@ -211,6 +211,7 @@ public final class NativeTextFormatting {
 
   public func render(scale: Double, minimumLineSpacing: Double) {
     guard let view, let storage = view.textStorage else { return }
+    view.layoutManager?.usesFontLeading = false
     self.scale = scale
     let typing = Self.format(view.typingAttributes, fallback: fallback)
     var pieces: [(NSRange, PageTextFormat)] = []
@@ -220,10 +221,17 @@ public final class NativeTextFormatting {
     }
     let paragraph = NSMutableParagraphStyle()
     paragraph.minimumLineHeight = minimumLineSpacing * scale
+    // Imported PDFs often use leading below the font's platform default.
+    // Preserve that baseline grid, allowing explicit larger type to grow it.
+    paragraph.maximumLineHeight = max(minimumLineSpacing, pieces.map { $0.1.size }.max() ?? typing.size) * scale
     paragraph.lineBreakMode = .byWordWrapping
     storage.beginEditing()
     for (range, format) in pieces {
       storage.addAttributes(attributes(format, scale: scale), range: range)
+      if let font = storage.attribute(.font, at: range.location, effectiveRange: nil) as? NSFont {
+        NativeParagraphEditing.applySourceAdvances(to: storage, range: range, format: format,
+          font: font, profiles: profiles, scale: scale)
+      }
     }
     storage.addAttribute(
       .paragraphStyle, value: paragraph, range: NSRange(location: 0, length: storage.length))

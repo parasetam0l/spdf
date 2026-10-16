@@ -1,6 +1,21 @@
 import Foundation
 import PDFCore
 
+/// Font dictionaries commonly store metrics and encoding arrays indirectly.
+/// Resolve the object before interpreting its type, with a bound for malformed
+/// reference chains. Missing objects and cycles are never usable font facts.
+enum FontValue {
+  static func resolve(_ value: PDFValue?, in graph: PDFGraph) -> PDFValue? {
+    var value = value
+    var visited = Set<PDFObjectID>()
+    while case .reference(let id)? = value {
+      guard visited.count < 32, visited.insert(id).inserted else { return nil }
+      value = graph.objects[id]
+    }
+    return value
+  }
+}
+
 /// A subset of the Adobe Glyph List sufficient for the first edit profile:
 /// Latin letters, digits, common punctuation, and frequently seen Symbols.
 enum GlyphNames {
@@ -220,8 +235,8 @@ struct SimpleFont: Equatable {
   static func resolve(
     resource: PDFName, page: [PDFName: PDFValue], in graph: PDFGraph
   ) -> SimpleFont? {
-    guard case .dictionary(let resources)? = page[PDFName("Resources")],
-      case .dictionary(let fonts)? = resources[PDFName("Font")],
+    guard case .dictionary(let resources)? = FontValue.resolve(page[PDFName("Resources")], in: graph),
+      case .dictionary(let fonts)? = FontValue.resolve(resources[PDFName("Font")], in: graph),
       let entry = fonts[resource]
     else { return nil }
     let fontID: PDFObjectID
@@ -258,16 +273,18 @@ struct SimpleFont: Equatable {
     var differences: [UInt8: String] = [:]
     var differenceNames: [UInt8: String] = [:]
     var unknownDifferences = false
-    switch dictionary[PDFName("Encoding")] {
+    let encoding = FontValue.resolve(dictionary[PDFName("Encoding")], in: graph)
+    if dictionary[PDFName("Encoding")] != nil && encoding == nil { return nil }
+    switch encoding {
     case nil:
       baseEncoding = .standardASCII
     case .name(let name)?:
       baseEncoding = Self.encoding(named: name)
     case .dictionary(let encoding)?:
-      if case .name(let name)? = encoding[PDFName("BaseEncoding")] {
+      if case .name(let name)? = FontValue.resolve(encoding[PDFName("BaseEncoding")], in: graph) {
         baseEncoding = Self.encoding(named: name)
       }
-      if case .array(let values)? = encoding[PDFName("Differences")] {
+      if case .array(let values)? = FontValue.resolve(encoding[PDFName("Differences")], in: graph) {
         var current: Int?
         for value in values {
           switch value {
@@ -296,16 +313,16 @@ struct SimpleFont: Equatable {
     // codes outside the covered range.
     var firstChar: Int?
     var widths: [Double]?
-    if case .integer(let rawFirst)? = dictionary[PDFName("FirstChar")],
+    if case .integer(let rawFirst)? = FontValue.resolve(dictionary[PDFName("FirstChar")], in: graph),
       let parsedFirst = Int(exactly: rawFirst),
-      case .array(let rawWidths)? = dictionary[PDFName("Widths")]
+      case .array(let rawWidths)? = FontValue.resolve(dictionary[PDFName("Widths")], in: graph)
     {
       var parsedWidths: [Double] = []
       var invalid = false
       for raw in rawWidths {
-        switch raw {
-        case .integer(let value): parsedWidths.append(Double(value))
-        case .real(let value): parsedWidths.append(value)
+        switch FontValue.resolve(raw, in: graph) {
+        case .integer(let value)?: parsedWidths.append(Double(value))
+        case .real(let value)?: parsedWidths.append(value)
         default: invalid = true
         }
         if invalid { break }
@@ -316,19 +333,12 @@ struct SimpleFont: Equatable {
       }
     }
     var missingWidth: Double?
-    switch dictionary[PDFName("FontDescriptor")] {
-    case .reference(let descriptorID)?:
-      if case .dictionary(let descriptor)? = graph.objects[descriptorID],
-        case .integer(let raw)? = descriptor[PDFName("MissingWidth")]
-      {
-        missingWidth = Double(raw)
+    if case .dictionary(let descriptor)? = FontValue.resolve(dictionary[PDFName("FontDescriptor")], in: graph) {
+      switch FontValue.resolve(descriptor[PDFName("MissingWidth")], in: graph) {
+      case .integer(let raw)?: missingWidth = Double(raw)
+      case .real(let raw)?: missingWidth = raw
+      default: break
       }
-    case .dictionary(let descriptor)?:
-      if case .integer(let raw)? = descriptor[PDFName("MissingWidth")] {
-        missingWidth = Double(raw)
-      }
-    default:
-      break
     }
     var toUnicode: ToUnicodeCMap?
     switch dictionary[PDFName("ToUnicode")] {

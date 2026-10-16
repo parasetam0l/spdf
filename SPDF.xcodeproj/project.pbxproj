@@ -24,6 +24,7 @@
 		48115D078626EB7A89A4649F /* TerminationSmoke.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC390DF83FDBBCFE61003882 /* TerminationSmoke.swift */; };
 		4CC4DC07BC08B63DA3F8284A /* Sparkle in Frameworks */ = {isa = PBXBuildFile; productRef = D687115BF0FD393F5C9567AE /* Sparkle */; };
 		50D97184C2244397A0F1E6C9 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 0CF10BA4A83CEEEA549975AF /* Assets.xcassets */; };
+		619EDD01A28B2C4268649288 /* CorpusParagraphSmoke.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0B59A32D35572516544B58FF /* CorpusParagraphSmoke.swift */; };
 		61BD6843AD9FDF5F7C46AB91 /* FontsModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1B9476F00AAE31CEBD6331A5 /* FontsModel.swift */; };
 		65D47559CB5193F18C22959A /* SignaturesPanel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3A429645CE62F8A13D248D7E /* SignaturesPanel.swift */; };
 		67EC875EAFB1EC1F449D06CE /* PDFCore in Frameworks */ = {isa = PBXBuildFile; productRef = 5A1B9A364B27DD2150671136 /* PDFCore */; };
@@ -59,6 +60,7 @@
 /* Begin PBXFileReference section */
 		07489EF96ED38AC775027645 /* ApplicationDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ApplicationDelegate.swift; sourceTree = "<group>"; };
 		082FE3345E0E1F44A8342174 /* FormsModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FormsModel.swift; sourceTree = "<group>"; };
+		0B59A32D35572516544B58FF /* CorpusParagraphSmoke.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CorpusParagraphSmoke.swift; sourceTree = "<group>"; };
 		0B96CA009439D7450B698917 /* ActualUpdaterProbe.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ActualUpdaterProbe.swift; sourceTree = "<group>"; };
 		0CF10BA4A83CEEEA549975AF /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		13FCD45EDBDF88A2A15908C5 /* InkOverlay.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InkOverlay.swift; sourceTree = "<group>"; };
@@ -185,6 +187,7 @@
 			children = (
 				A426D276236110E33031673E /* AccessibilityAudit.swift */,
 				0B96CA009439D7450B698917 /* ActualUpdaterProbe.swift */,
+				0B59A32D35572516544B58FF /* CorpusParagraphSmoke.swift */,
 				83C1D98BA1E6E946D35C5A49 /* DiagnosticWatchdog.swift */,
 				C08CF3F98E01E8C697903CEB /* ImportedParagraphSmoke.swift */,
 				F375BD6C79BC3A4A3DE6376E /* RelaunchSmoke.swift */,
@@ -315,6 +318,7 @@
 				D476B0FEEFA9A0A50D0C12C7 /* CommentsPanel.swift in Sources */,
 				2DC129A2BA815F4E141D9C21 /* ComparisonSession.swift in Sources */,
 				0E303B5BA3C6EDCDAB053A4C /* ComparisonWindow.swift in Sources */,
+				619EDD01A28B2C4268649288 /* CorpusParagraphSmoke.swift in Sources */,
 				1EF116DDB52A64F2A65C4FD0 /* DiagnosticWatchdog.swift in Sources */,
 				E9A19C59B22DBD21DC4DBF19 /* DocumentController.swift in Sources */,
 				61BD6843AD9FDF5F7C46AB91 /* FontsModel.swift in Sources */,

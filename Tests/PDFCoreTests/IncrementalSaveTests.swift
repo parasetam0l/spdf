@@ -7,6 +7,22 @@ import Testing
 /// retained base bytes, shadowed deletions, and refusal of ineligible graphs.
 @Suite("Incremental saves")
 struct IncrementalSaveTests {
+  @Test func streamBasedCrossReferencesRequestTheVerifiedRewritePath() throws {
+    let parsed = try PDFParser.parse(PDFFixtures.xrefStreamPages())
+    var updated = parsed.graph
+    guard case .dictionary(var page)? = updated.objects[parsed.pageIDs[0]] else {
+      Issue.record("Page missing"); return
+    }
+    page[PDFName("Rotate")] = .integer(90)
+    updated.objects[parsed.pageIDs[0]] = .dictionary(page)
+    do {
+      _ = try PDFWriter.incrementalUpdate(from: parsed, to: updated)
+      Issue.record("A classic update must not be appended over a cross-reference stream")
+    } catch let error as PDFError {
+      #expect(error.kind == .unsupported)
+    }
+  }
+
   @Test func incrementalAppendRetainsBaseBytesAndResolvesNewRevision() throws {
     let original = try PDFFixtures.onePage()
     let parsed = try PDFParser.parse(original)
