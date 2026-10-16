@@ -1,3 +1,4 @@
+import AppKit
 import CoreGraphics
 import Foundation
 import MacServices
@@ -95,6 +96,40 @@ struct ViewerNavigationTests {
     #expect(session.scale == 0.1)
     session.setZoom(2)
     #expect(session.scale == 2)
+  }
+
+  @Test @MainActor func commandWheelZoomsBothWaysWithoutChangingThePageOrEditor() throws {
+    let session = PDFViewingSession()
+    try session.open(PDFSource(data: PDFFixtures.threePages()))
+    session.go(to: 2)
+    session.setZoom(1)
+    session.isEditingPageText = true
+    session.isTypingPageText = true
+    session.hasPendingPageTextChanges = true
+    func wheel(_ delta: Int32, command: Bool = true, precise: Bool = false) throws -> NSEvent {
+      let cg = try #require(CGEvent(scrollWheelEvent2Source: nil,
+        units: precise ? .pixel : .line, wheelCount: 1, wheel1: delta, wheel2: 0, wheel3: 0))
+      cg.flags = command ? .maskCommand : []
+      return try #require(NSEvent(cgEvent: cg))
+    }
+    #expect(!session.handleCommandScroll(try wheel(3, command: false)))
+    #expect(session.scale == 1)
+    session.view.scrollWheel(with: try wheel(3))
+    #expect(session.scale > 1)
+    session.view.scrollWheel(with: try wheel(-3))
+    #expect(abs(session.scale - 1) < 0.0001)
+    #expect(session.handleCommandScroll(try wheel(20, precise: true)))
+    #expect(session.scale > 1 && session.scale < 1.2)
+    #expect(session.pageNumber == 2)
+    #expect(session.isEditingPageText && session.isTypingPageText && session.hasPendingPageTextChanges)
+    session.setZoom(8)
+    session.view.scrollWheel(with: try wheel(100))
+    #expect(session.scale == 8)
+    session.setZoom(0.1)
+    session.view.scrollWheel(with: try wheel(-100))
+    #expect(session.scale == 0.1)
+    session.closeDocument()
+    #expect(!session.handleCommandScroll(try wheel(3)))
   }
 
   // MARK: - Labels and history (P12-007, P12-009)

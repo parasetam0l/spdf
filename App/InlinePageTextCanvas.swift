@@ -6,6 +6,7 @@ import PDFKit
 
 extension PDFViewingSession {
   func scrollPage(with event: NSEvent) {
+    if handleCommandScroll(event) { return }
     if let scroll = view.documentView?.enclosingScrollView {
       scroll.scrollWheel(with: event)
     } else {

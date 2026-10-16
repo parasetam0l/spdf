@@ -7,9 +7,69 @@
   import PDFKit
   import SwiftUI
 
+  /// Native wheel fixtures retain explicit window-relative coordinates.
+  /// CGEvent alone has no window association without WindowServer dispatch.
+  private final class WorkspaceWheelEvent: NSEvent {
+    let target: NSWindow
+    let number: Int
+    let point: NSPoint
+    let delta: CGFloat
+    let backing: CGEvent
+    let stamp = ProcessInfo.processInfo.systemUptime
+    @MainActor init(window: NSWindow, point: NSPoint, delta: Int32) {
+      target = window; number = window.windowNumber; self.point = point; self.delta = CGFloat(delta)
+      backing = CGEvent(scrollWheelEvent2Source: nil, units: .line,
+        wheelCount: 1, wheel1: delta, wheel2: 0, wheel3: 0)!
+      backing.flags = .maskCommand
+      super.init()
+    }
+    required init?(coder: NSCoder) { return nil }
+    override var type: NSEvent.EventType { .scrollWheel }
+    override var window: NSWindow? { target }
+    override var windowNumber: Int { number }
+    override var locationInWindow: NSPoint { point }
+    override var modifierFlags: NSEvent.ModifierFlags { .command }
+    override var scrollingDeltaY: CGFloat { delta }
+    override var scrollingDeltaX: CGFloat { 0 }
+    override var hasPreciseScrollingDeltas: Bool { false }
+    override var momentumPhase: NSEvent.Phase { [] }
+    override var phase: NSEvent.Phase { [] }
+    override var cgEvent: CGEvent? { backing }
+    override var timestamp: TimeInterval { stamp }
+  }
+
   /// Regressions for blank authoring, AppKit sizing and retained window closure.
   @MainActor
   enum WorkspaceSmoke {
+    private static func checkCommandScroll(_ viewer: PDFViewingSession, window: NSWindow) async throws {
+      let originalScale = viewer.view.scaleFactor
+      let originalPage = viewer.pageNumber
+      let wasTyping = viewer.isTypingPageText
+      let wasPending = viewer.hasPendingPageTextChanges
+      defer { viewer.setZoom(Double(originalScale)) }
+      viewer.setZoom(2)
+      try await Task.sleep(for: .milliseconds(50))
+      let pointer = NSPoint(x: viewer.view.visibleRect.midX, y: viewer.view.visibleRect.midY)
+      let windowPoint = viewer.view.convert(pointer, to: nil)
+      guard let page = viewer.view.page(for: pointer, nearest: true) else {
+        throw PDFError(.malformed, "Command-scroll fixture has no visible page")
+      }
+      let anchor = viewer.view.convert(pointer, to: page)
+      viewer.view.scrollWheel(with: WorkspaceWheelEvent(window: window, point: windowPoint, delta: 3))
+      try await Task.sleep(for: .milliseconds(100))
+      let actualAnchor = viewer.view.convert(pointer, to: page)
+      guard viewer.scale > 2, abs(actualAnchor.x - anchor.x) < 0.75,
+        abs(actualAnchor.y - anchor.y) < 0.75 else {
+        throw PDFError(.malformed, "Command-scroll: scale=\(viewer.scale), anchor delta=\(actualAnchor.x - anchor.x),\(actualAnchor.y - anchor.y)")
+      }
+      viewer.view.scrollWheel(with: WorkspaceWheelEvent(window: window, point: windowPoint, delta: -3))
+      try await Task.sleep(for: .milliseconds(100))
+      guard abs(viewer.scale - 2) < 0.001, viewer.pageNumber == originalPage,
+        viewer.isTypingPageText == wasTyping, viewer.hasPendingPageTextChanges == wasPending else {
+        throw PDFError(.malformed, "Reverse Command-scroll changed the page or pending editor")
+      }
+    }
+
     static func run(output: URL) async {
       do {
         try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
@@ -76,6 +136,7 @@
       window.makeKeyAndOrderFront(nil)
       _ = viewer.activateTool(.textEdit)
       try await Task.sleep(for: .milliseconds(100))
+      try await checkCommandScroll(viewer, window: window)
       func findOverlay(_ view: NSView) -> PageEditOverlayView? {
         if let overlay = view as? PageEditOverlayView { return overlay }
         return view.subviews.lazy.compactMap { findOverlay($0) }.first
@@ -180,6 +241,7 @@
       let replacement = "A longer paragraph is edited directly on the page. Native wrapping follows the width of the text box, and the saved document keeps exactly the line positions shown while typing. Every unrelated line stays in its original place."
       paragraphCanvas.textView.insertText(replacement,
         replacementRange: NSRange(location: 0, length: (paragraphCanvas.textView.string as NSString).length))
+      try await checkCommandScroll(viewer, window: window)
       let wideLines = paragraphCanvas.pageLines().count
       paragraphCanvas.setTextWidth(195)
       guard paragraphCanvas.pageLines().count > wideLines, document.isDocumentEdited else {
@@ -483,6 +545,7 @@
           "longer native text, width reflow, move, exact saved lines, atomic Undo/Redo, reselection",
         "characterFormatting":
           "selected words, family/bold/italic/size/color, native shortcuts, formatting and document Undo/Redo, saved exact width and blank paragraph",
+        "commandScrollZoom": "native wheel events, both directions, pointer anchor and pending typing preserved",
         "status": "passed", "blankAuthoring": "created, real text, saved, undo/redo",
         "sidebarModes": SidebarMode.allCases.map(\.rawValue),
         "windowSizing":

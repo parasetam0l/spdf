@@ -6,6 +6,8 @@ Choose **New PDF** in the Welcome window or File menu (Command-N) to create an u
 
 Open a PDF with File → Open or Finder. Use the View menu for fit-page, fit-width, actual size and page navigation. Locked documents remain restricted until you use Tools → Security → Unlock Document. Sidebar panels share the resizable document workspace; switching panels preserves the window size.
 
+Hold Command and scroll up over the document to zoom in, or scroll down to zoom out. Zoom follows the page point under the pointer and also works while editing text. Scroll without Command to move through the document normally.
+
 Use Command-F to open Find. Enter a phrase and press Return to search, then use Previous Match or Next Match to move through the results. Editing the phrase shows “Return to search” until you submit the new query.
 
 ## Edit text and images

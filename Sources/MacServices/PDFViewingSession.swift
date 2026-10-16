@@ -616,6 +616,40 @@ public final class PDFViewingSession: NSObject, ObservableObject, PDFViewDelegat
     view.autoScales = false
     preservingPageLocation { view.zoomOut(nil) }
   }
+
+  /// Command-wheel zoom stays anchored to the page point under the pointer.
+  /// Other wheel events retain normal scrolling, including in text editors.
+  @discardableResult
+  public func handleCommandScroll(_ event: NSEvent) -> Bool {
+    guard event.type == .scrollWheel, event.modifierFlags.contains(.command),
+      view.document != nil, !isLocked else { return false }
+    // Inertial events must not keep zooming after the gesture ends.
+    guard event.momentumPhase.isEmpty else { return true }
+    let delta = event.scrollingDeltaY
+    guard delta.isFinite, delta != 0 else { return true }
+    let pointer = view.convert(event.locationInWindow, from: nil)
+    let page = view.page(for: pointer, nearest: true) ?? view.currentPage
+    let anchor = page.map { view.convert(pointer, to: $0) }
+    let speed = event.hasPreciseScrollingDeltas ? 0.003 : 0.1
+    let factor = exp(min(0.4, max(-0.4, Double(delta) * speed)))
+    view.autoScales = false
+    view.scaleFactor = CGFloat(min(Self.maxZoom, max(Self.minZoom, Double(view.scaleFactor) * factor)))
+    view.layoutSubtreeIfNeeded()
+    if let page, let anchor, let documentView = view.documentView,
+      let scroll = documentView.enclosingScrollView {
+      let mapped = view.convert(anchor, from: page)
+      let clip = scroll.contentView
+      let desired = clip.convert(pointer, from: view)
+      let actual = clip.convert(mapped, from: view)
+      var bounds = clip.bounds
+      bounds.origin.x += actual.x - desired.x
+      bounds.origin.y += actual.y - desired.y
+      clip.scroll(to: clip.constrainBoundsRect(bounds).origin)
+      scroll.reflectScrolledClipView(clip)
+    }
+    refresh()
+    return true
+  }
   public func actualSize() {
     view.autoScales = false
     preservingPageLocation { view.scaleFactor = 1 }
@@ -827,6 +861,30 @@ public final class PDFViewingSession: NSObject, ObservableObject, PDFViewDelegat
 @MainActor
 private final class ReadOnlyPDFView: PDFView {
   weak var session: PDFViewingSession?
+  private var commandScrollMonitor: AnyCancellable?
+
+  override func viewDidMoveToWindow() {
+    super.viewDidMoveToWindow()
+    commandScrollMonitor = nil
+    guard window != nil else { return }
+    // PDFKit's internal scroll view consumes wheels before PDFView receives
+    // them. Intercept only this window's visible document canvas, so sidebars
+    // and property controls keep their own scrolling behavior.
+    if let token = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel, handler: { [weak self] event in
+      let consumed = MainActor.assumeIsolated {
+        guard let self, let window = self.window, event.window === window,
+          self.visibleRect.contains(self.convert(event.locationInWindow, from: nil)) else { return false }
+        return self.session?.handleCommandScroll(event) == true
+      }
+      return consumed ? nil : event
+    }) {
+      commandScrollMonitor = AnyCancellable { NSEvent.removeMonitor(token) }
+    }
+  }
+
+  override func scrollWheel(with event: NSEvent) {
+    if session?.handleCommandScroll(event) != true { super.scrollWheel(with: event) }
+  }
 
   override func perform(_ action: PDFAction) {
     // No Launch, JavaScript, remote-GoTo, URL, or document-driven print actions.
