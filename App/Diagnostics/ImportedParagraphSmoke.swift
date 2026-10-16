@@ -194,6 +194,21 @@
         try document.editSession.bytesForSave() == edited else {
         throw PDFError(.malformed, "Selecting a different saved style created a false document edit")
       }
+      // Keep the clipping/overflow path in the distributable native smoke,
+      // independent of the owner's private real-document corpus.
+      let clippedOutput = output.appendingPathComponent("Clipped")
+      try FileManager.default.createDirectory(at: clippedOutput, withIntermediateDirectories: true)
+      var clipped = try PDFParser.parse(Data(contentsOf: source)).graph
+      guard case .stream(let content)? = clipped.objects[PDFObjectID(5)] else {
+        throw PDFError(.malformed, "Missing imported fixture stream")
+      }
+      let decoded = try PDFFilters.decoded(content)
+      clipped.objects[PDFObjectID(5)] = .stream(PDFStream(bytes:
+        Data("q 30 40 540 730 re W* n\n".utf8) + decoded + Data("\nQ".utf8)))
+      let clippedSource = clippedOutput.appendingPathComponent("source.pdf")
+      try PDFWriter.write(clipped).write(to: clippedSource)
+      document.close()
+      try await CorpusParagraphSmoke.checks(source: clippedSource, output: clippedOutput)
       try JSONSerialization.data(withJSONObject: ["status": "passed", "font": "DejaVuSans",
         "sourceRuns": paragraph.originalText.count, "savedLines": lines.count,
         "savedWidth": expectedBox.width, "nativeText": expectedText,

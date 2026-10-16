@@ -210,6 +210,8 @@ final class InlinePageTextCanvas: NSView, NSTextViewDelegate {
   private var dragBase: (Double, Double)?
   private(set) var isDragging = false
   private var isFinishing = false
+  private var clippingLayoutIssue: String?
+  private lazy var clippingFonts = NativeParagraphEditing.fonts(profiles: sourceTarget?.paragraph?.fontProfiles ?? [:])
   private var isTyping = false
   private var bodyDragStart = NSPoint.zero
   private var isLayingOut = false
@@ -327,6 +329,7 @@ final class InlinePageTextCanvas: NSView, NSTextViewDelegate {
     viewer.pageTextFormattingApplier = formatting == nil ? nil : { [weak self] change in
       guard let self else { return }
       self.viewer?.pageTextFormattingIssue = self.formatting?.apply(change, isTyping: self.isTyping)
+      self.updateClippingIssue()
     }
     viewer.isEditingPageText = true
     viewer.isTypingPageText = isTyping
@@ -653,6 +656,7 @@ final class InlinePageTextCanvas: NSView, NSTextViewDelegate {
       || !(italic ? selection.format.font.isItalic : selection.format.font.isBold)
     viewer?.pageTextFormattingIssue = formatting.apply(
       italic ? .italic(enabled) : .bold(enabled), isTyping: isTyping)
+    updateClippingIssue()
   }
 
   private func publishFormattingSelection() {
@@ -665,7 +669,19 @@ final class InlinePageTextCanvas: NSView, NSTextViewDelegate {
     viewer.canChangePageTextTraits = !selection.usesSourceFont
   }
 
+  private func updateClippingIssue() {
+    guard let paragraph = sourceTarget?.paragraph, paragraph.clippingRect != nil else { return }
+    let prior = clippingLayoutIssue
+    clippingLayoutIssue = NativeParagraphEditing.clippingIssue(lines: pageLines(),
+      clippingRect: paragraph.clippingRect, profiles: paragraph.fontProfiles, nativeFonts: clippingFonts)
+    if clippingLayoutIssue != nil || viewer?.pageTextFormattingIssue == prior {
+      viewer?.pageTextFormattingIssue = clippingLayoutIssue
+    }
+    needsDisplay = true
+  }
+
   private func publishPendingChange() {
+    updateClippingIssue()
     let changed =
       (formatting?.hasChanges ?? (textView.string != (sourceTarget?.text ?? "") || style != originalStyle))
       || dx != 0 || dy != 0
@@ -691,6 +707,8 @@ final class InlinePageTextCanvas: NSView, NSTextViewDelegate {
   func commit() -> Bool {
     guard !isFinishing else { return true }
     guard !isDragging, !textView.hasMarkedText(), let viewer else { return false }
+    updateClippingIssue()
+    guard clippingLayoutIssue == nil else { NSSound.beep(); return false }
     isFinishing = true
     swapRenderer(to: originalDocument)
     let accepted: Bool
@@ -754,6 +772,16 @@ final class InlinePageTextCanvas: NSView, NSTextViewDelegate {
   }
 
   override func draw(_ dirtyRect: NSRect) {
+    if let rect = sourceTarget?.paragraph?.clippingRect, let viewer,
+      let page = viewer.view.document?.page(at: pageIndex) {
+      let area = viewer.view.convert(NSRect(x: rect[0], y: rect[1], width: rect[2] - rect[0],
+        height: rect[3] - rect[1]), from: page)
+      let boundary = NSBezierPath(rect: convert(area, from: viewer.view))
+      (clippingLayoutIssue == nil ? NSColor.controlAccentColor : NSColor.systemRed).setStroke()
+      boundary.lineWidth = 1
+      boundary.setLineDash([4, 3], count: 2, phase: 0)
+      boundary.stroke()
+    }
     NSColor.controlAccentColor.withAlphaComponent(0.6).setStroke()
     var box = textView.frame
     if !wrapsText, let container = textView.textContainer, let manager = textView.layoutManager {

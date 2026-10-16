@@ -12,6 +12,8 @@ public struct PageTextParagraph: Sendable, Equatable {
   public let fragments: [PageTextFragment]
   public let wraps: Bool
   public var fontProfiles: [PDFName: PageTextFontProfile] = [:]
+  /// Fixed page-space bounds from the actual PDF clipping operators.
+  public var clippingRect: [Double]? = nil
 }
 
 /// Reconstruct a paragraph only when its source lines round-trip through
@@ -25,6 +27,43 @@ public enum NativeParagraphEditing {
         let graphics = CGFont(provider) else { return nil }
       return CTFontCreateWithGraphicsFont(graphics, 1_000, nil, nil) as NSFont
     }
+  }
+
+  /// Refuse to crop any ink while editing a clipped cell. Use actual glyph
+  /// outlines and PDF advances rather than a font's much larger line box.
+  public static func clippingIssue(lines: [PageTextLine], clippingRect: [Double]?,
+    profiles: [PDFName: PageTextFontProfile], nativeFonts: [PDFName: NSFont]? = nil) -> String? {
+    guard let clip = clippingRect else { return nil }
+    let issue = "Text no longer fits inside its original area. Shorten it, reduce its size, or move it inside the highlighted boundary."
+    guard clip.count == 4, clip.allSatisfy(\.isFinite), clip[2] > clip[0], clip[3] > clip[1] else { return issue }
+    let embedded = nativeFonts ?? fonts(profiles: profiles)
+    for line in lines {
+      guard line.text.isEmpty || !line.segments.isEmpty else { return issue }
+      for segment in line.segments {
+        guard let font = nativeFont(segment.format, embedded: embedded) else { return issue }
+        var x = segment.x
+        for scalar in segment.text.unicodeScalars {
+          guard scalar.value <= 0xFFFF else { return issue }
+          var code = UInt16(scalar.value), glyph: CGGlyph = 0
+          guard CTFontGetGlyphsForCharacters(font, &code, &glyph, 1), glyph != 0 else { return issue }
+          var bounds = CGRect.zero, advance = CGSize.zero
+          _ = CTFontGetBoundingRectsForGlyphs(font, .horizontal, &glyph, &bounds, 1)
+          _ = CTFontGetAdvancesForGlyphs(font, .horizontal, &glyph, &advance, 1)
+          // Empty outlines (spaces) need no clipping margin. A tiny tolerance
+          // covers decimal serialization, not intentionally clipped glyphs.
+          if !bounds.isEmpty, (x + bounds.minX < clip[0] - 0.002
+            || x + bounds.maxX > clip[2] + 0.002
+            || line.baseline + bounds.minY < clip[1] - 0.002
+            || line.baseline + bounds.maxY > clip[3] + 0.002) { return issue }
+          if let source = segment.format.sourceFont {
+            guard let mapping = profiles[source.resource]?.glyphs[String(scalar)] else { return issue }
+            advance.width = mapping.width * segment.format.size / 1_000
+          }
+          x += advance.width + segment.format.characterSpacing
+        }
+      }
+    }
+    return nil
   }
 
   public static func targets(
@@ -52,6 +91,9 @@ public enum NativeParagraphEditing {
       guard (try? validator.validate(originalText: authored.originalText,
         fontSize: initial.format.size, color: initial.format.color,
         standardFontAdvances: advances)) != nil else { continue }
+      let clippingRect: [Double]?
+      do { clippingRect = try validator.clippingRect(for: indices) } catch { continue }
+      guard clippingIssue(lines: authored.lines, clippingRect: clippingRect, profiles: profiles, nativeFonts: embedded) == nil else { continue }
       var bottom = authored.box.firstBaseline
       var top = authored.box.firstBaseline
       for line in authored.lines {
@@ -70,7 +112,7 @@ public enum NativeParagraphEditing {
         paragraph: PageTextParagraph(originalText: authored.originalText,
           lineSpacing: authored.box.lineSpacing, firstBaseline: authored.box.firstBaseline,
           standardFontAdvances: advances, fragments: authored.fragments, wraps: authored.box.wraps,
-          fontProfiles: profiles)))
+          fontProfiles: profiles, clippingRect: clippingRect)))
       ownedRuns.formUnion(indices)
     }
     let imported = importedTargets(from: blocks.filter { ownedRuns.isDisjoint(with: $0.runIndices) },
@@ -143,6 +185,10 @@ public enum NativeParagraphEditing {
         result.append(first)
         continue
       }
+      // Clipped source targets use the glyph-verified imported path above.
+      guard (try? validator.clippingRect(for: original.keys.sorted())) == nil else {
+        result.append(first); continue
+      }
       let rect = [
         first.rect[0], members.map { $0.1.rect[1] }.min()!,
         first.rect[0] + width, first.rect[3],
@@ -161,7 +207,12 @@ public enum NativeParagraphEditing {
               size: style.fontSize, color: style.fillColor))], wraps: true)))
       consumed.formUnion(members.dropFirst().map(\.0))
     }
-    return result.filter { !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+    return result.filter {
+      guard !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return false }
+      // A partially clipped known-font string must not fall back to the
+      // legacy unclipped single-line editor after paragraph targeting refuses.
+      return $0.paragraph != nil || (try? validator.clippingRect(for: $0.runIndices)) == nil
+    }
   }
 
   static func nativeFont(_ format: PageTextFormat, embedded: [PDFName: NSFont]) -> NSFont? {
@@ -331,13 +382,35 @@ public enum NativeParagraphEditing {
         guard (try? validator.validate(originalText: original,
           fontSize: initial.size, color: initial.color, standardFontAdvances: advances)) != nil
         else { return nil }
+        let clippingRect: [Double]?
+        do { clippingRect = try validator.clippingRect(for: original.keys.sorted()) } catch { return nil }
+        // Fully visible source ink is a prerequisite; never expose a source
+        // string that the original document deliberately clipped away.
+        let sourceLines = all.map { span in
+          var x = span.x
+          let segments = span.fragments.map { fragment -> PageTextSegment in
+            defer {
+              let advance: Double
+              if let source = fragment.format.sourceFont,
+                let mapping = profiles[source.resource]?.glyphs[fragment.text] {
+                advance = mapping.width * fragment.format.size / 1_000
+              } else {
+                advance = standardAdvance(fragment.text, family: fragment.format.font.rawValue, size: fragment.format.size) ?? 0
+              }
+              x += advance + fragment.format.characterSpacing
+            }
+            return .init(text: fragment.text, x: x, format: fragment.format)
+          }
+          return PageTextLine(text: span.source.text, x: span.x, baseline: span.source.baseline, segments: segments)
+        }
+        guard clippingIssue(lines: sourceLines, clippingRect: clippingRect, profiles: profiles, nativeFonts: embedded) == nil else { return nil }
         return PageTextTarget(pageIndex: all[0].block.pageIndex, runIndex: all[0].source.index,
           rect: [first.x, all.map { $0.block.rect[1] }.min()!, first.x + width,
             all.map { $0.block.rect[3] }.max()!], text: fragments.map(\.text).joined(),
           style: .init(fontFamily: initial.fontName, fontSize: initial.size, fillColor: initial.color),
           runIndices: all.map { $0.source.index }, paragraph: .init(originalText: original,
             lineSpacing: spacing, firstBaseline: first.y, standardFontAdvances: advances,
-            fragments: fragments, wraps: members.count > 1, fontProfiles: profiles))
+            fragments: fragments, wraps: members.count > 1, fontProfiles: profiles, clippingRect: clippingRect))
       }
       // A short final line may be followed immediately by a new paragraph.
       // Find the longest prefix that actually reproduces the source wrapping;
@@ -400,6 +473,7 @@ public enum NativeParagraphEditing {
     guard (try? validator.validate(originalText: original,
       fontSize: style.fontSize, color: style.fillColor,
       standardFontAdvances: advances)) != nil else { return target }
+    guard (try? validator.clippingRect(for: [target.runIndex])) == nil else { return target }
     var rect = target.rect
     rect[2] = rect[0] + max(24, rect[2] - rect[0] + 0.75)
     return PageTextTarget(pageIndex: target.pageIndex, runIndex: target.runIndex,

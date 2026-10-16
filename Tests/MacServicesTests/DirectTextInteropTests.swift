@@ -70,10 +70,10 @@ struct DirectTextInteropTests {
     #expect(abs(font.pointSize - 18) < 0.1)
   }
 
-  @Test @MainActor func paragraphRewriteRefusesStaleGlyphAndClippingState() throws {
+  @Test @MainActor func paragraphRewriteRefusesStaleGlyphAndUnsupportedClippingState() throws {
     let text = "A complete source paragraph line"
     let (original, pageID) = try graph(content: """
-      q 30 600 400 140 re W n
+      q 30 600 400 140 re 40 610 20 20 re W* n
       BT /SPDFText 16 Tf 42 700 Td (\(text)) Tj ET Q
       """)
     let advance = try #require(NativeParagraphEditing.standardAdvance(text, family: "Helvetica", size: 16))

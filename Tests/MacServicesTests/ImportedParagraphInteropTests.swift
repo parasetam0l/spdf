@@ -513,4 +513,100 @@ struct ImportedParagraphInteropTests {
     #expect(formatting.insertionIssue("D") != nil)
     #expect(graph.objects[PDFObjectID(7)] == .stream(PDFStream(bytes: Data(bytes))))
   }
+  @Test @MainActor func rectangularClipsSurviveNativeDiscoveryRewriteAndReopen() throws {
+    for composite in [false, true] {
+      var (graph, pageID) = try fixture(composite: composite)
+      guard case .stream(let stream)? = graph.objects[PDFObjectID(5)] else { return }
+      // Two nested clips, one under a transformed CTM, have one intersection.
+      let prefix = "q 20 660 360 80 re W n q 2 0 0 2 0 0 cm 20 336 140 21 re W* n 0.5 0 0 0.5 0 0 cm\n"
+      graph.objects[PDFObjectID(5)] = .stream(PDFStream(bytes: Data(prefix.utf8) + stream.bytes + Data("\nQ Q".utf8)))
+      let target = try #require(targets(graph, pageID: pageID).first { $0.paragraph != nil })
+      let paragraph = try #require(target.paragraph)
+      #expect(paragraph.originalText.count == 2)
+      #expect(paragraph.clippingRect == [40, 672, 320, 714])
+      let initial = paragraph.fragments[0].format
+      let lines = [PageTextLine(text: "CBA ABC", x: 42, baseline: 700,
+        segments: [.init(text: "CBA ABC", x: 42, format: initial)])]
+      #expect(NativeParagraphEditing.clippingIssue(lines: lines, clippingRect: paragraph.clippingRect,
+        profiles: paragraph.fontProfiles) == nil)
+      let rewritten = try PDFEditingEngine.commit(PDFTransaction([
+        RewritePageTextCommand(pageID: pageID, originalText: paragraph.originalText,
+          lines: lines, fontSize: 16, color: [0, 0, 0], box: .init(x: 42, firstBaseline: 700,
+            width: 240, lineSpacing: 22))
+      ]), to: graph)
+      let reopened = try targets(PDFParser.parse(PDFWriter.write(rewritten)).graph, pageID: pageID)
+      let again = try #require(reopened.first { $0.text == "CBA ABC" }?.paragraph)
+      #expect(again.clippingRect == paragraph.clippingRect)
+      #expect(rewritten.objects[PDFObjectID(7)] == graph.objects[PDFObjectID(7)])
+      let content = try PageContent.load(pageID: pageID, in: rewritten)
+      #expect(String(decoding: content.bytes, as: UTF8.self).contains("40 672 280 42 re W n"))
+    }
+  }
+
+  @Test @MainActor func clippedSourceInkAndDifferentCellRegionsDoNotBecomeAParagraph() throws {
+    let (base, pageID) = try fixture(composite: false)
+    guard case .stream(let stream)? = base.objects[PDFObjectID(5)] else { return }
+    // The visible source is partial. Never put its hidden full string into
+    // an unclipped native text editor.
+    var partial = base
+    partial.objects[PDFObjectID(5)] = .stream(PDFStream(bytes:
+      Data("q 50 675 15 35 re W n\n".utf8) + stream.bytes + Data("\nQ".utf8)))
+    #expect(try targets(partial, pageID: pageID).isEmpty)
+    var cells = base
+    cells.objects[PDFObjectID(5)] = .stream(PDFStream(bytes: Data("""
+      q 40 690 280 24 re W n BT /F1 16 Tf 1 0 0 1 42 700 Tm (ABC ABC ABC ABC ABC ABC) Tj ET Q
+      q 40 668 280 24 re W n BT /F1 16 Tf 1 0 0 1 42 678 Tm (ABC ABC ABC ABC ABC ABC) Tj ET Q
+      """.utf8)))
+    let validator = try PageTextRewriteValidator(pageID: pageID, in: cells)
+    #expect(throws: PDFError.self) { try validator.clippingRect(for: [0,1]) }
+    #expect(try targets(cells, pageID: pageID).allSatisfy { $0.paragraph?.wraps != true })
+  }
+
+  @Test @MainActor func unsupportedPathsAndTextClippingStayRefusedAfterTextModeReset() throws {
+    let (base, pageID) = try fixture(composite: true)
+    guard case .stream(let stream)? = base.objects[PDFObjectID(5)] else { return }
+    let prefixes = [
+      "q 40 660 m 320 660 l 180 740 l h W n",
+      "q 20 660 360 80 re 30 670 20 20 re W* n", // even-odd hole
+      "q 1 0.2 0 1 0 0 cm 20 660 360 80 re W n", // skewed clip
+      "q BT /F1 16 Tf 4 Tr 1 0 0 1 42 700 Tm <0024> Tj ET 0 Tr",
+      "q BT q /F1 16 Tf 4 Tr 1 0 0 1 42 700 Tm <0024> Tj Q ET 0 Tr",
+      "q 20 660 360 80 re W n 0 0 m 1 1 l W n" // complex intersection
+    ]
+    for prefix in prefixes {
+      var graph = base
+      graph.objects[PDFObjectID(5)] = .stream(PDFStream(bytes: Data((prefix + "\n").utf8)
+        + stream.bytes + Data("\nQ".utf8)))
+      let validator = try PageTextRewriteValidator(pageID: pageID, in: graph)
+      let runs = try TextRunIndexer.runs(in: PageContent.load(pageID: pageID, in: graph), graph: graph)
+      let last = runs.count - 1
+      #expect(throws: PDFError.self) { try validator.clippingRect(for: [last]) }
+    }
+    // q/Q restores clipping state, but does not restore the current path.
+    var graph = base
+    graph.objects[PDFObjectID(5)] = .stream(PDFStream(bytes:
+      Data("q 40 660 280 80 re Q W n\n".utf8) + stream.bytes))
+    let validator = try PageTextRewriteValidator(pageID: pageID, in: graph)
+    #expect(try validator.clippingRect(for: [0,1]) == [40,660,320,740])
+  }
+
+  @Test @MainActor func clippedTextOverflowUsesGlyphInkAndCanBeRepairedWithoutMutation() throws {
+    let (graph, pageID) = try fixture(composite: true)
+    let paragraph = try #require(targets(graph, pageID: pageID).first?.paragraph)
+    let format = paragraph.fragments[0].format
+    let clip = [40.0,690,90,714]
+    func issue(_ value: String, x: Double = 42, y: Double = 700, format: PageTextFormat? = nil) -> String? {
+      NativeParagraphEditing.clippingIssue(lines: [.init(text: value, x: x, baseline: y,
+        segments: [.init(text: value, x: x, format: format ?? paragraph.fragments[0].format)])],
+        clippingRect: clip, profiles: paragraph.fontProfiles)
+    }
+    #expect(issue("ABC") == nil)
+    #expect(issue("ABC ABC ABC") != nil)
+    #expect(issue("ABC", x: 20) != nil)
+    #expect(issue("ABC", y: 684) != nil)
+    var large = format; large.size = 36
+    #expect(issue("ABC", format: large) != nil)
+    #expect(issue("ABC") == nil)
+  }
+
 }

@@ -80,8 +80,12 @@
         viewer.setZoom(1)
         _ = viewer.activateTool(.textEdit)
         try await Task.sleep(for: .milliseconds(100))
-        guard let match = viewer.view.document?.findString(phrase, withOptions: []).first,
-          let overlay = find(PageEditOverlayView.self, in: content) else {
+        guard let match = viewer.view.document?.findString(phrase, withOptions: [])
+          .filter({ $0.pages.contains(page) }).min(by: {
+            let a = $0.bounds(for: page), b = $1.bounds(for: page)
+            return hypot(a.minX - target.rect[0], a.maxY - target.rect[3])
+              < hypot(b.minX - target.rect[0], b.maxY - target.rect[3])
+          }), let overlay = find(PageEditOverlayView.self, in: content) else {
           throw PDFError(.malformed, "Missing corpus pointer target")
         }
         let bounds = match.bounds(for: page)
@@ -138,13 +142,38 @@
       let beforeCharacters = characters(canvas, document: document)
       let selectedRuns = canvas.sourceTarget!.runIndices
       let originalBox = canvas.pageBox()
+      if let clippingRect = target.paragraph?.clippingRect {
+        try JSONSerialization.data(withJSONObject: ["detectedRect": target.rect,
+          "selectedRect": [canvas.sourceRect.minX, canvas.sourceRect.minY, canvas.sourceRect.maxX, canvas.sourceRect.maxY],
+          "clip": clippingRect, "lines": encode(beforeLines)], options: [.prettyPrinted, .sortedKeys])
+          .write(to: output.appendingPathComponent("selection.json"))
+      }
       canvas.beginTyping()
       let word = String(canvas.textView.string.split(whereSeparator: \.isWhitespace).last ?? "")
       guard !word.isEmpty else { throw PDFError(.malformed, "No source-font word for typing") }
-      canvas.textView.setSelectedRange(NSRange(location: (canvas.textView.string as NSString).length, length: 0))
-      canvas.textView.insertText(" " + word, replacementRange: canvas.textView.selectedRange())
-      guard canvas.textView.string.hasSuffix(" " + word) else {
-        throw PDFError(.malformed, "Native corpus typing did not insert the covered glyphs")
+      let clippingRect = target.paragraph?.clippingRect
+      if let clippingRect {
+        // Exercise the real pending editor, including blocked movement and
+        // recovery. No document transaction or partial save may escape it.
+        viewer.pageTextPositionApplier?(canvas.sourceRect.minX, canvas.sourceRect.minY - (clippingRect[3] - clippingRect[1]) - 20)
+        guard viewer.pageTextFormattingIssue != nil, !canvas.commit(),
+          try document.editSession.bytesForSave() == original else {
+          throw PDFError(.malformed, "Clipped text escaped the pending editor or changed the graph")
+        }
+        viewer.pageTextPositionApplier?(canvas.sourceRect.minX, canvas.sourceRect.minY)
+        guard viewer.pageTextFormattingIssue == nil else {
+          throw PDFError(.malformed, "Returning text inside its boundary did not clear overflow")
+        }
+        let text = canvas.textView.string as NSString
+        let range = text.range(of: word, options: .backwards)
+        canvas.textView.setSelectedRange(range)
+        canvas.textView.insertText(String(word.reversed()), replacementRange: range)
+      } else {
+        canvas.textView.setSelectedRange(NSRange(location: (canvas.textView.string as NSString).length, length: 0))
+        canvas.textView.insertText(" " + word, replacementRange: canvas.textView.selectedRange())
+        guard canvas.textView.string.hasSuffix(" " + word) else {
+          throw PDFError(.malformed, "Native corpus typing did not insert the covered glyphs")
+        }
       }
       canvas.setTextWidth(originalBox.width + 6)
       let expectedText = canvas.textView.string, lines = canvas.pageLines(), box = canvas.pageBox()
@@ -185,6 +214,8 @@
         "nativeLines": encode(lines), "savedText": expectedText, "savedWidth": box.width,
         "originalCharacters": beforeCharacters, "nativeCharacters": savedCharacters,
         "sourceRuns": selectedRuns, "reopenPositionError": positionError,
+        "clippingRect": clippingRect as Any? ?? NSNull(),
+        "clippedOverflowBlockedAndRepaired": clippingRect != nil,
         "sourceFileUnchanged": true, "fontProgramsAndMappingsUnchanged": true],
         options: [.prettyPrinted, .sortedKeys]).write(to: output.appendingPathComponent("result.json"))
     }

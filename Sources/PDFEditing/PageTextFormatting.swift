@@ -257,11 +257,20 @@ enum PageTextLineWriter {
 
   static func append(
     _ lines: [PageTextLine], box: PageTextBox?, pageID: PDFObjectID,
-    defaultFont: IndexedTextFont?, defaultSize: Double, defaultColor: [Double], in graph: inout PDFGraph
+    defaultFont: IndexedTextFont?, defaultSize: Double, defaultColor: [Double],
+    clippingRect: [Double]? = nil, in graph: inout PDFGraph
   ) throws {
     try validate(lines, box: box)
     try validateFonts(lines, pageID: pageID, in: graph)
-    var bytes = Array("q\nBT\n0 Tc 0 Tw 100 Tz 0 Ts 0 Tr\n".utf8)
+    var bytes = Array("q\n".utf8)
+    if let rect = clippingRect {
+      guard rect.count == 4, rect.allSatisfy(\.isFinite), rect[2] > rect[0], rect[3] > rect[1] else {
+        throw PDFError(.malformed, "Invalid paragraph clipping region")
+      }
+      bytes += Array(([rect[0], rect[1], rect[2] - rect[0], rect[3] - rect[1]]
+        .map(AnnotationSupport.number).joined(separator: " ") + " re W n\n").utf8)
+    }
+    bytes += Array("BT\n0 Tc 0 Tw 100 Tz 0 Ts 0 Tr\n".utf8)
     var lineRecords: [PDFValue] = []
     for line in lines {
       var count = 0

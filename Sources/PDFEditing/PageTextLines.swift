@@ -37,6 +37,12 @@ public struct PageTextRewriteValidator {
     analysis = try ParagraphRewriteAnalysis(pageID: pageID, graph: graph)
   }
 
+  /// The common, page-space rectangular clip actually active at the selected
+  /// instructions. Different regions cannot become one editable paragraph.
+  public func clippingRect(for runIndices: [Int]) throws -> [Double]? {
+    try analysis.clippingRect(for: runIndices)
+  }
+
   public func validate(originalText: [Int: String], fontSize: Double, color: [Double],
     standardFontAdvances: [Int: Double] = [:]) throws {
     _ = try RewritePageTextCommand(pageID: pageID, originalText: originalText, lines: [],
@@ -52,6 +58,20 @@ fileprivate struct ParagraphRewriteAnalysis {
   let standardIndices: Set<Int>
   let safeInstructions: Set<Int>
   let instructionRuns: [Int: [Int]]
+  let clips: [Int: [Double]]
+
+  func clippingRect(for indices: [Int]) throws -> [Double]? {
+    guard let first = indices.first, runs.indices.contains(first) else {
+      throw PDFError(.malformed, "Missing paragraph text")
+    }
+    let clip = clips[runs[first].instructionIndex]
+    guard indices.allSatisfy({ runs.indices.contains($0)
+      && safeInstructions.contains(runs[$0].instructionIndex)
+      && clips[runs[$0].instructionIndex] == clip }) else {
+      throw PDFError(.unsupported, "Select text within one supported clipping region")
+    }
+    return clip
+  }
 
   init(pageID: PDFObjectID, graph: PDFGraph) throws {
     content = try PageContent.load(pageID: pageID, in: graph)
@@ -78,32 +98,84 @@ fileprivate struct ParagraphRewriteAnalysis {
       Set(content.segments.map(\.objectID)).count == content.segments.count else {
       throw PDFError(.unsupported, "The paragraph page repeats streams or uses unsupported content filters")
     }
-    var stack: [(unsafe: Bool, mode: Int)] = []
+    var stack: [(unsafe: Bool, mode: Int, ctm: [Double], clip: [Double]?)] = []
+    var ctm = [1.0, 0, 0, 1, 0, 0]
+    var clip: [Double]?
+    var clips: [Int: [Double]] = [:]
+    // The current path is not part of q/Q graphics state. Apply W/W* only
+    // when its following path-ending operator executes, as PDF specifies.
+    var hasPath = false
+    var rectangle: [Double]?
+    var pendingClip = false
     var unsafe = false
     var mode = 0
     var inText = false
+    var textClipping = false
     var safe = Set<Int>()
     for (index, instruction) in content.instructions.enumerated() {
+      let numbers = instruction.operands.compactMap { operand -> Double? in
+        switch operand.value { case .integer(let n): return Double(n); case .real(let n): return n; default: return nil }
+      }
       switch instruction.operatorName {
-      case "q": stack.append((unsafe, mode))
+      case "q": stack.append((unsafe, mode, ctm, clip))
       case "Q":
         guard let state = stack.popLast() else { throw PDFError(.unsupported, "Unbalanced page graphics state") }
-        unsafe = state.unsafe; mode = state.mode
+        unsafe = state.unsafe || (inText && textClipping)
+        mode = state.mode; ctm = state.ctm; clip = state.clip
+      case "cm":
+        if numbers.count == 6, numbers.allSatisfy(\.isFinite) {
+          ctm = TextCanvasSupport.concatenate(ctm, numbers)
+        } else { unsafe = true }
+      case "re":
+        let axisAligned = (abs(ctm[1]) < 1e-9 && abs(ctm[2]) < 1e-9)
+          || (abs(ctm[0]) < 1e-9 && abs(ctm[3]) < 1e-9)
+        if !hasPath, !pendingClip, axisAligned, numbers.count == 4,
+          numbers.allSatisfy({ $0.isFinite && abs($0) <= 1_000_000 }) {
+          let x = numbers[0], y = numbers[1], w = numbers[2], h = numbers[3]
+          let points = [(x,y), (x+w,y), (x+w,y+h), (x,y+h)].map { x, y in
+            [ctm[0] * x + ctm[2] * y + ctm[4], ctm[1] * x + ctm[3] * y + ctm[5]]
+          }
+          rectangle = [points.map { $0[0] }.min()!, points.map { $0[1] }.min()!,
+            points.map { $0[0] }.max()!, points.map { $0[1] }.max()!]
+        } else { rectangle = nil }
+        hasPath = true
+      case "m", "l", "c", "v", "y": hasPath = true; rectangle = nil
+      case "h": break
+      case "W", "W*":
+        if pendingClip || inText { unsafe = true }
+        pendingClip = true
+      case "n", "S", "s", "f", "F", "f*", "B", "B*", "b", "b*":
+        if pendingClip {
+          if let rect = rectangle, rect.allSatisfy({ $0.isFinite && abs($0) <= 1_000_000 }) {
+            let next = clip.map { [max($0[0],rect[0]), max($0[1],rect[1]), min($0[2],rect[2]), min($0[3],rect[3])] } ?? rect
+            if next[2] > next[0], next[3] > next[1] { clip = next } else { unsafe = true }
+          } else { unsafe = true }
+        }
+        hasPath = false; rectangle = nil; pendingClip = false
       case "BT":
         guard !inText else { throw PDFError(.unsupported, "Nested page text objects") }
         inText = true
       case "ET":
         guard inText else { throw PDFError(.unsupported, "Unbalanced page text objects") }
         inText = false
+        // Glyph clip outlines accumulate until ET, independently of a q/Q
+        // inside the text object. Restoring Tr alone cannot erase that clip.
+        if textClipping { unsafe = true; textClipping = false }
       case "gs": if !ordinaryGraphicsState(instruction) { unsafe = true }
-      case "W", "W*", "cs", "sc", "scn": unsafe = true
+      case "cs", "sc", "scn": unsafe = true
       case "Tr":
-        if case .integer(let value)? = instruction.operands.first?.value { mode = Int(value) }
+        if case .integer(let value)? = instruction.operands.first?.value {
+          mode = Int(value)
+          if value >= 4 { unsafe = true; textClipping = true }
+        } else { unsafe = true }
       default: break
       }
-      if !unsafe, mode == 0 { safe.insert(index) }
+      if !unsafe, !pendingClip, mode == 0 {
+        safe.insert(index)
+        if let clip { clips[index] = clip }
+      }
     }
-    guard stack.isEmpty, !inText else {
+    guard stack.isEmpty, !inText, !pendingClip else {
       throw PDFError(.unsupported, "Unbalanced page content cannot be rewritten inline")
     }
     let allRuns = try TextRunIndexer.runs(in: content, graph: graph)
@@ -115,6 +187,7 @@ fileprivate struct ParagraphRewriteAnalysis {
     fonts = resolved
     standardIndices = Set(try StandardTextFont.editableRunIndices(pageID: pageID, in: graph))
     safeInstructions = safe
+    self.clips = clips
     instructionRuns = Dictionary(grouping: allRuns.indices, by: { allRuns[$0].instructionIndex })
   }
 }
@@ -152,7 +225,7 @@ public struct RewritePageTextCommand: PDFEditCommand, Equatable, Sendable {
   public func validate(in graph: PDFGraph) throws { _ = try resolved(in: graph) }
 
   fileprivate func resolved(in graph: PDFGraph, analysis supplied: ParagraphRewriteAnalysis? = nil) throws -> (
-    content: PageContent, runs: [TextRun], font: IndexedTextFont, advances: [Double]
+    content: PageContent, runs: [TextRun], font: IndexedTextFont, advances: [Double], clip: [Double]?
   ) {
     guard !originalText.isEmpty, originalText.count <= 500,
       fontSize.isFinite, (2...144).contains(fontSize), color.count == 3,
@@ -230,7 +303,8 @@ public struct RewritePageTextCommand: PDFEditCommand, Equatable, Sendable {
       lines.allSatisfy({ !$0.segments.isEmpty || font.encode($0.text) != nil }) else {
       throw PDFError(.unsupported, "The PDF font cannot encode the replacement characters")
     }
-    return (content, selected, font, advances)
+    let clip = try analysis.clippingRect(for: originalText.keys.sorted())
+    return (content, selected, font, advances, clip)
   }
 
   public func apply(to graph: PDFGraph) throws -> PDFGraph {
@@ -269,7 +343,7 @@ public struct RewritePageTextCommand: PDFEditCommand, Equatable, Sendable {
       }
     }
     try PageTextLineWriter.append(lines, box: box, pageID: pageID, defaultFont: context.font,
-      defaultSize: fontSize, defaultColor: color, in: &result)
+      defaultSize: fontSize, defaultColor: color, clippingRect: context.clip, in: &result)
     return result
   }
 
