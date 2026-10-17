@@ -224,6 +224,56 @@
         reopened.redoEdit(), reopened.isDocumentEdited, reopened.undoEdit(), !reopened.isDocumentEdited else {
         throw PDFError(.malformed, "Image Undo/Redo disagreed with the saved PDF state")
       }
+      // Use the actual native field editor: Save must include a number still
+      // being typed, before SwiftUI delivers its deferred focus update.
+      let propertyURL = output.appendingPathComponent("image-property-draft.pdf")
+      try sourceBytes.write(to: propertyURL)
+      let propertyDocument = try SPDFDocument(contentsOf: propertyURL, ofType: "com.adobe.pdf")
+      controller.addDocument(propertyDocument); propertyDocument.makeWindowControllers()
+      defer { propertyDocument.close() }
+      guard let properties = propertyDocument.viewer,
+        let propertyWindow = propertyDocument.windowControllers.first?.window,
+        let propertyContent = propertyWindow.contentView else {
+        throw PDFError(.malformed, "Missing property draft workspace")
+      }
+      propertyWindow.makeKeyAndOrderFront(nil)
+      _ = properties.activateTool(.imageEdit)
+      properties.selectGraphics(properties.graphicsListProvider!(0))
+      try await Task.sleep(for: .milliseconds(100))
+      let number = NumberFormatter()
+      number.locale = .current; number.numberStyle = .decimal
+      number.usesGroupingSeparator = false; number.maximumFractionDigits = 3
+      let expectedWidth = number.string(from: NSNumber(value: properties.selectedGraphicBounds!.width))!
+      func widthField(_ view: NSView) -> NSTextField? {
+        if let field = view as? NSTextField, field.isEditable,
+          field.accessibilityLabel() == "Object Width" || field.stringValue == expectedWidth { return field }
+        return view.subviews.lazy.compactMap { widthField($0) }.first
+      }
+      guard let field = widthField(propertyContent) else {
+        throw PDFError(.malformed, "Missing native object-width field (\(expectedWidth))")
+      }
+      field.selectText(nil)
+      guard let editor = field.currentEditor() as? NSTextView else {
+        throw PDFError(.malformed, "Object-width field did not acquire its native editor")
+      }
+      editor.insertText("400", replacementRange: NSRange(location: 0, length: (editor.string as NSString).length))
+      try await Task.sleep(for: .milliseconds(50))
+      guard abs((properties.selectedGraphicBounds?.width ?? 0) - 400) > 1 else {
+        throw PDFError(.malformed, "Numeric draft applied before submission")
+      }
+      propertyDocument.save(nil)
+      for _ in 0..<200 {
+        try await Task.sleep(for: .milliseconds(10))
+        if propertyDocument.jobCenter.jobs.isEmpty { break }
+      }
+      let written = try PDFParser.parse(Data(contentsOf: propertyURL))
+      let writtenBounds = try AddedGraphics.selectable(pageID: written.pageIDs[0], in: written.graph).map {
+        CGRect(x: $0.bounds[0], y: $0.bounds[1], width: $0.bounds[2] - $0.bounds[0], height: $0.bounds[3] - $0.bounds[1])
+      }
+      guard abs((GraphicSelectionModel.union(writtenBounds)?.width ?? 0) - 400) < 0.005,
+        !propertyDocument.isDocumentEdited else {
+        throw PDFError(.malformed, "One Save omitted the numeric property draft or left a second unsaved edit")
+      }
       try JSONSerialization.data(withJSONObject: ["status": "passed", "objects": expected.map {
         ["id": $0.streamID.number, "rect": $0.rect] as [String: Any]
       }, "checks": "insert, exact properties, safe Select, first-drag move, Shift-selection, shared resize, Escape, keyboard, Delete/Undo, alignment, Save and reopen"],

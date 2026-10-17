@@ -65,6 +65,11 @@ private struct WorkspacePointField: View {
       .onChange(of: focused) { _, active in
         if !active { if commitOnEnd { applyDraft() }; refresh() }
       }
+      .onReceive(NotificationCenter.default.publisher(for: NSControl.textDidEndEditingNotification)) { _ in
+        // Save/Quit end the native field editor synchronously. FocusState's
+        // later view update must not commit the number after the PDF write.
+        if commitOnEnd { applyDraft(); refresh() }
+      }
       .onSubmit { if commitOnEnd { applyDraft() }; refresh() }
   }
 
