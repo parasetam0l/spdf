@@ -691,4 +691,63 @@ struct ImportedParagraphInteropTests {
     #expect(markers.allSatisfy { !$0.isStandalone && $0.x == 42 && $0.fontSize == 16 })
   }
 
+  @Test @MainActor func positionedWordGapsBecomeEditableSpacesWithoutMovingGlyphs() throws {
+    var (graph, pageID) = try fixture(composite: false)
+    let profile = try #require(PageTextEditing.fontProfiles(pageID: pageID, in: graph)[PDFName("F1")])
+    let size = 16.0
+    let word = ["A","B","C"].reduce(0.0) { $0 + profile.glyphs[$1]!.width * size / 1000 }
+    let space = try #require(profile.glyphs[" "]?.width) * size / 1000
+    let second = 42 + word + space * 0.9, third = second + word + space * 0.8
+    graph.objects[PDFObjectID(5)] = .stream(PDFStream(bytes: Data("""
+      BT /F1 16 Tf 1 0 0 1 42 700 Tm (ABC) Tj
+      1 0 0 1 \(second) 700 Tm (ABC) Tj
+      1 0 0 1 \(third) 700 Tm (ABC) Tj ET
+      """.utf8)))
+    let target = try #require(targets(graph, pageID: pageID).first { $0.paragraph != nil })
+    let paragraph = try #require(target.paragraph)
+    #expect(target.text == "ABC ABC ABC")
+    #expect(paragraph.originalText.values.allSatisfy { $0 == "ABC" })
+    let spaces = paragraph.fragments.filter { $0.text == " " }
+    #expect(spaces.count == 2)
+    #expect(abs((spaces.first?.format.characterSpacing ?? 100) + space * 0.1) < 1e-6)
+    #expect(abs((spaces.last?.format.characterSpacing ?? 100) + space * 0.2) < 1e-6)
+    let view = NSTextView()
+    let format = try #require(paragraph.fragments.first?.format)
+    let formatting = NativeTextFormatting(view: view, fragments: paragraph.fragments,
+      initial: format, profiles: paragraph.fontProfiles)
+    formatting.render(scale: 1, minimumLineSpacing: paragraph.lineSpacing)
+    #expect(!formatting.hasChanges)
+    var x = 42.0
+    let segments = paragraph.fragments.map { fragment -> PageTextSegment in
+      defer { x += profile.glyphs[fragment.text]!.width * size / 1000 + fragment.format.characterSpacing }
+      return .init(text: fragment.text, x: x, format: fragment.format)
+    }
+    try #require(segments.count == 11)
+    #expect(abs(segments[4].x - second) < 1e-6)
+    #expect(abs(segments[8].x - third) < 1e-6)
+    let edited = try PDFEditingEngine.commit(PDFTransaction([
+      RewritePageTextCommand(pageID: pageID, originalText: paragraph.originalText,
+        lines: [.init(text: target.text, x: 42, baseline: 700, segments: segments)],
+        fontSize: size, color: [0,0,0], box: .init(x: 42, firstBaseline: 700, width: 240, lineSpacing: 22))
+    ]), to: graph)
+    let reopened = try targets(PDFParser.parse(PDFWriter.write(edited)).graph, pageID: pageID)
+    #expect(reopened.first?.text == target.text)
+    #expect(edited.objects[PDFObjectID(7)] == graph.objects[PDFObjectID(7)])
+  }
+
+  @Test @MainActor func uniformWideLetterTrackingDoesNotInventWordBreaks() throws {
+    var (graph, pageID) = try fixture(composite: false)
+    let profile = try #require(PageTextEditing.fontProfiles(pageID: pageID, in: graph)[PDFName("F1")])
+    let space = profile.glyphs[" "]!.width * 16 / 1000
+    var x = 42.0, source = ""
+    for character in ["A","B","C"] {
+      source += "BT /F1 16 Tf 1 0 0 1 \(x) 700 Tm (\(character)) Tj ET\n"
+      x += profile.glyphs[character]!.width * 16 / 1000 + space * 0.75
+    }
+    graph.objects[PDFObjectID(5)] = .stream(PDFStream(bytes: Data(source.utf8)))
+    let target = try #require(targets(graph, pageID: pageID).first { $0.paragraph != nil })
+    #expect(target.text == "ABC")
+    #expect(target.paragraph?.fragments.contains { $0.text == " " } == false)
+  }
+
 }

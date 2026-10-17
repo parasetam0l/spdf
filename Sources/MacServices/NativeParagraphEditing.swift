@@ -270,10 +270,11 @@ public enum NativeParagraphEditing {
     }
     struct Line {
       var spans: [Span]
+      var fragments: [PageTextFragment] = []
       var x: Double { spans[0].x }
       var y: Double { spans[0].source.baseline }
       var width: Double { spans.last!.x + spans.last!.width - x }
-      var text: String { spans.map { $0.source.text }.joined().trimmingCharacters(in: .whitespaces) }
+      var text: String { fragments.map(\.text).joined().trimmingCharacters(in: .whitespaces) }
     }
     let sources = (try? PageTextEditing.sourceRuns(pageID: pageID, in: graph)) ?? []
     var spans: [Span] = []
@@ -318,6 +319,46 @@ public enum NativeParagraphEditing {
         abs(span.x - previous.x - previous.width) <= max(0.75, span.source.format.size * 0.3) {
         lines[lines.count - 1].spans.append(span)
       } else { lines.append(Line(spans: [span])) }
+    }
+    for index in lines.indices {
+      let spans = lines[index].spans
+      func spaceWidth(_ format: PageTextFormat) -> Double? {
+        if let source = format.sourceFont {
+          return profiles[source.resource]?.glyphs[" "].map { $0.width * format.size / 1_000 }
+        }
+        return standardAdvance(" ", family: format.font.rawValue, size: format.size)
+      }
+      let gaps = zip(spans, spans.dropFirst()).map { $1.x - $0.x - $0.width }
+      let wordGaps = gaps.indices.map { index -> Bool in
+        guard let last = spans[index].fragments.last, let next = spans[index + 1].fragments.first,
+          last.text.last?.isWhitespace == false, next.text.first?.isWhitespace == false,
+          let space = spaceWidth(last.format), space > 0 else { return false }
+        return gaps[index] >= space * 0.6 && gaps[index] <= space * 1.4
+      }
+      // Uniform, widely tracked individual letters are ambiguous. Preserve
+      // their measured tracking instead of guessing word breaks between them.
+      let tracking = spans.allSatisfy { $0.source.text.count == 1 }
+        && wordGaps.filter { $0 }.count >= 2 && wordGaps.filter { $0 }.count * 2 >= gaps.count
+      var fragments: [PageTextFragment] = []
+      for (index, span) in spans.enumerated() {
+        var pieces = span.fragments
+        if index < gaps.count, let last = pieces.popLast() {
+          if wordGaps[index], !tracking, let width = spaceWidth(last.format) {
+            pieces.append(last)
+            var format = last.format
+            format.characterSpacing = gaps[index] - width
+            if abs(format.characterSpacing) < 1e-6 { format.characterSpacing = 0 }
+            pieces.append(.init(text: " ", format: format))
+          } else {
+            var format = last.format
+            if abs(gaps[index]) > 1e-6 { format.characterSpacing += gaps[index] }
+            if abs(format.characterSpacing) < 1e-6 { format.characterSpacing = 0 }
+            pieces.append(.init(text: last.text, format: format))
+          }
+        }
+        fragments += pieces
+      }
+      lines[index].fragments = fragments
     }
     var result: [PageTextTarget] = []
     var consumed = Set<Int>()
@@ -364,20 +405,7 @@ public enum NativeParagraphEditing {
             || all.contains(where: { $0.block.runIndices.count > 1 || abs($0.source.textScale - 1) > 1e-6 }) else { return nil }
         var fragments: [PageTextFragment] = []
         for (index, line) in members.enumerated() {
-          var parts: [PageTextFragment] = []
-          for (index, span) in line.spans.enumerated() {
-            var pieces = span.fragments
-            if index + 1 < line.spans.count, let last = pieces.popLast() {
-              var format = last.format
-              let gap = line.spans[index + 1].x - span.x - span.width
-              // Arithmetic noise at a contiguous source boundary must not
-              // create a separate style that disappears when PDF numbers save.
-              if abs(gap) > 1e-6 { format.characterSpacing += gap }
-              if abs(format.characterSpacing) < 1e-6 { format.characterSpacing = 0 }
-              pieces.append(.init(text: last.text, format: format))
-            }
-            parts += pieces
-          }
+          var parts = line.fragments
           while parts.last?.text.allSatisfy(\.isWhitespace) == true { parts.removeLast() }
           while parts.first?.text.allSatisfy(\.isWhitespace) == true { parts.removeFirst() }
           fragments += parts

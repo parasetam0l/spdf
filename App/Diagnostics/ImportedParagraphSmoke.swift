@@ -261,6 +261,41 @@
       try listBytes.write(to: listSource)
       try await CorpusParagraphSmoke.checks(source: listSource, output: listOutput,
         matching: "This imported paragraph")
+      // Some producers omit space codes and position words separately. The
+      // editor must expose the visible spaces without shifting source glyphs.
+      let spacingOutput = output.appendingPathComponent("PositionedWords")
+      try FileManager.default.createDirectory(at: spacingOutput, withIntermediateDirectories: true)
+      var spacingGraph = listParsed.graph
+      spacingGraph.objects[PDFObjectID(5)] = .stream(PDFStream(bytes: Data()))
+      let format = sourceLines[0].format
+      let profile = try PageTextEditing.fontProfiles(pageID: listPage, in: listParsed.graph).values
+        .first { $0.source == format.sourceFont }
+      guard let profile, let space = profile.glyphs[" "] else {
+        throw PDFError(.malformed, "Positioned-word fixture has no source space glyph")
+      }
+      var wordX = 42.0
+      var wordSegments: [PageTextSegment] = []
+      for word in ["This", "imported", "paragraph"] {
+        wordSegments.append(.init(text: word, x: wordX, format: format))
+        wordX += word.reduce(0.0) { $0 + (profile.glyphs[String($1)]?.width ?? 0) }
+          * format.size / 1_000 + space.width * format.size / 1_000 * 0.9
+      }
+      spacingGraph = try PDFEditingEngine.commit(PDFTransaction([
+        AddPageTextLinesCommand(pageID: listPage,
+          lines: [.init(text: "Thisimportedparagraph", x: 42, baseline: 700, segments: wordSegments)],
+          box: .init(x: 42, firstBaseline: 700, width: 340, lineSpacing: 22))
+      ]), to: spacingGraph)
+      for (id, value) in spacingGraph.objects {
+        if case .stream(let stream) = value {
+          var dictionary = stream.dictionary
+          for key in ["SPDFTextVersion", "SPDFTextBox", "SPDFTextLines"] { dictionary[PDFName(key)] = nil }
+          spacingGraph.objects[id] = .stream(PDFStream(dictionary: dictionary, bytes: stream.bytes))
+        }
+      }
+      let spacingSource = spacingOutput.appendingPathComponent("source.pdf")
+      try PDFWriter.write(spacingGraph).write(to: spacingSource)
+      try await CorpusParagraphSmoke.checks(source: spacingSource, output: spacingOutput,
+        matching: "This imported paragraph")
       try JSONSerialization.data(withJSONObject: ["status": "passed", "font": "DejaVuSans",
         "sourceRuns": paragraph.originalText.count, "savedLines": lines.count,
         "savedWidth": expectedBox.width, "nativeText": expectedText,

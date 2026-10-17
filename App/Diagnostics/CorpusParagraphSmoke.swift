@@ -68,7 +68,10 @@
         if case .reference(let id) = value { return id }; return nil
       }
       let fontObjects = PDFGraphTraversal.reachable(from: fontRoots, in: graph).order
-      let phrase = String(target.text.prefix(18))
+      // The diagnostic edits the final word. Keep the pointer anchor stable
+      // when the whole target is a short positioned-word line.
+      let phrase = target.text.split(whereSeparator: \.isWhitespace).first.map(String.init)
+        ?? String(target.text.prefix(18))
       func find<T: NSView>(_ type: T.Type, in view: NSView) -> T? {
         if let found = view as? T { return found }
         return view.subviews.lazy.compactMap { find(type, in: $0) }.first
