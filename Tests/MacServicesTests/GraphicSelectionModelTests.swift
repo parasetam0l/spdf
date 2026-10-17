@@ -8,6 +8,30 @@ import Testing
 /// math is in one shared space; the overlay converts before calling in.
 @Suite("Graphic selection model")
 struct GraphicSelectionModelTests {
+  @Test func groupResizePreservesRelativePositionsAndSharedScale() throws {
+    let first = CGRect(x: 10, y: 20, width: 40, height: 30)
+    let second = CGRect(x: 80, y: 70, width: 30, height: 10)
+    let group = try #require(GraphicSelectionModel.union([first, second]))
+    let destination = CGRect(x: 50, y: 60, width: 200, height: 90)
+    let a = try #require(GraphicSelectionModel.mapping(member: first, from: group, to: destination))
+    let b = try #require(GraphicSelectionModel.mapping(member: second, from: group, to: destination))
+    #expect(a.dx == 40 && a.dy == 40 && a.scaleX == 2 && a.scaleY == 1.5)
+    #expect(b.dx == 110 && b.dy == 65 && b.scaleX == 2 && b.scaleY == 1.5)
+    #expect((second.minX + b.dx) - (first.minX + a.dx + first.width * a.scaleX) == 60)
+    #expect(GraphicSelectionModel.mapping(member: first, from: group, to: .zero) == nil)
+    #expect(GraphicSelectionModel.union([CGRect(x: CGFloat.infinity, y: 0, width: 20, height: 20)]) == nil)
+  }
+
+  @Test func pageAlignmentRespectsCropOriginAndObjectExtent() {
+    let page = CGRect(x: 30, y: 50, width: 600, height: 800)
+    let object = CGRect(x: 100, y: 200, width: 140, height: 60)
+    #expect(PageObjectAlignment.left.delta(for: object, in: page) == CGPoint(x: -70, y: 0))
+    #expect(PageObjectAlignment.center.delta(for: object, in: page) == CGPoint(x: 160, y: 0))
+    #expect(PageObjectAlignment.right.delta(for: object, in: page) == CGPoint(x: 390, y: 0))
+    #expect(PageObjectAlignment.top.delta(for: object, in: page) == CGPoint(x: 0, y: 590))
+    #expect(PageObjectAlignment.middle.delta(for: object, in: page) == CGPoint(x: 0, y: 220))
+    #expect(PageObjectAlignment.bottom.delta(for: object, in: page) == CGPoint(x: 0, y: -150))
+  }
   @Test func eightHandlesCoverCornersAndEdges() {
     let bounds = CGRect(x: 10, y: 20, width: 100, height: 60)
     let centers = GraphicSelectionModel.handleCenters(bounds: bounds)

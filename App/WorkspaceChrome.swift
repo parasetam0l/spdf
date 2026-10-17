@@ -36,6 +36,7 @@ private struct WorkspacePointField: View {
   let label: String
   @Binding var value: Double
   var mixed = false
+  var commitOnEnd = false
   @State private var draft = ""
   @State private var displayed = ""
   @FocusState private var focused: Bool
@@ -55,17 +56,23 @@ private struct WorkspacePointField: View {
       .textFieldStyle(.roundedBorder)
       .accessibilityLabel(label)
       .onAppear { refresh() }
-      .onChange(of: value) { _, _ in if !focused { refresh() } }
-      .onChange(of: mixed) { _, _ in if !focused { refresh() } }
+      .onChange(of: value) { _, _ in if !focused || (commitOnEnd && draft == displayed) { refresh() } }
+      .onChange(of: mixed) { _, _ in if !focused || (commitOnEnd && draft == displayed) { refresh() } }
       .onChange(of: draft) { _, text in
         guard focused, text != displayed else { return }
-        displayed = text
-        let normalized = text.trimmingCharacters(in: .whitespaces)
-          .replacingOccurrences(of: formatter.decimalSeparator, with: ".")
-        if let number = Double(normalized), number.isFinite { value = number }
+        if !commitOnEnd { applyDraft(); displayed = text }
       }
-      .onChange(of: focused) { _, active in if !active { refresh() } }
-      .onSubmit { refresh() }
+      .onChange(of: focused) { _, active in
+        if !active { if commitOnEnd { applyDraft() }; refresh() }
+      }
+      .onSubmit { if commitOnEnd { applyDraft() }; refresh() }
+  }
+
+  private func applyDraft() {
+    guard draft != displayed else { return }
+    let normalized = draft.trimmingCharacters(in: .whitespaces)
+      .replacingOccurrences(of: formatter.decimalSeparator, with: ".")
+    if let number = Double(normalized), number.isFinite { value = number }
   }
 
   private func refresh() {
@@ -155,6 +162,7 @@ struct WorkspaceTextInspector: View {
                 }
                 Text("Points from the page’s bottom-left corner.")
                   .font(.system(size: 10)).foregroundStyle(.tertiary)
+                WorkspaceAlignmentControls { viewer.pageTextAlignmentApplier?($0) }
               }
               Divider()
               VStack(spacing: 8) {
@@ -326,6 +334,126 @@ struct WorkspaceTextInspector: View {
   }
   private func color(_ rgb: [Double]) {
     apply(.color(rgb))
+  }
+}
+
+struct WorkspaceAlignmentControls: View {
+  var align: (PageObjectAlignment) -> Void
+  private let symbols = ["align.horizontal.left", "align.horizontal.center", "align.horizontal.right",
+    "align.vertical.top", "align.vertical.center", "align.vertical.bottom"]
+  var body: some View {
+    VStack(alignment: .leading, spacing: 6) {
+      Text("Align to page").font(.caption).foregroundStyle(.secondary)
+      HStack(spacing: 4) {
+        ForEach(Array(PageObjectAlignment.allCases.enumerated()), id: \.element) { index, alignment in
+          Button { align(alignment) } label: {
+            Image(systemName: symbols[index]).frame(width: 23, height: 24)
+          }
+          .buttonStyle(.borderless)
+          .help("Align \(alignment.rawValue) to page")
+          .accessibilityLabel("Align \(alignment.rawValue) to page")
+        }
+      }
+    }
+  }
+}
+
+struct WorkspaceGraphicInspector: View {
+  @ObservedObject var viewer: PDFViewingSession
+  @State private var constrain = true
+  private var editable: Bool { viewer.activeTool == .imageEdit && viewer.allowsContentEditing && !viewer.isLocked }
+  var body: some View {
+    VStack(alignment: .leading, spacing: 0) {
+      HStack {
+        Text(viewer.selectedGraphics.count > 1 ? "Objects" : "Image")
+          .font(.system(size: 13, weight: .semibold))
+        Spacer()
+        if viewer.selectedGraphics.count > 1 {
+          Text("\(viewer.selectedGraphics.count) selected").font(.caption).foregroundStyle(.secondary)
+        }
+      }.padding(16)
+      Divider()
+      ScrollView {
+        VStack(alignment: .leading, spacing: 20) {
+          Button { viewer.onInsertImage?() } label: {
+            Label("Insert Image…", systemImage: "photo.badge.plus").frame(maxWidth: .infinity)
+          }.buttonStyle(.bordered).disabled(!editable)
+          if let bounds = viewer.selectedGraphicBounds {
+            VStack(alignment: .leading, spacing: 10) {
+              Text("POSITION & SIZE").font(.system(size: 10, weight: .semibold))
+                .tracking(0.7).foregroundStyle(.secondary)
+              HStack(spacing: 10) {
+                field("X", value: bounds.minX, component: 0)
+                field("Y", value: bounds.minY, component: 1)
+              }
+              HStack(spacing: 10) {
+                field("Width", value: bounds.width, component: 2)
+                field("Height", value: bounds.height, component: 3)
+              }
+              Toggle("Keep proportions", isOn: $constrain).font(.caption).toggleStyle(.checkbox)
+              Text("Points from the page’s bottom-left corner.")
+                .font(.system(size: 10)).foregroundStyle(.tertiary)
+              WorkspaceAlignmentControls { viewer.alignGraphics($0) }
+            }.disabled(!editable)
+            Divider()
+            if viewer.selectedGraphics.count == 1, let target = viewer.selectedGraphics.first {
+              Button { viewer.onRotateGraphic?(target.streamID) } label: {
+                Label("Rotate 90°", systemImage: "rotate.right").frame(maxWidth: .infinity)
+              }.buttonStyle(.bordered).disabled(!editable)
+            }
+            Button(role: .destructive) { viewer.deleteSelectedGraphics() } label: {
+              Label("Delete Selection", systemImage: "trash").frame(maxWidth: .infinity)
+            }.buttonStyle(.bordered).disabled(!editable)
+          } else {
+            VStack(alignment: .leading, spacing: 10) {
+              Image(systemName: "photo.on.rectangle.angled").font(.system(size: 26, weight: .light))
+                .foregroundStyle(.tertiary)
+              Text("Place an image on the page").font(.system(size: 13, weight: .medium))
+              Text("Insert an image, then drag it to move or resize it. Shift-click to select several objects.")
+                .font(.system(size: 12)).foregroundStyle(.secondary)
+              Text("For existing document images, right-click to rotate, scale or replace a supported image.")
+                .font(.system(size: 11)).foregroundStyle(.secondary)
+            }.fixedSize(horizontal: false, vertical: true)
+          }
+        }.padding(16).frame(maxWidth: .infinity, alignment: .leading)
+      }
+      Spacer(minLength: 0)
+      if viewer.selectedGraphicBounds != nil {
+        Text(editable ? "Arrow keys move 1 pt; Shift moves 10 pt.\nEscape cancels a drag or clears selection."
+          : "Choose Images to move or resize this selection.")
+          .font(.system(size: 11)).foregroundStyle(.secondary).lineSpacing(3).padding(16)
+      }
+    }
+    .background(Color(nsColor: .controlBackgroundColor)).frame(width: 224)
+    .accessibilityElement(children: .contain).accessibilityLabel("Image properties")
+  }
+
+  private func field(_ label: String, value: Double, component: Int) -> some View {
+    let identities = viewer.selectedGraphics.map(\.streamID)
+    return VStack(alignment: .leading, spacing: 5) {
+      Text(label).font(.caption).foregroundStyle(.secondary)
+      WorkspacePointField(label: "Object \(label)", value: Binding(get: {
+        guard identities == viewer.selectedGraphics.map(\.streamID),
+          let current = viewer.selectedGraphicBounds else { return value }
+        return [current.minX, current.minY, current.width, current.height][component]
+      }, set: { number in
+        guard identities == viewer.selectedGraphics.map(\.streamID), number.isFinite,
+          var bounds = viewer.selectedGraphicBounds else { return }
+        switch component {
+        case 0: bounds.origin.x = number
+        case 1: bounds.origin.y = number
+        case 2:
+          guard number >= 1, number <= 20_000 else { return }
+          if constrain { bounds.size.height *= number / bounds.width }
+          bounds.size.width = number
+        default:
+          guard number >= 1, number <= 20_000 else { return }
+          if constrain { bounds.size.width *= number / bounds.height }
+          bounds.size.height = number
+        }
+        viewer.setGraphicBounds(bounds)
+      }), commitOnEnd: true)
+    }
   }
 }
 

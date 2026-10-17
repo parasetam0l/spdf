@@ -76,9 +76,9 @@ struct WorkspaceView: View {
               pageCanvas
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            if usesTextProperties && wide && inspectorVisible {
+            if usesProperties && wide && inspectorVisible {
               Divider()
-              WorkspaceTextInspector(viewer: viewer)
+              propertiesInspector
             }
           }
           .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -122,12 +122,12 @@ struct WorkspaceView: View {
       Divider().frame(height: 18)
       iconButton("Find", symbol: "magnifyingglass") { viewer.showSearch() }
         .help("Find in document (⌘F)")
-      if usesTextProperties {
-        iconButton("Text properties", symbol: "sidebar.right") {
+      if usesProperties {
+        iconButton(usesTextProperties ? "Text properties" : "Image properties", symbol: "sidebar.right") {
           if wide { inspectorVisible.toggle() } else { inspectorPopover.toggle() }
         }
         .popover(isPresented: $inspectorPopover, arrowEdge: .bottom) {
-          WorkspaceTextInspector(viewer: viewer).frame(height: 460)
+          propertiesInspector.frame(height: 520)
         }
       }
       if viewer.isEditingPageText && (!wide || !inspectorVisible) {
@@ -363,6 +363,13 @@ struct WorkspaceView: View {
   }
   private var usesTextProperties: Bool {
     viewer.activeTool == .textEdit || viewer.activeTool == .addText
+  }
+  private var usesProperties: Bool {
+    usesTextProperties || viewer.activeTool == .imageEdit || !viewer.selectedGraphics.isEmpty
+  }
+  @ViewBuilder private var propertiesInspector: some View {
+    if usesTextProperties { WorkspaceTextInspector(viewer: viewer) }
+    else { WorkspaceGraphicInspector(viewer: viewer) }
   }
   private var canEdit: Bool { viewer.allowsContentEditing && !viewer.isLocked }
   private func iconButton(_ title: String, symbol: String, action: @escaping () -> Void)

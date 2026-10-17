@@ -248,6 +248,7 @@ public final class PDFViewingSession: NSObject, ObservableObject, PDFViewDelegat
   public var pageTextBeginTyping: (() -> Void)?
   public var pageTextCancel: (() -> Void)?
   public var pageTextPositionApplier: ((Double, Double) -> Void)?
+  public var pageTextAlignmentApplier: ((PageObjectAlignment) -> Void)?
   public var pageTextWidthApplier: ((Double) -> Void)?
   public var pageTextStyleApplier: ((PageTextStyle) -> Void)?
   public var hasPendingTextGesture: (() -> Bool)?
@@ -325,6 +326,9 @@ public final class PDFViewingSession: NSObject, ObservableObject, PDFViewDelegat
       ([(streamID: PDFObjectID, dx: Double, dy: Double, scaleX: Double, scaleY: Double)]) -> Void
     )?
   public var onRotateGraphic: ((PDFObjectID) -> Void)?
+  public var onDeleteGraphics: (([PDFObjectID]) -> Void)?
+  public var onInsertImage: (() -> Void)?
+  public var graphicSelectionFocuser: (() -> Void)?
   private var searchMatches: [PDFSelection] = []
   private var observations: Set<AnyCancellable> = []
 
@@ -427,6 +431,7 @@ public final class PDFViewingSession: NSObject, ObservableObject, PDFViewDelegat
     pageTextBeginTyping = nil
     pageTextCancel = nil
     pageTextPositionApplier = nil
+    pageTextAlignmentApplier = nil
     pageTextWidthApplier = nil
     pageTextStyleApplier = nil
     pageTextFormattingApplier = nil
@@ -794,6 +799,14 @@ public final class PDFViewingSession: NSObject, ObservableObject, PDFViewDelegat
   /// the inspector and VoiceOver. An empty selection clears the summary
   /// only when no text selection is active, so the two never fight.
   public func selectGraphics(_ targets: [AddedGraphicTarget]) {
+    // A shared transform belongs to a single page. Deduplicate identities so
+    // keyboard and inspector actions never transform the same stream twice.
+    var seen = Set<PDFObjectID>()
+    let targets = targets.filter {
+      $0.pageIndex == targets.first?.pageIndex && $0.rect.count == 4
+        && $0.rect.allSatisfy(\.isFinite) && $0.rect[2] > $0.rect[0] && $0.rect[3] > $0.rect[1]
+        && seen.insert($0.streamID).inserted
+    }
     selectedGraphics = targets
     guard !targets.isEmpty else {
       if view.currentSelection == nil {
@@ -818,6 +831,39 @@ public final class PDFViewingSession: NSObject, ObservableObject, PDFViewDelegat
   /// P12-017: drop the graphics selection without touching text selection.
   public func clearGraphicSelection() {
     selectGraphics([])
+  }
+
+  public var selectedGraphicBounds: CGRect? {
+    GraphicSelectionModel.union(selectedGraphics.map {
+      CGRect(x: $0.rect[0], y: $0.rect[1], width: $0.rect[2] - $0.rect[0], height: $0.rect[3] - $0.rect[1])
+    })
+  }
+
+  /// Inspector changes and pointer drags share the same atomic group mapping.
+  public func setGraphicBounds(_ bounds: CGRect) {
+    guard activeTool == .imageEdit, allowsContentEditing, !isLocked,
+      let group = selectedGraphicBounds else { return }
+    let mappings = selectedGraphics.compactMap { target -> (streamID: PDFObjectID,
+      dx: Double, dy: Double, scaleX: Double, scaleY: Double)? in
+      let member = CGRect(x: target.rect[0], y: target.rect[1],
+        width: target.rect[2] - target.rect[0], height: target.rect[3] - target.rect[1])
+      guard let m = GraphicSelectionModel.mapping(member: member, from: group, to: bounds) else { return nil }
+      return (target.streamID, m.dx, m.dy, m.scaleX, m.scaleY)
+    }
+    if mappings.count == selectedGraphics.count { onResizeGraphics?(mappings) }
+  }
+
+  public func alignGraphics(_ alignment: PageObjectAlignment) {
+    guard let bounds = selectedGraphicBounds, let target = selectedGraphics.first,
+      let page = view.document?.page(at: target.pageIndex) else { return }
+    let delta = alignment.delta(for: bounds, in: page.bounds(for: view.displayBox))
+    setGraphicBounds(bounds.offsetBy(dx: delta.x, dy: delta.y))
+  }
+
+  public func deleteSelectedGraphics() {
+    guard activeTool == .imageEdit, allowsContentEditing, !isLocked,
+      !selectedGraphics.isEmpty else { return }
+    onDeleteGraphics?(selectedGraphics.map(\.streamID))
   }
 
   /// P22-017: scroll to a page-space rectangle and select the text inside it

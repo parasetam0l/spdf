@@ -25,7 +25,10 @@ final class DocumentApplication: NSApplication {
     guard !gate.isPreparing else { return }
     gate.requestTermination { [weak self] allowed in
       guard allowed, let self else { return }
-      finishTermination(sender)
+      // Leave the review task before AppKit synchronously drains its recent-
+      // document operations. Those operations may still need the main queue
+      // after Save As and reopening several document windows.
+      DispatchQueue.main.async { [weak self] in self?.finishTermination(sender) }
     }
   }
 

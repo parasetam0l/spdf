@@ -19,6 +19,28 @@ public enum GraphicHandle: String, Sendable, Equatable, CaseIterable {
 }
 
 public enum GraphicSelectionModel {
+  public static func union(_ bounds: [CGRect]) -> CGRect? {
+    guard !bounds.isEmpty, bounds.allSatisfy({
+      !$0.isNull && [$0.minX, $0.minY, $0.maxX, $0.maxY, $0.width, $0.height].allSatisfy(\.isFinite)
+        && $0.width > 0 && $0.height > 0
+    }) else { return nil }
+    let result = bounds.dropFirst().reduce(bounds[0]) { $0.union($1) }
+    return result.width.isFinite && result.height.isFinite ? result : nil
+  }
+
+  /// Apply one group transform to each member. Scaling every member about
+  /// its own origin loses the spacing between objects in a multi-selection.
+  public static func mapping(member: CGRect, from group: CGRect, to destination: CGRect)
+    -> (dx: Double, dy: Double, scaleX: Double, scaleY: Double)?
+  {
+    guard union([member, group, destination]) != nil else { return nil }
+    let sx = destination.width / group.width
+    let sy = destination.height / group.height
+    let dx = destination.minX + (member.minX - group.minX) * sx - member.minX
+    let dy = destination.minY + (member.minY - group.minY) * sy - member.minY
+    guard [sx, sy, dx, dy].allSatisfy(\.isFinite), sx > 0, sy > 0 else { return nil }
+    return (Double(dx), Double(dy), Double(sx), Double(sy))
+  }
   /// Drawn handle square, in points.
   public static let handleVisualSize: CGFloat = 12
   /// Hit-test square around each handle center, in points. Never below the
@@ -147,5 +169,21 @@ public enum GraphicSelectionModel {
     return (
       dx: Double(minX - start.minX), dy: Double(minY - start.minY),
       scaleX: Double(scaleX), scaleY: Double(scaleY))
+  }
+}
+
+/// Alignment uses PDF page coordinates, including nonzero crop-box origins.
+public enum PageObjectAlignment: String, CaseIterable, Sendable {
+  case left, center, right, top, middle, bottom
+
+  public func delta(for object: CGRect, in page: CGRect) -> CGPoint {
+    switch self {
+    case .left: return CGPoint(x: page.minX - object.minX, y: 0)
+    case .center: return CGPoint(x: page.midX - object.midX, y: 0)
+    case .right: return CGPoint(x: page.maxX - object.maxX, y: 0)
+    case .top: return CGPoint(x: 0, y: page.maxY - object.maxY)
+    case .middle: return CGPoint(x: 0, y: page.midY - object.midY)
+    case .bottom: return CGPoint(x: 0, y: page.minY - object.minY)
+    }
   }
 }

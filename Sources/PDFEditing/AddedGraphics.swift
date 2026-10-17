@@ -230,6 +230,50 @@ public struct SelectableGraphic: Sendable, Equatable {
   }
 }
 
+/// Remove selected app-created paint from one page. Native streams and text
+/// streams are refused even if a caller supplies their object identities.
+public struct DeleteAddedGraphicsCommand: PDFEditCommand, Equatable, Sendable {
+  public let pageID: PDFObjectID
+  public let streamIDs: [PDFObjectID]
+  public init(pageID: PDFObjectID, streamIDs: [PDFObjectID]) {
+    self.pageID = pageID; self.streamIDs = streamIDs
+  }
+  public var name: String { "Delete Graphics" }
+  public func affectedPageIDs(in graph: PDFGraph) -> [PDFObjectID] { [pageID] }
+  public func validate(in graph: PDFGraph) throws {
+    let available = Set(try AddedGraphics.selectable(pageID: pageID, in: graph).map(\.streamID))
+    guard !streamIDs.isEmpty, Set(streamIDs).count == streamIDs.count,
+      streamIDs.allSatisfy({ available.contains($0) }) else {
+      throw PDFError(.unsupported, "Only selected graphics added by sPDF can be deleted here")
+    }
+  }
+  public func apply(to graph: PDFGraph) throws -> PDFGraph {
+    try validate(in: graph)
+    var graph = graph
+    guard case .dictionary(var page)? = graph.objects[pageID] else {
+      throw PDFError(.malformed, "Page is missing")
+    }
+    let selected = Set(streamIDs)
+    let contents: [PDFValue]
+    switch page[PDFName("Contents")] {
+    case .reference(let id)?: contents = [.reference(id)]
+    case .array(let values)?: contents = values
+    default: contents = []
+    }
+    page[PDFName("Contents")] = .array(contents.filter {
+      if case .reference(let id) = $0 { return !selected.contains(id) }; return true
+    })
+    graph.objects[pageID] = .dictionary(page)
+    let detached = Set(streamIDs.filter { AddedGraphics.ownerPages(of: [$0], in: graph).isEmpty })
+    let groups = try AddedGraphicsGroups.list(in: graph).compactMap { group -> AddedGroup? in
+      let members = group.members.filter { !detached.contains($0) }
+      return members.isEmpty ? nil : AddedGroup(id: group.id, members: members, label: group.label)
+    }
+    if !detached.isEmpty { try AddedGraphicsGroups.write(groups, in: &graph) }
+    return graph
+  }
+}
+
 public enum AddedGraphics {
   /// Whether the stream was appended by the app (see `AddedContent.append`).
   /// Native document streams are never app-created, even when their
@@ -477,7 +521,8 @@ public struct MoveAddedGraphicCommand: PDFEditCommand, Equatable, Sendable {
   }
 }
 
-/// P21-010: scale an image stamp or rectangle about its own origin.
+/// Scale in page axes about the footprint's bottom-left corner. This also
+/// handles quarter-turned images, whose matrix origin differs from the bounds.
 public struct ScaleAddedGraphicCommand: PDFEditCommand, Equatable, Sendable {
   public let streamID: PDFObjectID
   public let scaleX: Double
@@ -523,10 +568,17 @@ public struct ScaleAddedGraphicCommand: PDFEditCommand, Equatable, Sendable {
         throw PDFError(.malformed, "The image stamp lost its placement matrix")
       }
       let values = try AddedGraphics.numbers(of: cm.operands)
-      return [
-        (cm.operands[0].span, Array(ImageInventory.numberToken(values[0] * scaleX).utf8)),
-        (cm.operands[3].span, Array(ImageInventory.numberToken(values[3] * scaleY).utf8)),
-      ]
+      let bounds = ImageInventory.bounds(of: values)
+      let result = [values[0] * scaleX, values[1] * scaleY,
+        values[2] * scaleX, values[3] * scaleY,
+        bounds[0] + (values[4] - bounds[0]) * scaleX,
+        bounds[1] + (values[5] - bounds[1]) * scaleY]
+      guard result.allSatisfy(\.isFinite) else {
+        throw PDFError(.limitExceeded, "The resized image exceeds the supported coordinates")
+      }
+      return zip(cm.operands, result).map {
+        ($0.0.span, Array(ImageInventory.numberToken($0.1).utf8))
+      }
     case .rectangle:
       guard let re = instructions.first(where: { $0.operatorName == "re" }),
         re.operands.count == 4
@@ -547,8 +599,7 @@ public struct ScaleAddedGraphicCommand: PDFEditCommand, Equatable, Sendable {
 }
 
 /// P21-010: rotate an image stamp or rectangle in 90-degree steps.
-/// Image stamps rotate like placed images (linear part about the origin);
-/// rectangles rotate about their own center, swapping extent for quarter turns.
+/// Both kinds keep their footprint center, swapping extent for quarter turns.
 public struct RotateAddedGraphicCommand: PDFEditCommand, Equatable, Sendable {
   public let streamID: PDFObjectID
   public let degrees: Int
@@ -597,9 +648,11 @@ public struct RotateAddedGraphicCommand: PDFEditCommand, Equatable, Sendable {
       }
       let local = [values[0], values[1], values[2], values[3], 0, 0]
       let rotated = ImageInventory.concat(rotation, local)
+      let bounds = ImageInventory.bounds(of: values)
+      let cx = (bounds[0] + bounds[2]) / 2, cy = (bounds[1] + bounds[3]) / 2
       let result = [
         rotated[0], rotated[1], rotated[2], rotated[3],
-        rotated[4] + values[4], rotated[5] + values[5],
+        cx - (rotated[0] + rotated[2]) / 2, cy - (rotated[1] + rotated[3]) / 2,
       ]
       return zip(cm.operands, result).map {
         ($0.0.span, Array(ImageInventory.numberToken($0.1).utf8))

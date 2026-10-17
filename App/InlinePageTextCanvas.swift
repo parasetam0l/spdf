@@ -342,6 +342,22 @@ final class InlinePageTextCanvas: NSView, NSTextViewDelegate {
       self.synchronizeGeometry()
       self.publishPendingChange()
     }
+    viewer.pageTextAlignmentApplier = { [weak self] alignment in
+      guard let self, let viewer = self.viewer,
+        let page = viewer.view.document?.page(at: self.pageIndex),
+        let container = self.textView.textContainer, let manager = self.textView.layoutManager else { return }
+      manager.ensureLayout(for: container)
+      let used = manager.usedRect(for: container).offsetBy(
+        dx: self.textView.textContainerOrigin.x, dy: self.textView.textContainerOrigin.y)
+      let native = self.textView.convert(used, to: viewer.view)
+      var bounds = viewer.view.convert(native, to: page)
+      bounds.origin.x = self.sourceRect.minX + self.dx
+      bounds.size.width = self.pageBox().width
+      let delta = alignment.delta(for: bounds, in: page.bounds(for: viewer.view.displayBox))
+      self.dx += delta.x; self.dy += delta.y
+      self.synchronizeGeometry()
+      self.publishPendingChange()
+    }
     viewer.pageTextStyleApplier = { [weak self] style in self?.applyStyle(style) }
     viewer.pageTextWidthApplier = formatting == nil ? nil : { [weak self] width in
       self?.setTextWidth(width)
@@ -758,6 +774,7 @@ final class InlinePageTextCanvas: NSView, NSTextViewDelegate {
     viewer?.pageTextBeginTyping = nil
     viewer?.pageTextCancel = nil
     viewer?.pageTextPositionApplier = nil
+    viewer?.pageTextAlignmentApplier = nil
     viewer?.pageTextStyleApplier = nil
     viewer?.pageTextWidthApplier = nil
     viewer?.pageTextFormattingApplier = nil

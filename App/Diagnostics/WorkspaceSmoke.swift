@@ -70,6 +70,166 @@
       }
     }
 
+    private static func checkGraphicWorkflow(output: URL) async throws {
+      let controller = NSDocumentController.shared
+      let old = Set(controller.documents.map(ObjectIdentifier.init))
+      controller.newDocument(nil)
+      guard let document = controller.documents.first(where: { !old.contains(ObjectIdentifier($0)) }) as? SPDFDocument,
+        let viewer = document.viewer, let window = document.windowControllers.first?.window,
+        let content = window.contentView else { throw PDFError(.malformed, "Missing image workspace") }
+      defer { document.close() }
+      window.makeKeyAndOrderFront(nil)
+      viewer.setZoom(0.8)
+      let image = NSImage(size: NSSize(width: 160, height: 80), flipped: false) { rect in
+        NSColor.systemBlue.setFill(); rect.fill()
+        NSColor.systemOrange.setFill(); CGRect(x: 80, y: 0, width: 80, height: 80).fill()
+        return true
+      }
+      guard let bytes = image.tiffRepresentation, document.insertImage(bytes, pageIndex: 0),
+        viewer.selectedGraphics.count == 1 else { throw PDFError(.malformed, "Visible image insertion failed") }
+      viewer.setGraphicBounds(CGRect(x: 72, y: 100, width: 160, height: 80))
+      guard viewer.selectedGraphicBounds == CGRect(x: 72, y: 100, width: 160, height: 80),
+        document.insertImage(bytes, pageIndex: 0) else { throw PDFError(.malformed, "Image property selection was lost") }
+      viewer.setGraphicBounds(CGRect(x: 300, y: 240, width: 120, height: 60))
+      let targets = viewer.graphicsListProvider?(0) ?? []
+      guard targets.count == 2 else { throw PDFError(.malformed, "Second image placement failed") }
+      func find(_ root: NSView) -> GraphicSelectionOverlayView? {
+        if let overlay = root as? GraphicSelectionOverlayView { return overlay }
+        return root.subviews.lazy.compactMap { find($0) }.first
+      }
+      try await Task.sleep(for: .milliseconds(100))
+      guard let overlay = find(content) else { throw PDFError(.malformed, "Missing image overlay") }
+      func point(_ x: Double, _ y: Double) throws -> NSPoint {
+        guard let page = viewer.view.document?.page(at: 0) else { throw PDFError(.malformed, "Missing image page") }
+        return viewer.view.convert(viewer.view.convert(NSPoint(x: x, y: y), from: page), to: nil)
+      }
+      func mouse(_ type: NSEvent.EventType, _ point: NSPoint, flags: NSEvent.ModifierFlags = []) throws -> NSEvent {
+        guard let event = NSEvent.mouseEvent(with: type, location: point, modifierFlags: flags,
+          timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
+          context: nil, eventNumber: 0, clickCount: 1, pressure: type == .leftMouseUp ? 0 : 1)
+        else { throw PDFError(.malformed, "Missing image pointer event") }; return event
+      }
+      func key(_ code: UInt16, flags: NSEvent.ModifierFlags = []) throws {
+        guard let event = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: flags,
+          timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
+          context: nil, characters: "", charactersIgnoringModifiers: "", isARepeat: false, keyCode: code)
+        else { throw PDFError(.malformed, "Missing image key event") }; overlay.keyDown(with: event)
+      }
+      let baseline = try document.editSession.bytesForSave()
+      _ = viewer.activateTool(.select)
+      let first = try point(152, 140), moved = try point(172, 150)
+      overlay.mouseDown(with: try mouse(.leftMouseDown, first))
+      overlay.mouseDragged(with: try mouse(.leftMouseDragged, moved))
+      overlay.mouseUp(with: try mouse(.leftMouseUp, moved))
+      guard viewer.selectedGraphics.map(\.streamID) == [targets[0].streamID],
+        try document.editSession.bytesForSave() == baseline else {
+        throw PDFError(.malformed, "Select preview moved an image")
+      }
+      try key(53)
+      guard viewer.selectedGraphics.isEmpty else { throw PDFError(.malformed, "Escape did not clear preview selection") }
+      _ = viewer.activateTool(.imageEdit)
+      // A first drag selects and moves the object without a preparatory click.
+      overlay.mouseDown(with: try mouse(.leftMouseDown, first))
+      overlay.mouseDragged(with: try mouse(.leftMouseDragged, moved))
+      overlay.mouseUp(with: try mouse(.leftMouseUp, moved))
+      guard abs((viewer.selectedGraphicBounds?.minX ?? 0) - 92) < 0.005,
+        document.undoEdit(), try document.editSession.bytesForSave() == baseline else {
+        throw PDFError(.malformed, "First image drag or atomic Undo failed")
+      }
+      viewer.selectGraphics([viewer.graphicsListProvider!(0)[0]])
+      let second = try point(360, 270)
+      overlay.mouseDown(with: try mouse(.leftMouseDown, second, flags: .shift))
+      overlay.mouseUp(with: try mouse(.leftMouseUp, second, flags: .shift))
+      guard viewer.selectedGraphics.count == 2, let group = viewer.selectedGraphicBounds else {
+        throw PDFError(.malformed, "Shift-click did not extend image selection")
+      }
+      let grip = try point(group.maxX, group.maxY), destination = try point(group.maxX + 60, group.maxY + 30)
+      overlay.mouseDown(with: try mouse(.leftMouseDown, grip))
+      overlay.mouseDragged(with: try mouse(.leftMouseDragged, destination))
+      guard viewer.hasPendingGraphicGesture?() == true else { throw PDFError(.malformed, "Image resize preview missing") }
+      overlay.mouseUp(with: try mouse(.leftMouseUp, destination))
+      guard let resized = viewer.selectedGraphicBounds,
+        abs(resized.width - group.width - 60) < 0.005, abs(resized.height - group.height - 30) < 0.005 else {
+        throw PDFError(.malformed, "Group image resizing lost the shared bounds")
+      }
+      let a = viewer.selectedGraphics[0].rect, b = viewer.selectedGraphics[1].rect
+      guard abs((b[0] - a[0]) - (300 - 72) * resized.width / group.width) < 0.005,
+        document.undoEdit(), try document.editSession.bytesForSave() == baseline else {
+        throw PDFError(.malformed, "Group resize collapsed spacing or Undo")
+      }
+      overlay.mouseDown(with: try mouse(.leftMouseDown, grip))
+      overlay.mouseDragged(with: try mouse(.leftMouseDragged, destination))
+      try key(53)
+      overlay.mouseUp(with: try mouse(.leftMouseUp, destination))
+      guard viewer.hasPendingGraphicGesture?() == false, viewer.selectedGraphics.count == 2,
+        try document.editSession.bytesForSave() == baseline else {
+        throw PDFError(.malformed, "Escape failed to cancel image resize")
+      }
+      try key(124, flags: .shift)
+      guard abs((viewer.selectedGraphicBounds?.minX ?? 0) - group.minX - 10) < 0.005 else {
+        throw PDFError(.malformed, "Shift-arrow did not move images by ten points")
+      }
+      let nudged = try document.editSession.bytesForSave()
+      try key(123, flags: .command)
+      guard try document.editSession.bytesForSave() == nudged, document.undoEdit(),
+        try document.editSession.bytesForSave() == baseline else { throw PDFError(.malformed, "Modified shortcut moved images") }
+      try key(51)
+      guard viewer.graphicsListProvider?(0).isEmpty == true, document.undoEdit(),
+        try document.editSession.bytesForSave() == baseline else { throw PDFError(.malformed, "Atomic image Delete/Undo failed") }
+      viewer.selectGraphics([viewer.graphicsListProvider!(0)[0]])
+      let unrotated = viewer.selectedGraphicBounds!
+      viewer.onRotateGraphic?(viewer.selectedGraphics[0].streamID)
+      guard let turned = viewer.selectedGraphicBounds,
+        abs(turned.midX - unrotated.midX) < 0.005, abs(turned.midY - unrotated.midY) < 0.005,
+        abs(turned.width - unrotated.height) < 0.005 else {
+        throw PDFError(.malformed, "Inserted image rotation moved its center")
+      }
+      viewer.setGraphicBounds(CGRect(x: turned.minX, y: turned.minY,
+        width: turned.width * 1.5, height: turned.height * 0.5))
+      guard let scaledTurned = viewer.selectedGraphicBounds,
+        abs(scaledTurned.width - turned.width * 1.5) < 0.005,
+        abs(scaledTurned.height - turned.height * 0.5) < 0.005,
+        document.undoEdit(), document.undoEdit(), try document.editSession.bytesForSave() == baseline else {
+        throw PDFError(.malformed, "Rotated image resize or Undo failed")
+      }
+      viewer.selectGraphics(viewer.graphicsListProvider!(0))
+      viewer.alignGraphics(.center); viewer.alignGraphics(.middle)
+      guard let aligned = viewer.selectedGraphicBounds, let page = viewer.view.document?.page(at: 0),
+        abs(aligned.midX - page.bounds(for: .cropBox).midX) < 0.005,
+        abs(aligned.midY - page.bounds(for: .cropBox).midY) < 0.005 else {
+        throw PDFError(.malformed, "Image group alignment failed")
+      }
+      let saved = output.appendingPathComponent("image-workflow.pdf")
+      let error: Error? = await withCheckedContinuation { continuation in
+        document.save(to: saved, ofType: "com.adobe.pdf", for: .saveAsOperation) { continuation.resume(returning: $0) }
+      }
+      if let error { throw error }
+      let expected = viewer.selectedGraphics
+      let sourceBytes = try Data(contentsOf: saved)
+      document.close()
+      let reopened = try SPDFDocument(contentsOf: saved, ofType: "com.adobe.pdf")
+      controller.addDocument(reopened); reopened.makeWindowControllers()
+      defer { reopened.close() }
+      guard reopened.viewer?.graphicsListProvider?(0) == expected,
+        PDFDocument(data: sourceBytes)?.pageCount == 1 else { throw PDFError(.malformed, "Saved image geometry changed after reopening") }
+      guard let again = reopened.viewer else { throw PDFError(.malformed, "Missing reopened image viewer") }
+      _ = again.activateTool(.imageEdit)
+      again.selectGraphics(again.graphicsListProvider!(0))
+      // A native field-editor undo registration does not itself edit the PDF.
+      reopened.updateChangeCount(.changeDone)
+      guard !reopened.isDocumentEdited else { throw PDFError(.malformed, "Native property draft dirtied the saved PDF") }
+      again.alignGraphics(.left)
+      guard reopened.isDocumentEdited, reopened.undoEdit(), !reopened.isDocumentEdited,
+        try reopened.editSession.bytesForSave() == sourceBytes,
+        reopened.redoEdit(), reopened.isDocumentEdited, reopened.undoEdit(), !reopened.isDocumentEdited else {
+        throw PDFError(.malformed, "Image Undo/Redo disagreed with the saved PDF state")
+      }
+      try JSONSerialization.data(withJSONObject: ["status": "passed", "objects": expected.map {
+        ["id": $0.streamID.number, "rect": $0.rect] as [String: Any]
+      }, "checks": "insert, exact properties, safe Select, first-drag move, Shift-selection, shared resize, Escape, keyboard, Delete/Undo, alignment, Save and reopen"],
+        options: [.prettyPrinted, .sortedKeys]).write(to: output.appendingPathComponent("image-workflow.json"))
+    }
+
     static func run(output: URL) async {
       do {
         try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
@@ -178,6 +338,10 @@
       selected.mouseUp(with: try mouse(.leftMouseUp, point: movedPointer))
       guard viewer.pageTextPosition != position, document.isDocumentEdited else {
         throw PDFError(.malformed, "Selected-block drag did not move or mark pending text")
+      }
+      viewer.pageTextAlignmentApplier?(.center)
+      guard abs(selected.pageBox().x + selected.pageBox().width / 2 - page.bounds(for: .cropBox).midX) < 0.005 else {
+        throw PDFError(.malformed, "Text page alignment failed")
       }
       viewer.pageTextCancel?()
       guard !viewer.isEditingPageText,
@@ -538,7 +702,9 @@
         KeyboardAudit.find("Check for Updates…") != nil
       else { throw PDFError(.malformed, "Settings/menu structure regression") }
       settings.close()
+      try await checkGraphicWorkflow(output: output)
       return [
+        "graphicWorkflow": "insert, properties, preview, selection, shared resize, cancel, keyboard, delete, alignment, save/reopen",
         "directTextSelection":
           "single-click selection, body move/cancel, double-click typing, marked-text Save veto",
         "paragraphWorkflow":

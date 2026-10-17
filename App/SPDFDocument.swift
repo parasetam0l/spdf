@@ -66,7 +66,11 @@ final class SPDFDocument: NSDocument {
 
   override class var autosavesInPlace: Bool { false }
   nonisolated override var isDocumentEdited: Bool {
-    super.isDocumentEdited || editSession.isDirty || pendingPageText.hasChanges
+    // Field editors can register native undo without changing PDF content.
+    // For an opened file, the canonical graph and pending page text decide
+    // whether Save is needed, including Undo back to the saved graph.
+    // Untitled/recovered documents still need their initial Save As.
+    (fileURL == nil && super.isDocumentEdited) || editSession.isDirty || pendingPageText.hasChanges
   }
   nonisolated override class func canConcurrentlyReadDocuments(ofType typeName: String) -> Bool {
     true
@@ -455,6 +459,12 @@ final class SPDFDocument: NSDocument {
     viewer.onRotateGraphic = { [weak self] streamID in
       _ = self?.rotateGraphic(streamID: streamID)
     }
+    viewer.onDeleteGraphics = { [weak self] ids in
+      guard let self, let selection = self.viewer?.selectedGraphics.first,
+        let pageID = self.pageID(at: selection.pageIndex) else { return }
+      _ = self.applyImageTransaction([DeleteAddedGraphicsCommand(pageID: pageID, streamIDs: ids)])
+    }
+    viewer.onInsertImage = { [weak self] in self?.promptInsertImage() }
     let window = NSWindow(
       contentRect: NSRect(x: 0, y: 0, width: 1_080, height: 760),
       styleMask: [.titled, .closable, .miniaturizable, .resizable],
@@ -3754,6 +3764,43 @@ final class SPDFDocument: NSDocument {
 
   // MARK: - Added-graphics selection (P12-017)
 
+  private func promptInsertImage() {
+    guard editSession.canEdit, let window = windowControllers.first?.window,
+      let pageIndex = viewer?.pageNumber.advanced(by: -1) else { return }
+    let panel = NSOpenPanel()
+    panel.allowedContentTypes = [.image]
+    panel.canChooseDirectories = false
+    panel.allowsMultipleSelection = false
+    panel.prompt = "Insert Image"
+    panel.beginSheetModal(for: window) { [weak self] response in
+      guard response == .OK, let url = panel.url, let self else { return }
+      do {
+        let data = try Data(contentsOf: url)
+        guard self.insertImage(data, pageIndex: pageIndex) else { return }
+      } catch { self.presentError(error) }
+    }
+  }
+
+  @discardableResult
+  func insertImage(_ data: Data, pageIndex: Int) -> Bool {
+    guard editSession.canEdit, let pageID = pageID(at: pageIndex), let viewer,
+      let page = viewer.view.document?.page(at: pageIndex) else { return false }
+    guard let raster = ImageImport.decode(data) else {
+      presentError(PDFError(.unsupported, "This image could not be imported")); return false
+    }
+    let crop = page.bounds(for: viewer.view.displayBox)
+    let scale = min(crop.width * 0.5 / Double(raster.width), crop.height * 0.5 / Double(raster.height))
+    let width = Double(raster.width) * scale, height = Double(raster.height) * scale
+    let rect = [crop.midX - width / 2, crop.midY - height / 2, crop.midX + width / 2, crop.midY + height / 2]
+    let existing = Set(graphicsList(pageIndex: pageIndex).map(\.streamID))
+    guard applyImageTransaction([PlaceImageCommand(pageID: pageID, rect: rect,
+      width: raster.width, height: raster.height, rgb8: raster.rgb8)]) else { return false }
+    _ = viewer.activateTool(.imageEdit)
+    viewer.selectGraphics(graphicsList(pageIndex: pageIndex).filter { !existing.contains($0.streamID) })
+    viewer.graphicSelectionFocuser?()
+    return true
+  }
+
   /// Resolve the topmost selectable app-created graphic under a page point.
   private func graphicTarget(pageIndex: Int, pagePoint: [Double]) -> AddedGraphicTarget? {
     guard pageIndex >= 0, pageIndex < editSession.pageIDs.count,
@@ -4328,6 +4375,7 @@ final class SPDFDocument: NSDocument {
       let source = try? PDFSource(data: data)
     else { return }
     let tool = viewer?.activeTool ?? .select
+    let selectedGraphics = viewer?.selectedGraphics ?? []
     let scale = viewer?.view.scaleFactor ?? 1
     let autoScales = viewer?.view.autoScales ?? true
     try? WorkspacePerformance.profile("renderer-reload") { try viewer?.open(source) }
@@ -4335,6 +4383,10 @@ final class SPDFDocument: NSDocument {
     if !autoScales { viewer?.view.scaleFactor = scale }
     viewer?.activateTool(tool)
     if page > 0 { viewer?.go(to: page) }
+    let refreshedGraphics = selectedGraphics.compactMap { selected in
+      graphicsList(pageIndex: selected.pageIndex).first { $0.streamID == selected.streamID }
+    }
+    if !refreshedGraphics.isEmpty { viewer?.selectGraphics(refreshedGraphics) }
     refreshComments()
     refreshForms()
     refreshFonts()

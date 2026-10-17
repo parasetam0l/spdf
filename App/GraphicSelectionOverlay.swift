@@ -20,6 +20,7 @@ struct GraphicSelectionOverlay: NSViewRepresentable {
     let view = GraphicSelectionOverlayView()
     view.viewer = viewer
     viewer.hasPendingGraphicGesture = { [weak view] in view?.hasPendingGesture ?? false }
+    viewer.graphicSelectionFocuser = { [weak view] in view?.focusForKeyboard() }
     return view
   }
 
@@ -46,7 +47,6 @@ final class GraphicSelectionOverlayView: NSView {
   private var drag: Drag?
   fileprivate var hasPendingGesture: Bool { drag != nil }
   private var pressGraphic: AddedGraphicTarget?
-  private var pressPoint: NSPoint = .zero
 
   override var acceptsFirstResponder: Bool {
     // Key status only while a selection exists to nudge or clear; otherwise
@@ -79,9 +79,9 @@ final class GraphicSelectionOverlayView: NSView {
     -> (page: PDFPage, index: Int, pagePoint: NSPoint)?
   {
     guard let viewer, let document = viewer.view.document,
-      let page = viewer.view.page(for: overlayPoint, nearest: false)
+      let page = viewer.view.page(for: convert(overlayPoint, to: viewer.view), nearest: false)
     else { return nil }
-    return (page, document.index(for: page), viewer.view.convert(overlayPoint, to: page))
+    return (page, document.index(for: page), viewer.view.convert(convert(overlayPoint, to: viewer.view), to: page))
   }
 
   private func overlayRect(pageRect: CGRect, on page: PDFPage) -> CGRect? {
@@ -112,12 +112,18 @@ final class GraphicSelectionOverlayView: NSView {
   }
 
   private func handleAt(_ point: NSPoint) -> GraphicHandle? {
-    for (_, rect) in selectionRects() {
-      if let handle = GraphicSelectionModel.handle(at: point, selection: rect) {
-        return handle
-      }
-    }
-    return nil
+    guard let viewer, let bounds = GraphicSelectionModel.union(selectionRects().map(\.1)),
+      let handle = GraphicSelectionModel.handle(at: point, selection: bounds),
+      let selected = viewer.selectedGraphics.first,
+      let page = viewer.view.document?.page(at: selected.pageIndex),
+      let pageBounds = viewer.selectedGraphicBounds,
+      let center = GraphicSelectionModel.handleCenters(bounds: bounds).first(where: { $0.0 == handle })?.1
+    else { return nil }
+    // Handle names belong to page space, even when PDFKit rotates the page.
+    let mapped = viewer.view.convert(convert(center, to: viewer.view), to: page)
+    return GraphicSelectionModel.handleCenters(bounds: pageBounds).min {
+      hypot($0.1.x - mapped.x, $0.1.y - mapped.y) < hypot($1.1.x - mapped.x, $1.1.y - mapped.y)
+    }?.0
   }
 
   private func graphicAt(_ point: NSPoint) -> AddedGraphicTarget? {
@@ -156,17 +162,28 @@ final class GraphicSelectionOverlayView: NSView {
   override func mouseDown(with event: NSEvent) {
     guard toolsEnabled else { return }
     let point = convert(event.locationInWindow, from: nil)
-    pressPoint = point
     pressGraphic = nil
     if editsEnabled, let handle = handleAt(point) {
       drag = .resize(
         handle: handle, start: point, current: point,
         uniform: event.modifierFlags.contains(.shift))
+      focusForKeyboard()
       return
     }
-    if let target = graphicAt(point) {
+    if let target = graphicAt(point), let viewer {
+      if event.modifierFlags.contains(.shift) {
+        let exists = viewer.selectedGraphics.contains { $0.streamID == target.streamID }
+        viewer.selectGraphics(exists ? viewer.selectedGraphics.filter { $0.streamID != target.streamID }
+          : viewer.selectedGraphics + [target])
+        focusForKeyboard()
+        return
+      }
+      if !viewer.selectedGraphics.contains(where: { $0.streamID == target.streamID }) {
+        viewer.selectGraphics([target])
+      }
       pressGraphic = target
       drag = .move(start: point, current: point)
+      focusForKeyboard()
       return
     }
     if let (_, index, _) = pageAndPoint(at: point),
@@ -209,8 +226,7 @@ final class GraphicSelectionOverlayView: NSView {
       let moved = hypot(point.x - start.x, point.y - start.y) > Self.clickTolerance
       if moved, editsEnabled {
         commitMove(from: start, to: point)
-      } else if let target = pressGraphic {
-        viewer?.selectGraphics([target])
+      } else if pressGraphic != nil {
         focusForKeyboard()
       } else {
         viewer?.clearGraphicSelection()
@@ -225,10 +241,10 @@ final class GraphicSelectionOverlayView: NSView {
 
   private func pageDelta(from start: NSPoint, to end: NSPoint) -> NSPoint? {
     guard let viewer,
-      let startPage = viewer.view.page(for: start, nearest: false)
+      let startPage = viewer.view.page(for: convert(start, to: viewer.view), nearest: false)
     else { return nil }
-    let a = viewer.view.convert(start, to: startPage)
-    let b = viewer.view.convert(end, to: startPage)
+    let a = viewer.view.convert(convert(start, to: viewer.view), to: startPage)
+    let b = viewer.view.convert(convert(end, to: viewer.view), to: startPage)
     return NSPoint(x: b.x - a.x, y: b.y - a.y)
   }
 
@@ -241,32 +257,23 @@ final class GraphicSelectionOverlayView: NSView {
       viewer.selectedGraphics.map { (streamID: $0.streamID, dx: Double(delta.x), dy: Double(delta.y)) })
   }
 
+  private func resizedBounds(handle: GraphicHandle, from start: NSPoint, to end: NSPoint,
+    uniform: Bool) -> CGRect? {
+    guard let viewer, let group = viewer.selectedGraphicBounds,
+      let delta = pageDelta(from: start, to: end),
+      let center = GraphicSelectionModel.handleCenters(bounds: group).first(where: { $0.0 == handle })?.1,
+      let m = GraphicSelectionModel.resize(handle: handle, startBounds: group,
+        current: CGPoint(x: center.x + delta.x, y: center.y + delta.y), uniform: uniform)
+    else { return nil }
+    return CGRect(x: group.minX + m.dx, y: group.minY + m.dy,
+      width: group.width * m.scaleX, height: group.height * m.scaleY)
+  }
+
   private func commitResize(
     handle: GraphicHandle, from start: NSPoint, to end: NSPoint, uniform: Bool
   ) {
-    guard let viewer, !viewer.selectedGraphics.isEmpty else { return }
-    var batch: [(
-      streamID: PDFObjectID, dx: Double, dy: Double, scaleX: Double, scaleY: Double
-    )] = []
-    for target in viewer.selectedGraphics {
-      guard target.rect.count == 4,
-        let page = viewer.view.document?.page(at: target.pageIndex)
-      else { continue }
-      let current = viewer.view.convert(end, to: page)
-      let bounds = CGRect(
-        x: target.rect[0], y: target.rect[1],
-        width: target.rect[2] - target.rect[0], height: target.rect[3] - target.rect[1])
-      guard
-        let mapping = GraphicSelectionModel.resize(
-          handle: handle, startBounds: bounds,
-          current: CGPoint(x: Double(current.x), y: Double(current.y)),
-          uniform: uniform)
-      else { continue }
-      batch.append((
-        streamID: target.streamID, dx: mapping.dx, dy: mapping.dy,
-        scaleX: mapping.scaleX, scaleY: mapping.scaleY))
-    }
-    if !batch.isEmpty { viewer.onResizeGraphics?(batch) }
+    guard let bounds = resizedBounds(handle: handle, from: start, to: end, uniform: uniform) else { return }
+    viewer?.setGraphicBounds(bounds)
   }
 
   private func commitRubberBand(from start: NSPoint, to end: NSPoint, pageIndex: Int) {
@@ -276,31 +283,40 @@ final class GraphicSelectionOverlayView: NSView {
     let rect = CGRect(
       x: min(start.x, end.x), y: min(start.y, end.y),
       width: abs(end.x - start.x), height: abs(end.y - start.y))
-    var boxes: [CGRect] = []
-    for target in candidates {
-      guard let box = overlayRect(of: target) else { continue }
-      boxes.append(box)
+    let valid = candidates.compactMap { target -> (AddedGraphicTarget, CGRect)? in
+      guard let box = overlayRect(of: target) else { return nil }; return (target, box)
     }
-    let hits = GraphicSelectionModel.rubberBandSelect(rect: rect, candidates: boxes)
-    viewer.selectGraphics(hits.map { candidates[$0] })
+    let hits = GraphicSelectionModel.rubberBandSelect(rect: rect, candidates: valid.map(\.1))
+    viewer.selectGraphics(hits.map { valid[$0].0 })
     if !hits.isEmpty { focusForKeyboard() }
   }
 
-  private func focusForKeyboard() {
+  fileprivate func focusForKeyboard() {
     window?.makeFirstResponder(self)
   }
 
   // MARK: - Keyboard
 
+  override func cancelOperation(_ sender: Any?) {
+    if drag != nil {
+      drag = nil; pressGraphic = nil
+      needsDisplay = true
+    } else {
+      viewer?.clearGraphicSelection()
+      window?.makeFirstResponder(viewer?.view)
+    }
+  }
+
   override func keyDown(with event: NSEvent) {
-    guard editsEnabled, let viewer, !viewer.selectedGraphics.isEmpty else {
+    if event.keyCode == 53 { cancelOperation(nil); return }
+    if drag != nil { return }
+    guard editsEnabled, let viewer, !viewer.selectedGraphics.isEmpty,
+      event.modifierFlags.intersection([.command, .control, .option]).isEmpty else {
       super.keyDown(with: event)
       return
     }
-    // Escape clears the selection; arrows nudge it (Shift: 10 pt).
-    if event.keyCode == 53 {
-      viewer.clearGraphicSelection()
-      window?.makeFirstResponder(viewer.view)
+    if event.keyCode == 51 || event.keyCode == 117 {
+      viewer.deleteSelectedGraphics()
       return
     }
     let step: Double = event.modifierFlags.contains(.shift) ? 10 : 1
@@ -347,8 +363,21 @@ final class GraphicSelectionOverlayView: NSView {
     {
       preview = NSPoint(x: current.x - start.x, y: current.y - start.y)
     }
-    for (_, rect) in selectionRects() {
-      let drawn = rect.offsetBy(dx: preview.x, dy: preview.y)
+    var rects = selectionRects().map(\.1).map { $0.offsetBy(dx: preview.x, dy: preview.y) }
+    if case .resize(let handle, let start, let current, let uniform) = drag,
+      let viewer, let group = viewer.selectedGraphicBounds,
+      let destination = resizedBounds(handle: handle, from: start, to: current, uniform: uniform),
+      let selected = viewer.selectedGraphics.first,
+      let page = viewer.view.document?.page(at: selected.pageIndex) {
+      rects = viewer.selectedGraphics.compactMap { target in
+        let member = CGRect(x: target.rect[0], y: target.rect[1],
+          width: target.rect[2] - target.rect[0], height: target.rect[3] - target.rect[1])
+        guard let m = GraphicSelectionModel.mapping(member: member, from: group, to: destination) else { return nil }
+        return overlayRect(pageRect: CGRect(x: member.minX + m.dx, y: member.minY + m.dy,
+          width: member.width * m.scaleX, height: member.height * m.scaleY), on: page)
+      }
+    }
+    for drawn in rects {
       accent.setStroke()
       let frame = NSBezierPath(rect: drawn)
       frame.lineWidth = 2
@@ -357,21 +386,19 @@ final class GraphicSelectionOverlayView: NSView {
       let inner = NSBezierPath(rect: drawn.insetBy(dx: 1, dy: 1))
       inner.lineWidth = 1
       inner.stroke()
-      // Handles only in the Image Edit tool; preview modes show the
-      // selection frame without offering a mutation affordance.
-      guard editsEnabled else { continue }
-      for (_, center) in GraphicSelectionModel.handleCenters(bounds: drawn) {
-        let visual = CGRect(
-          x: center.x - GraphicSelectionModel.handleVisualSize / 2,
-          y: center.y - GraphicSelectionModel.handleVisualSize / 2,
-          width: GraphicSelectionModel.handleVisualSize,
-          height: GraphicSelectionModel.handleVisualSize)
-        NSColor.white.setFill()
-        NSBezierPath(rect: visual).fill()
+    }
+    // One set of handles describes the shared transform, including spacing.
+    if editsEnabled, let bounds = GraphicSelectionModel.union(rects) {
+      if rects.count > 1 {
         accent.setStroke()
-        let outline = NSBezierPath(rect: visual)
-        outline.lineWidth = 2
-        outline.stroke()
+        let group = NSBezierPath(rect: bounds)
+        group.setLineDash([4, 3], count: 2, phase: 0); group.stroke()
+      }
+      for (_, center) in GraphicSelectionModel.handleCenters(bounds: bounds) {
+        let visual = CGRect(x: center.x - 6, y: center.y - 6, width: 12, height: 12)
+        NSColor.white.setFill(); NSBezierPath(rect: visual).fill()
+        accent.setStroke()
+        let outline = NSBezierPath(rect: visual); outline.lineWidth = 2; outline.stroke()
       }
     }
   }

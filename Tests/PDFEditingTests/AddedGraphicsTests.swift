@@ -10,6 +10,39 @@ import Testing
 /// for unsupported graphic kinds.
 @Suite("Added graphics groups and transforms")
 struct AddedGraphicsTests {
+  @Test func deleteSelectionPreservesNativePaintAndSharedImageResources() throws {
+    let original = try graph()
+    let pageID = try PDFPageTree.pageIDs(in: original)[0]
+    let nativeIDs = try appendedStreamIDs(original, pageID)
+    let placed = try PDFEditingEngine.commit(PDFTransaction([
+      AddVectorShapeCommand(pageID: pageID, shape: .rectangle([10, 10, 60, 40]),
+        style: AddedShapeStyle(strokeColor: [0, 0, 0])),
+      PlaceImageCommand(pageID: pageID, rect: [100, 100, 150, 150], width: 2, height: 2,
+        rgb8: Data(repeating: 160, count: 12))
+    ]), to: original)
+    let ids = try newStreamIDs(placed, pageID, original: Set(nativeIDs))
+    let grouped = try PDFEditingEngine.commit(PDFTransaction([
+      CreateAddedGroupCommand(members: ids, label: "selection", groupID: "selection")
+    ]), to: placed)
+    let deleted = try PDFEditingEngine.commit(PDFTransaction([
+      DeleteAddedGraphicsCommand(pageID: pageID, streamIDs: ids)
+    ]), to: grouped)
+    #expect(try AddedGraphics.selectable(pageID: pageID, in: deleted).isEmpty)
+    #expect(try AddedGraphicsGroups.list(in: deleted).isEmpty)
+    #expect(try appendedStreamIDs(deleted, pageID) == nativeIDs)
+    for id in nativeIDs { #expect(deleted.objects[id] == original.objects[id]) }
+    // Detaching paint must not delete objects that may still be shared.
+    for (id, value) in placed.objects {
+      if case .stream = value { #expect(deleted.objects[id] == value) }
+    }
+    let reopened = try PDFParser.parse(PDFWriter.write(deleted))
+    #expect(try AddedGraphics.selectable(pageID: pageID, in: reopened.graph).isEmpty)
+    #expect(throws: PDFError.self) {
+      _ = try PDFEditingEngine.commit(PDFTransaction([
+        DeleteAddedGraphicsCommand(pageID: pageID, streamIDs: nativeIDs)
+      ]), to: grouped)
+    }
+  }
   private func graph() throws -> PDFGraph {
     try PDFParser.parse(PDFFixtures.threePages()).graph
   }
@@ -122,6 +155,15 @@ struct AddedGraphicsTests {
     let bounds = try #require(try AddedGraphics.boundsOf(streamID: streamID, in: rotated))
     #expect(abs((bounds[2] - bounds[0]) - 25) < 1e-6)
     #expect(abs((bounds[3] - bounds[1]) - 200) < 1e-6)
+    #expect(abs((bounds[0] + bounds[2]) / 2 - 210) < 1e-6)
+    #expect(abs((bounds[1] + bounds[3]) / 2 - 92.5) < 1e-6)
+    let scaledRotated = try PDFEditingEngine.commit(PDFTransaction([
+      ScaleAddedGraphicCommand(streamID: streamID, scaleX: 2, scaleY: 0.5)
+    ]), to: rotated)
+    let scaledBounds = try #require(try AddedGraphics.boundsOf(streamID: streamID, in: scaledRotated))
+    #expect(abs(scaledBounds[0] - bounds[0]) < 1e-6 && abs(scaledBounds[1] - bounds[1]) < 1e-6)
+    #expect(abs(scaledBounds[2] - scaledBounds[0] - 50) < 1e-6)
+    #expect(abs(scaledBounds[3] - scaledBounds[1] - 100) < 1e-6)
     // The stamp still draws the same image object.
     let beforeImages = try PDFImageInventory.images(in: placed, pageIDs: [pageID])
     let afterImages = try PDFImageInventory.images(in: rotated, pageIDs: [pageID])
