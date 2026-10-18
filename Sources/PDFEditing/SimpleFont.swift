@@ -59,6 +59,7 @@ enum GlyphNames {
 struct SimpleFont: Equatable {
   enum BaseEncoding: Equatable {
     case winAnsi
+    case macRoman
     case standardASCII
     case unsupportedName(String)
   }
@@ -90,7 +91,7 @@ struct SimpleFont: Equatable {
   var isSupported: Bool {
     if let toUnicode, !toUnicode.isEmpty { return true }
     switch baseEncoding {
-    case .winAnsi, .standardASCII: return !hasUnknownDifferences
+    case .winAnsi, .macRoman, .standardASCII: return !hasUnknownDifferences
     case .unsupportedName: return false
     }
   }
@@ -146,6 +147,12 @@ struct SimpleFont: Equatable {
         result += mapped
         continue
       }
+      // An unknown Differences name replaces the base glyph too. Never
+      // silently read (or later write) the base character at that code.
+      if differenceNames[code] != nil {
+        result += "\u{FFFD}"
+        continue
+      }
       switch baseEncoding {
       case .winAnsi:
         if let text = String(bytes: [code], encoding: .windowsCP1252) {
@@ -153,6 +160,8 @@ struct SimpleFont: Equatable {
         } else {
           result += "\u{FFFD}"
         }
+      case .macRoman:
+        result += PDFMacRoman.characters[code].map(String.init) ?? "\u{FFFD}"
       case .standardASCII:
         switch code {
         case 0x20...0x7E:
@@ -174,9 +183,16 @@ struct SimpleFont: Equatable {
   /// Type 3 font (P14-023) a code is accepted only when its Differences name
   /// names a glyph program that exists in `/CharProcs`.
   func encode(_ text: String) -> [UInt8]? {
-    var reverse: [Character: UInt8] = [:]
-    for (code, mapped) in differences {
-      if let character = mapped.first, mapped.count == 1 { reverse[character] = code }
+    var reverse: [Character: [UInt8]] = [:]
+    for (code, mapped) in differences.sorted(by: { $0.key < $1.key }) {
+      if let character = mapped.first, mapped.count == 1 {
+        reverse[character, default: []].append(code)
+      }
+    }
+    if case .macRoman = baseEncoding {
+      for (character, codes) in PDFMacRoman.codes {
+        reverse[character, default: []] += codes
+      }
     }
     if case .standardASCII = baseEncoding {
       for code in 0x20...0x7E {
@@ -189,10 +205,11 @@ struct SimpleFont: Equatable {
         } else {
           character = Character(UnicodeScalar(byte))
         }
-        if reverse[character] == nil { reverse[character] = byte }
+        reverse[character, default: []].append(byte)
       }
     }
-    func verified(_ code: UInt8) -> UInt8? {
+    func verified(_ code: UInt8, for character: Character) -> UInt8? {
+      guard decode([code]) == String(character) else { return nil }
       guard isType3 else { return code }
       guard let name = differenceNames[code], let charProcNames,
         charProcNames.contains(name)
@@ -205,25 +222,25 @@ struct SimpleFont: Equatable {
     for character in text {
       // P19-007: an explicit ToUnicode CMap is the reverse map of choice.
       if let toUnicode, let code = toUnicode.code(for: String(character)),
-        let code = verified(code)
+        let code = verified(code, for: character)
       {
         codes.append(code)
         continue
       }
-      if let code = reverse[character], let code = verified(code) {
+      if let code = reverse[character]?.lazy.compactMap({ verified($0, for: character) }).first {
         codes.append(code)
         continue
       }
       switch baseEncoding {
       case .winAnsi:
         guard let data = String(character).data(using: .windowsCP1252), data.count == 1,
-          let code = verified(data[0])
+          let code = verified(data[0], for: character)
         else {
           return nil
         }
         codes.append(code)
-      case .standardASCII:
-        return nil  // character has no StandardEncoding code in the supported subset
+      case .macRoman, .standardASCII:
+        return nil  // character has no verified code in the supported base encoding
       case .unsupportedName:
         return nil
       }
@@ -272,7 +289,6 @@ struct SimpleFont: Equatable {
     var baseEncoding: BaseEncoding = .standardASCII
     var differences: [UInt8: String] = [:]
     var differenceNames: [UInt8: String] = [:]
-    var unknownDifferences = false
     let encoding = FontValue.resolve(dictionary[PDFName("Encoding")], in: graph)
     if dictionary[PDFName("Encoding")] != nil && encoding == nil { return nil }
     switch encoding {
@@ -297,7 +313,7 @@ struct SimpleFont: Equatable {
               if let unicode = GlyphNames.unicode(for: name) {
                 differences[UInt8(code)] = unicode
               } else {
-                unknownDifferences = true
+                differences.removeValue(forKey: UInt8(code))
               }
               current = code + 1
             }
@@ -309,6 +325,7 @@ struct SimpleFont: Equatable {
     default:
       return nil
     }
+    let unknownDifferences = differenceNames.keys.contains { differences[$0] == nil }
     // Widths: FirstChar/Widths pairs, with the descriptor's MissingWidth for
     // codes outside the covered range.
     var firstChar: Int?
@@ -377,7 +394,7 @@ struct SimpleFont: Equatable {
   private static func encoding(named name: PDFName) -> BaseEncoding {
     switch name {
     case PDFName("WinAnsiEncoding"): return .winAnsi
-    case PDFName("MacRomanEncoding"): return .unsupportedName("MacRomanEncoding")
+    case PDFName("MacRomanEncoding"): return .macRoman
     case PDFName("StandardEncoding"): return .standardASCII
     default: return .unsupportedName(String(decoding: name.bytes, as: UTF8.self))
     }

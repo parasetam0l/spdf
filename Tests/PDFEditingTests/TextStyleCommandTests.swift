@@ -280,21 +280,21 @@ struct TextStyleCommandTests {
     let supported = TextEditabilityCheck.assess(pageID: pageID, runIndex: 0, in: graph)
     #expect(supported.isEditable && supported.reasons.isEmpty)
 
-    var macRoman = graph
-    guard case .dictionary(let page)? = macRoman.objects[pageID],
+    var macExpert = graph
+    guard case .dictionary(let page)? = macExpert.objects[pageID],
       case .dictionary(let resources)? = page[PDFName("Resources")],
       case .dictionary(let fonts)? = resources[PDFName("Font")],
       case .reference(let fontID)? = fonts[PDFName("F1")],
-      case .dictionary(var font)? = macRoman.objects[fontID]
+      case .dictionary(var font)? = macExpert.objects[fontID]
     else {
       Issue.record("fixture font missing")
       return
     }
-    font[PDFName("Encoding")] = .name(PDFName("MacRomanEncoding"))
-    macRoman.objects[fontID] = .dictionary(font)
-    let refused = TextEditabilityCheck.assess(pageID: pageID, runIndex: 0, in: macRoman)
+    font[PDFName("Encoding")] = .name(PDFName("MacExpertEncoding"))
+    macExpert.objects[fontID] = .dictionary(font)
+    let refused = TextEditabilityCheck.assess(pageID: pageID, runIndex: 0, in: macExpert)
     #expect(!refused.isEditable)
-    #expect(refused.reasons.joined().contains("MacRoman"))
+    #expect(refused.reasons.joined().contains("MacExpert"))
 
     var clipped = graph
     guard case .stream(let stream)? = clipped.objects[PDFObjectID(5)] else {

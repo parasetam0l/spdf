@@ -72,7 +72,7 @@ struct RedactionTests {
       Issue.record("Fixture font missing")
       return
     }
-    font[PDFName("Encoding")] = .name(PDFName("MacRomanEncoding"))
+    font[PDFName("Encoding")] = .name(PDFName("MacExpertEncoding"))
     graph.objects[fontID] = .dictionary(font)
     do {
       _ = try PDFEditingEngine.commit(

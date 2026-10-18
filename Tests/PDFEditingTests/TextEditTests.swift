@@ -109,7 +109,7 @@ struct TextEditTests {
         ]), to: parsed.graph)
     }
 
-    // MacRoman fonts are out of the first supported profile.
+    // MacExpert fonts are out of the first supported profile.
     var unsupported = parsed.graph
     guard case .dictionary(let page)? = unsupported.objects[pageID],
       case .dictionary(let resources)? = page[PDFName("Resources")],
@@ -120,7 +120,7 @@ struct TextEditTests {
       Issue.record("Fixture font missing")
       return
     }
-    font[PDFName("Encoding")] = .name(PDFName("MacRomanEncoding"))
+    font[PDFName("Encoding")] = .name(PDFName("MacExpertEncoding"))
     unsupported.objects[fontID] = .dictionary(font)
     #expect(throws: PDFError.self) {
       _ = try PDFEditingEngine.commit(

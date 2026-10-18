@@ -122,6 +122,64 @@ struct ImportedParagraphInteropTests {
     }
   }
 
+  @Test @MainActor func macRomanSubsetParagraphReopensWithoutSubstitution() throws {
+    let (original, pageID) = try fixture(composite: false)
+    var graph = original
+    guard case .dictionary(var font)? = graph.objects[PDFObjectID(4)] else {
+      Issue.record("fixture font missing"); return
+    }
+    let program = try #require(Data(base64Encoded: FontFixtureData.subsetProgramBase64))
+    let inspector = try TrueTypeInspector.inspect(program)
+    font[PDFName("Encoding")] = .name(PDFName("MacRomanEncoding"))
+    font.removeValue(forKey: PDFName("ToUnicode"))
+    font[PDFName("FirstChar")] = .integer(32)
+    font[PDFName("LastChar")] = .integer(255)
+    font[PDFName("Widths")] = .array((32...255).map { code in
+      let scalar = PDFMacRoman.characters[UInt8(code)]?.unicodeScalars.first
+      let glyph = scalar.flatMap { inspector.unicodeToGlyph[Int($0.value)] }
+      let advance = glyph.flatMap { inspector.advances[$0] } ?? 0
+      return .real((Double(advance) * 1_000 / Double(inspector.unitsPerEm)).rounded())
+    })
+    graph.objects[PDFObjectID(4)] = .dictionary(font)
+    graph.objects[PDFObjectID(5)] = .stream(PDFStream(bytes: Data("""
+      BT /F1 16 Tf 1 0 0 1 42 700 Tm <414243208920DE20414243208920DE> Tj
+      0 -22 Td <414243208920DE20414243208920DE> Tj ET
+      """.utf8)))
+    let profiles = try PageTextEditing.fontProfiles(pageID: pageID, in: graph)
+    let profile = try #require(profiles[PDFName("F1")])
+    #expect(profile.glyphs["â"]?.codes == [137])
+    #expect(profile.glyphs["ﬁ"]?.codes == [222])
+    #expect(profile.glyphs["Z"] == nil)
+    let target = try #require(targets(graph, pageID: pageID).first { $0.paragraph != nil })
+    let paragraph = try #require(target.paragraph)
+    #expect(target.text.contains("ABC â ﬁ"))
+    let format = try #require(paragraph.fragments.first?.format)
+    #expect(format.sourceFont?.name == "DejaVuSans")
+    let view = NSTextView()
+    let formatting = NativeTextFormatting(view: view, fragments: paragraph.fragments,
+      initial: format, profiles: profiles)
+    formatting.render(scale: 1, minimumLineSpacing: 22)
+    #expect(!formatting.hasChanges)
+    #expect(view.string == target.text)
+    let text = "CBA â ﬁ ABC"
+    let lines = [PageTextLine(text: text, x: 42, baseline: 700,
+      segments: [.init(text: text, x: 42, format: format)])]
+    let edited = try PDFEditingEngine.commit(PDFTransaction([
+      RewritePageTextCommand(pageID: pageID, originalText: paragraph.originalText,
+        lines: lines, fontSize: 16, color: [0, 0, 0],
+        box: .init(x: 42, firstBaseline: 700, width: 240, lineSpacing: 22))
+    ]), to: graph)
+    let bytes = try PDFWriter.write(edited)
+    // PDFKit expands the fi presentation ligature during text extraction.
+    // The owned decoder/reselected paragraph must retain its actual scalar.
+    #expect(PDFDocument(data: bytes)?.string?.contains("CBA â fi ABC") == true)
+    #expect(edited.objects[PDFObjectID(4)] == graph.objects[PDFObjectID(4)])
+    #expect(edited.objects[PDFObjectID(7)] == graph.objects[PDFObjectID(7)])
+    let reopened = try targets(PDFParser.parse(bytes).graph, pageID: pageID)
+    let reselected = try #require(reopened.first { $0.text == text && $0.paragraph != nil })
+    #expect(reselected.paragraph?.fragments.first?.format.sourceFont == format.sourceFont)
+  }
+
   @Test @MainActor func adjustedIdentityArrayKeepsItsFollowingPenAndRefusesPartialErasure() throws {
     let (graph, pageID) = try fixture(composite: true, adjusted: true)
     let target = try #require(targets(graph, pageID: pageID).first { $0.paragraph != nil })

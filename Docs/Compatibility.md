@@ -19,6 +19,8 @@ Rendering a PDF does not imply that every element can be edited. sPDF preserves 
 
 The native app currently limits source snapshots to 256 MiB. Parsing, stream decoding, traversal, and export paths have separate bounded budgets. Larger or unsupported documents can fall back to restricted viewing.
 
+Single-byte text supports WinAnsi and PDF MacRoman encodings, including explicit glyph overrides and Unicode maps. Replacements must map back to the intended characters using the existing font. Undefined codes and missing subset glyphs refuse substitution. Encoding support alone does not establish that a paragraph's layout can be edited safely.
+
 Untouched documents retain their original bytes. Eligible edits to classic cross-reference files use incremental saves. Sources using cross-reference streams use a verified full rewrite when edited, so the saved document remains readable in Apple's renderer. Unsupported signatures and protection states retain their separate save restrictions.
 
 Object-stream collections are accepted with checked references and bounded, acyclic links. Editing a linearized PDF saves a normal PDF with stale, unreferenced fast-web-view hints removed; the original file is preserved until Save. Referenced hints, signatures and protection keep their separate restrictions.

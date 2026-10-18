@@ -62,8 +62,13 @@ struct CorpusWorkflowTests {
         before += layout.clusters.map(\.text).joined(separator: "\n")
       }
       // Full-rewrite save, independent reopen, preservation check.
-      let written = try PDFWriter.write(parsed.graph)
+      // Match the edited-document save policy: unused fast-web-view hints
+      // must be removed when a normal PDF is rewritten. Signed/referenced
+      // hints still refuse through the writer's eligibility checks.
+      let written = try PDFWriter.write(parsed.graph, droppingLinearization: true)
       let reopened = try PDFParser.parse(written)
+      #expect(!PDFWriter.droppingLinearization(reopened.graph).dropped,
+        "\(entry.id): rewritten file still contains unused linearization hints")
       #expect(
         reopened.pageIDs.count == parsed.pageIDs.count,
         "\(entry.id): reopened page count changed")
