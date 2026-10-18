@@ -173,18 +173,11 @@ public enum NativeParagraphEditing {
       let clippingRect: [Double]?
       do { clippingRect = try validator.clippingRect(for: indices) } catch { continue }
       guard clippingIssue(lines: authored.lines, clippingRect: clippingRect, profiles: profiles, nativeFonts: embedded) == nil else { continue }
-      var bottom = authored.box.firstBaseline
-      var top = authored.box.firstBaseline
-      for line in authored.lines {
-        for segment in line.segments {
-          guard let font = nativeFont(segment.format, embedded: embedded) else { continue }
-          bottom = min(bottom, line.baseline + font.descender)
-          top = max(top, line.baseline + font.ascender)
-        }
-        bottom = min(bottom, line.baseline - initial.format.size * 0.2)
-      }
+      let rect = paragraphBounds(lines: authored.lines, firstBaseline: authored.box.firstBaseline,
+        initialFontSize: initial.format.size, x: authored.box.x, width: authored.box.width,
+        embedded: embedded)
       owned.append(PageTextTarget(pageIndex: pageIndex ?? blocks.first?.pageIndex ?? 0, runIndex: first,
-        rect: [authored.box.x, bottom, authored.box.x + authored.box.width, top],
+        rect: rect,
         text: authored.fragments.map(\.text).joined(),
         style: .init(fontFamily: initial.format.fontName, fontSize: initial.format.size,
           fillColor: initial.format.color), runIndices: indices,
@@ -575,9 +568,10 @@ public enum NativeParagraphEditing {
           return nil
         }
         diagnostic?("accepted: \(String(label.prefix(120)))")
+        let rect = paragraphBounds(lines: sourceLines, firstBaseline: first.y,
+          initialFontSize: initial.size, x: first.x, width: width, embedded: embedded)
         return PageTextTarget(pageIndex: all[0].block.pageIndex, runIndex: all[0].source.index,
-          rect: [first.x, all.map { $0.block.rect[1] }.min()!, first.x + width,
-            all.map { $0.block.rect[3] }.max()!], text: fragments.map(\.text).joined(),
+          rect: rect, text: fragments.map(\.text).joined(),
           style: .init(fontFamily: initial.fontName, fontSize: initial.size, fillColor: initial.color),
           runIndices: all.map { $0.source.index }, paragraph: .init(originalText: original,
             lineSpacing: spacing, firstBaseline: first.y, standardFontAdvances: advances,
@@ -601,6 +595,23 @@ public enum NativeParagraphEditing {
       }
     }
     return result
+  }
+
+  /// Use the saved paragraph's font-metric box for selection and inspector
+  /// coordinates both before and after the paragraph receives authoring data.
+  private static func paragraphBounds(lines: [PageTextLine], firstBaseline: Double,
+    initialFontSize: Double, x: Double, width: Double, embedded: [PDFName: NSFont]) -> [Double] {
+    var bottom = firstBaseline
+    var top = firstBaseline
+    for line in lines {
+      for segment in line.segments {
+        guard let font = nativeFont(segment.format, embedded: embedded) else { continue }
+        bottom = min(bottom, line.baseline + font.descender)
+        top = max(top, line.baseline + font.ascender)
+      }
+      bottom = min(bottom, line.baseline - initialFontSize * 0.2)
+    }
+    return [x, bottom, x + width, top]
   }
 
   private static func nativeLayout(_ fragments: [PageTextFragment], embedded: [PDFName: NSFont],

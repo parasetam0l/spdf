@@ -103,7 +103,30 @@ struct ImportedParagraphInteropTests {
       let paragraph = try #require(target.paragraph)
       #expect(paragraph.fragments.first?.format.sourceFont?.name == "DejaVuSans")
       #expect(target.text == "ABC ABC ABC ABC ABC ABC ABC ABC ABC ABC ABC ABC")
-      let view = NSTextView(); let initial = try #require(paragraph.fragments.first?.format)
+      let initial = try #require(paragraph.fragments.first?.format)
+      let retainedLines = paragraph.originalText.keys.sorted().enumerated().map { offset, index in
+        let text = paragraph.originalText[index]!
+        let x = target.rect[0]
+        return PageTextLine(text: text, x: x,
+          baseline: paragraph.firstBaseline - Double(offset) * paragraph.lineSpacing,
+          segments: [.init(text: text, x: x, format: initial)])
+      }
+      let retained = try PDFEditingEngine.commit(PDFTransaction([
+        RewritePageTextCommand(pageID: pageID, originalText: paragraph.originalText,
+          lines: retainedLines, fontSize: initial.size, color: initial.color,
+          box: .init(x: target.rect[0], firstBaseline: paragraph.firstBaseline,
+            width: target.rect[2] - target.rect[0], lineSpacing: paragraph.lineSpacing,
+            wraps: paragraph.wraps))
+      ]), to: graph)
+      let retainedBytes = try PDFWriter.write(retained)
+      let reselected = try #require(targets(PDFParser.parse(retainedBytes).graph, pageID: pageID)
+        .first { $0.paragraph?.originalText.count == 2 })
+      #expect(abs(reselected.rect[0] - target.rect[0]) < 0.001)
+      #expect(abs(reselected.rect[1] - target.rect[1]) < 0.001)
+      #expect(abs(reselected.rect[2] - target.rect[2]) < 0.001)
+      #expect(abs(reselected.rect[3] - target.rect[3]) < 0.001)
+
+      let view = NSTextView()
       let formatting = NativeTextFormatting(view: view, fragments: paragraph.fragments,
         initial: initial, profiles: paragraph.fontProfiles)
       formatting.render(scale: 1, minimumLineSpacing: 22)
