@@ -1348,18 +1348,29 @@ final class SPDFDocument: NSDocument {
       textBlockCache.removeAll()
       textBlockCacheRevision = editSession.documentRevision
     }
-    if textBlockCache[pageIndex] == nil,
-      let page = viewer?.view.document?.page(at: pageIndex) {
+    func rebuildTargets() {
+      guard let page = viewer?.view.document?.page(at: pageIndex) else { return }
       let pageID = editSession.pageIDs[pageIndex]
       let blocks = (try? PageTextEditing.blocks(pageID: pageID, in: graph)) ?? []
-      textBlockCache[pageIndex] = NativeParagraphEditing.targets(from: blocks,
+      let rebuilt = NativeParagraphEditing.targets(from: blocks,
         pageID: pageID, graph: graph, page: page, pageIndex: pageIndex)
+      textBlockCache[pageIndex] = rebuilt
     }
-    return textBlockCache[pageIndex]?.first { target in
-      let r = target.rect
-      return pagePoint[0] >= r[0] - 2 && pagePoint[0] <= r[2] + 2
-        && pagePoint[1] >= r[1] - 2 && pagePoint[1] <= r[3] + 2
+    func matches() -> [PageTextTarget] {
+      textBlockCache[pageIndex]?.filter { target in
+        let r = target.rect
+        return pagePoint[0] >= r[0] - 2 && pagePoint[0] <= r[2] + 2
+          && pagePoint[1] >= r[1] - 2 && pagePoint[1] <= r[3] + 2
+      } ?? []
     }
+    if textBlockCache[pageIndex] == nil { rebuildTargets() }
+    let candidates = matches()
+    // A perfectly reconstructed paragraph wins over legacy one-run fallback
+    // targets that may share the same painted position.
+    if let paragraph = candidates.first(where: { $0.paragraph != nil }) {
+      return paragraph
+    }
+    return candidates.first
   }
 
   /// P24-014: toggle a checkbox using its actual on-state name.

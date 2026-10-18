@@ -71,9 +71,17 @@ public enum NativeParagraphEditing {
   /// ligature or splits a word differently. Standard fonts without verified
   /// source metrics still need the reader's visible selection bounds.
   public static func targets(from blocks: [PageTextBlock], pageID: PDFObjectID,
-    graph: PDFGraph, page: PDFPage, pageIndex: Int) -> [PageTextTarget] {
-    let verified = Set(((try? PageTextEditing.sourceRuns(pageID: pageID, in: graph)) ?? [])
-      .filter { $0.format.sourceFont != nil }.map(\.index))
+    graph: PDFGraph, page: PDFPage, pageIndex: Int,
+    diagnostic: ((String) -> Void)? = nil
+  ) -> [PageTextTarget] {
+    let sourceRuns: [PageTextEditing.SourceRun]
+    do {
+      sourceRuns = try PageTextEditing.sourceRuns(pageID: pageID, in: graph)
+    } catch {
+      diagnostic?("source-runs-unavailable: \(error)")
+      sourceRuns = []
+    }
+    let verified = Set(sourceRuns.filter { $0.format.sourceFont != nil }.map(\.index))
     let string = (page.string ?? "") as NSString
     var used = Set<Int>()
     let aligned: [PageTextTarget] = blocks.compactMap { block in
@@ -104,12 +112,13 @@ public enum NativeParagraphEditing {
         rect: [rect.minX, rect.minY, rect.maxX, rect.maxY], text: block.text,
         style: block.style, runIndices: block.runIndices)
     }
-    return targets(from: aligned, pageID: pageID, graph: graph, page: page, pageIndex: pageIndex)
+    return targets(from: aligned, pageID: pageID, graph: graph, page: page,
+      pageIndex: pageIndex, diagnostic: diagnostic)
   }
 
   public static func targets(
     from blocks: [PageTextTarget], pageID: PDFObjectID, graph: PDFGraph, page: PDFPage,
-    pageIndex: Int? = nil
+    pageIndex: Int? = nil, diagnostic: ((String) -> Void)? = nil
   ) -> [PageTextTarget] {
     var owned: [PageTextTarget] = []
     var ownedRuns = Set<Int>()
@@ -159,7 +168,7 @@ public enum NativeParagraphEditing {
     }
     let imported = importedTargets(from: blocks.filter { ownedRuns.isDisjoint(with: $0.runIndices) },
       pageID: pageID, graph: graph, profiles: profiles, embedded: embedded, validator: validator,
-      separators: separators, markers: markers)
+      separators: separators, markers: markers, diagnostic: diagnostic)
     owned += imported
     ownedRuns.formUnion(imported.flatMap(\.runIndices))
     let ordered = blocks.filter { ownedRuns.isDisjoint(with: $0.runIndices) }.sorted {
@@ -301,7 +310,7 @@ public enum NativeParagraphEditing {
   private static func importedTargets(from blocks: [PageTextTarget], pageID: PDFObjectID,
     graph: PDFGraph, profiles: [PDFName: PageTextFontProfile], embedded: [PDFName: NSFont],
     validator: PageTextRewriteValidator, separators: [[Double]],
-    markers: [PageTextEditing.ListMarker]) -> [PageTextTarget] {
+    markers: [PageTextEditing.ListMarker], diagnostic: ((String) -> Void)?) -> [PageTextTarget] {
     struct Span {
       let source: PageTextEditing.SourceRun
       let block: PageTextTarget
@@ -454,9 +463,19 @@ public enum NativeParagraphEditing {
         let first = members[0]
         let all = members.flatMap(\.spans)
         let formats = all.flatMap(\.fragments).map(\.format)
-        guard let initial = formats.first,
-          formats.contains(where: { $0.sourceFont != nil || $0 != initial || $0.characterSpacing != 0 })
-            || all.contains(where: { $0.block.runIndices.count > 1 || abs($0.source.textScale - 1) > 1e-6 }) else { return nil }
+        let label = members.map(\.text).joined(separator: " | ")
+        guard let initial = formats.first else {
+          diagnostic?("missing-format: \(String(label.prefix(120)))")
+          return nil
+        }
+        guard formats.contains(where: {
+          $0.sourceFont != nil || $0 != initial || $0.characterSpacing != 0
+        }) || all.contains(where: {
+          $0.block.runIndices.count > 1 || abs($0.source.textScale - 1) > 1e-6
+        }) else {
+          diagnostic?("uniform-unverified-format: \(String(label.prefix(120)))")
+          return nil
+        }
         var fragments: [PageTextFragment] = []
         for (index, line) in members.enumerated() {
           var parts = line.fragments
@@ -470,18 +489,37 @@ public enum NativeParagraphEditing {
         }
         let width = max(24, members.map(\.width).max()! + 0.75)
         let spacing = members.count > 1 ? first.y - members[1].y : initial.size * 1.2
-        guard let layout = nativeLayout(fragments, embedded: embedded, profiles: profiles, width: width, spacing: spacing),
-          layout.text == members.map(\.text),
-          zip(layout.baselines, members).allSatisfy({ abs($0.0 - (first.y - $0.1.y)) < 0.02 }) else { return nil }
+        guard let layout = nativeLayout(fragments, embedded: embedded, profiles: profiles,
+          width: width, spacing: spacing) else {
+          diagnostic?("native-layout-unavailable: \(String(label.prefix(120)))")
+          return nil
+        }
+        let expectedText = members.map(\.text)
+        guard layout.text == expectedText else {
+          diagnostic?(
+            "native-layout-text: \(String(label.prefix(100))) => \(layout.text.joined(separator: " | "))")
+          return nil
+        }
+        guard zip(layout.baselines, members).allSatisfy({
+          abs($0.0 - (first.y - $0.1.y)) < 0.02
+        }) else {
+          diagnostic?("native-layout-baseline: \(String(label.prefix(120)))")
+          return nil
+        }
         let original = Dictionary(uniqueKeysWithValues: all.map { ($0.source.index, $0.source.text) })
         var advances: [Int: Double] = [:]
         for span in all where span.source.format.sourceFont == nil {
           advances[span.source.index] = standardAdvance(span.source.text,
             family: span.source.format.font.rawValue, size: span.source.format.size / span.source.textScale)
         }
-        guard (try? validator.validate(originalText: original,
-          fontSize: initial.size, color: initial.color, standardFontAdvances: advances)) != nil
-        else { return nil }
+        do {
+          try validator.validate(originalText: original,
+            fontSize: initial.size, color: initial.color, standardFontAdvances: advances)
+        } catch {
+          let issue = validator.issue(for: original.keys.sorted()) ?? "\(error)"
+          diagnostic?("rewrite-validator: \(String(label.prefix(100))): \(issue)")
+          return nil
+        }
         let clippingRect: [Double]?
         do { clippingRect = try validator.clippingRect(for: original.keys.sorted()) } catch { return nil }
         // Fully visible source ink is a prerequisite; never expose a source
@@ -503,7 +541,12 @@ public enum NativeParagraphEditing {
           }
           return PageTextLine(text: span.source.text, x: span.x, baseline: span.source.baseline, segments: segments)
         }
-        guard clippingIssue(lines: sourceLines, clippingRect: clippingRect, profiles: profiles, nativeFonts: embedded) == nil else { return nil }
+        guard clippingIssue(lines: sourceLines, clippingRect: clippingRect,
+          profiles: profiles, nativeFonts: embedded) == nil else {
+          diagnostic?("clipped-ink: \(String(label.prefix(120)))")
+          return nil
+        }
+        diagnostic?("accepted: \(String(label.prefix(120)))")
         return PageTextTarget(pageIndex: all[0].block.pageIndex, runIndex: all[0].source.index,
           rect: [first.x, all.map { $0.block.rect[1] }.min()!, first.x + width,
             all.map { $0.block.rect[3] }.max()!], text: fragments.map(\.text).joined(),

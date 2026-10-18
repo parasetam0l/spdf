@@ -70,11 +70,23 @@ struct ParagraphGraphicsStateTests {
 
   @Test func deviceDefaultsCannotBypassCustomColorRestrictions() throws {
     for (name, reset) in [("DefaultGray", "0 g"), ("DefaultRGB", "0 0 0 rg"),
-      ("DefaultRGB", "0 g"), ("DefaultCMYK", "0 0 0 1 k")] {
+      ("DefaultCMYK", "0 0 0 1 k")] {
       let (graph, id) = try fixture([reset, show("AB")],
         spaces: [PDFName(name): .reference(PDFObjectID(82))])
       #expect(try editable(graph, id) == [false])
     }
+    let (rgb, rgbID) = try fixture(["0 g", show("AB")],
+      spaces: [PDFName("DefaultRGB"): .reference(PDFObjectID(82))])
+    #expect(try editable(rgb, rgbID) == [true])
+
+    var (icc, iccID) = try fixture(["0 0 0 rg", show("AB")],
+      spaces: [PDFName("DefaultRGB"): .array([
+        .name(PDFName("ICCBased")), .reference(PDFObjectID(82)),
+      ])])
+    icc.objects[PDFObjectID(82)] = .stream(PDFStream(
+      dictionary: [PDFName("N"): .integer(3), PDFName("Length"): .integer(0)],
+      bytes: Data()))
+    #expect(try editable(icc, iccID) == [true])
   }
 
   @Test func opaqueSettingsDoNotClearAnEarlierUnknownGraphicsState() throws {
@@ -84,6 +96,26 @@ struct ParagraphGraphicsStateTests {
     #expect(try editable(graph, id) == [false])
     let (malformed, malformedID) = try fixture(["/GS /Extra gs 0 g", show("AB")], state: harmless)
     #expect(try editable(malformed, malformedID) == [false])
+  }
+
+  @Test func overprintAllowsSourceColorButRefusesColorChange() throws {
+    let (graph, id) = try fixture(["/GS gs", show("AB")], state: [
+      PDFName("OP"): .boolean(true), PDFName("op"): .boolean(true),
+      PDFName("OPM"): .integer(1), PDFName("AIS"): .boolean(false),
+      PDFName("SMask"): .name(PDFName("None")), PDFName("CA"): .integer(1),
+      PDFName("ca"): .integer(1),
+    ])
+    let runs = try TextRunIndexer.runs(in: PageContent.load(pageID: id, in: graph), graph: graph)
+    let validator = try PageTextRewriteValidator(pageID: id, in: graph)
+    try validator.validate(originalText: [0: runs[0].text], fontSize: 16,
+      color: runs[0].fillColor)
+    do {
+      try validator.validate(originalText: [0: runs[0].text], fontSize: 16,
+        color: [0.8, 0.1, 0.1])
+      Issue.record("Overprint-enabled text accepted a color change")
+    } catch let error as PDFError {
+      #expect(error.kind == .unsupported)
+    }
   }
 
   @Test func paragraphPreviewAcrossStreamsKeepsSharedContentAndNeighbors() throws {

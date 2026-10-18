@@ -49,6 +49,11 @@ public struct PageTextRewriteValidator {
       fontSize: fontSize, color: color, standardFontAdvances: standardFontAdvances)
       .resolved(in: graph, analysis: analysis)
   }
+
+  /// Explain the first graphics-state restriction that blocks this run set.
+  public func issue(for runIndices: [Int]) -> String? {
+    analysis.issue(for: runIndices)
+  }
 }
 
 fileprivate struct ParagraphRewriteAnalysis {
@@ -57,6 +62,8 @@ fileprivate struct ParagraphRewriteAnalysis {
   let fonts: [PDFName: IndexedTextFont]
   let standardIndices: Set<Int>
   let safeInstructions: Set<Int>
+  let overprintInstructions: Set<Int>
+  let instructionIssues: [Int: String]
   let instructionRuns: [Int: [Int]]
   let clips: [Int: [Double]]
 
@@ -73,32 +80,51 @@ fileprivate struct ParagraphRewriteAnalysis {
     return clip
   }
 
+  func issue(for indices: [Int]) -> String? {
+    guard let first = indices.first, runs.indices.contains(first) else {
+      return "Missing paragraph text"
+    }
+    let instruction = runs[first].instructionIndex
+    guard !safeInstructions.contains(instruction) else { return nil }
+    return instructionIssues[instruction]
+      ?? "The surrounding graphics state is not available for safe rewriting"
+  }
+
   init(pageID: PDFObjectID, graph: PDFGraph) throws {
     content = try PageContent.load(pageID: pageID, in: graph)
     guard case .dictionary(let page)? = graph.objects[pageID] else {
       throw PDFError(.malformed, "The paragraph page is missing")
     }
-    func ordinaryGraphicsState(_ instruction: ContentInstruction) -> Bool {
+    func ordinaryGraphicsState(
+      _ instruction: ContentInstruction
+    ) -> (safe: Bool, overprint: Bool)? {
       guard instruction.operands.count == 1,
         case .name(let name)? = instruction.operands.first?.value,
         case .dictionary(let resources)? = FontValue.resolve(page[PDFName("Resources")], in: graph),
         case .dictionary(let states)? = FontValue.resolve(resources[PDFName("ExtGState")], in: graph),
         case .dictionary(let state)? = FontValue.resolve(states[name], in: graph),
-        !state.isEmpty else { return false }
-      return state.allSatisfy { key, value in
+        !state.isEmpty else { return nil }
+      var overprint = false
+      let safe = state.allSatisfy { key, value in
         switch (key, FontValue.resolve(value, in: graph)) {
         case (PDFName("Type"), .name(PDFName("ExtGState"))?),
           (PDFName("BM"), .name(PDFName("Normal"))?),
-          (PDFName("OP"), .boolean(false)?), (PDFName("op"), .boolean(false)?),
+          (PDFName("AIS"), .boolean(_)?),
+          (PDFName("SMask"), .name(PDFName("None"))?),
           (PDFName("OPM"), .integer(0)?), (PDFName("OPM"), .integer(1)?),
           (PDFName("SA"), .boolean(_)?),
           (PDFName("ca"), .integer(1)?), (PDFName("CA"), .integer(1)?),
           (PDFName("ca"), .real(1)?), (PDFName("CA"), .real(1)?): return true
+        case (PDFName("OP"), .boolean(_)?): return true
+        case (PDFName("op"), .boolean(let enabled)?):
+          overprint = overprint || enabled
+          return true
         case (PDFName("SM"), .integer(let n)?): return (0...1).contains(n)
         case (PDFName("SM"), .real(let n)?): return n.isFinite && (0...1).contains(n)
         default: return false
         }
       }
+      return safe ? (true, overprint) : nil
     }
     guard content.segments.allSatisfy(\.isEditable),
       Set(content.segments.map(\.objectID)).count == content.segments.count else {
@@ -111,10 +137,51 @@ fileprivate struct ParagraphRewriteAnalysis {
     func deviceColorIsKnown(_ instruction: ContentInstruction?, components: Int, defaultName: String) -> Bool {
       guard case .dictionary(let resources)? = FontValue.resolve(page[PDFName("Resources")], in: graph) else { return false }
       if let value = resources[PDFName("ColorSpace")] {
-        guard case .dictionary(let spaces)? = FontValue.resolve(value, in: graph),
-          // Replacement text is painted in RGB even when the source is gray.
-          spaces[PDFName("DefaultRGB")] == nil,
-          spaces[PDFName(defaultName)] == nil else { return false }
+        guard case .dictionary(let spaces)? = FontValue.resolve(value, in: graph) else {
+          return false
+        }
+        guard let override = spaces[PDFName(defaultName)] else {
+          // No override. Continue to operand validation below.
+          return instruction.map { value in
+            guard value.operands.count == components else { return false }
+            return value.operands.allSatisfy {
+              switch $0.value {
+              case .integer(let n): return (0...1).contains(n)
+              case .real(let n): return n.isFinite && (0...1).contains(n)
+              default: return false
+              }
+            }
+          } ?? true
+        }
+        let resolved = FontValue.resolve(override, in: graph)
+        let expectedDeviceName: PDFName
+        switch defaultName {
+        case "DefaultGray": expectedDeviceName = PDFName("DeviceGray")
+        case "DefaultRGB": expectedDeviceName = PDFName("DeviceRGB")
+        default: expectedDeviceName = PDFName("DeviceCMYK")
+        }
+        var supported = false
+        switch resolved {
+        case .name(let name)?:
+          supported = name == expectedDeviceName
+        case .array(let values)?:
+          if case .name(let family)? = values.first,
+            ["ICCBased", "CalGray", "CalRGB"].contains(String(decoding: family.bytes, as: UTF8.self)),
+            values.count >= 2 {
+            if family == PDFName("ICCBased"),
+              case .reference(let profileID) = values[1],
+              case .stream(let profile)? = graph.objects[profileID],
+              case .integer(let profileComponents)? = profile.dictionary[PDFName("N")] {
+              supported = Int(profileComponents) == components
+            } else {
+              supported = (family == PDFName("CalGray") && components == 1)
+                || (family == PDFName("CalRGB") && components == 3)
+            }
+          }
+        default:
+          break
+        }
+        guard supported else { return false }
       }
       guard let instruction else { return true }
       guard instruction.operands.count == components else { return false }
@@ -126,7 +193,10 @@ fileprivate struct ParagraphRewriteAnalysis {
         }
       }
     }
-    var stack: [(unsafe: Bool, unknownFill: Bool, mode: Int, ctm: [Double], clip: [Double]?)] = []
+    var stack: [(
+      unsafe: Bool, unsafeReason: String?, unknownFill: Bool, unknownFillReason: String?,
+      overprint: Bool, mode: Int, ctm: [Double], clip: [Double]?
+    )] = []
     var ctm = [1.0, 0, 0, 1, 0, 0]
     var clip: [Double]?
     var clips: [Int: [Double]] = [:]
@@ -136,26 +206,42 @@ fileprivate struct ParagraphRewriteAnalysis {
     var rectangle: [Double]?
     var pendingClip = false
     var unsafe = false
+    var unsafeReason: String?
     var unknownFill = !deviceColorIsKnown(nil, components: 1, defaultName: "DefaultGray")
+    var unknownFillReason: String? =
+      unknownFill ? "Unknown initial fill color" : nil
     var mode = 0
+    var overprint = false
     var inText = false
     var textClipping = false
     var safe = Set<Int>()
+    var overprinted = Set<Int>()
+    var issues: [Int: String] = [:]
     for (index, instruction) in content.instructions.enumerated() {
       let numbers = instruction.operands.compactMap { operand -> Double? in
         switch operand.value { case .integer(let n): return Double(n); case .real(let n): return n; default: return nil }
       }
       switch instruction.operatorName {
-      case "q": stack.append((unsafe, unknownFill, mode, ctm, clip))
+      case "q":
+        stack.append((
+          unsafe, unsafeReason, unknownFill, unknownFillReason, overprint, mode, ctm, clip
+        ))
       case "Q":
         guard let state = stack.popLast() else { throw PDFError(.unsupported, "Unbalanced page graphics state") }
         unsafe = state.unsafe || (inText && textClipping)
+        unsafeReason = inText && textClipping
+          ? "Text clipping mode inside a text object" : state.unsafeReason
         unknownFill = state.unknownFill
+        unknownFillReason = state.unknownFillReason
+        overprint = state.overprint
         mode = state.mode; ctm = state.ctm; clip = state.clip
       case "cm":
         if numbers.count == 6, numbers.allSatisfy(\.isFinite) {
           ctm = TextCanvasSupport.concatenate(ctm, numbers)
-        } else { unsafe = true }
+        } else {
+          unsafe = true
+          unsafeReason = "Malformed or non-finite coordinate transform"
+        }
       case "re":
         let axisAligned = (abs(ctm[1]) < 1e-9 && abs(ctm[2]) < 1e-9)
           || (abs(ctm[0]) < 1e-9 && abs(ctm[3]) < 1e-9)
@@ -172,14 +258,25 @@ fileprivate struct ParagraphRewriteAnalysis {
       case "m", "l", "c", "v", "y": hasPath = true; rectangle = nil
       case "h": break
       case "W", "W*":
-        if pendingClip || inText { unsafe = true }
+        if pendingClip || inText {
+          unsafe = true
+          unsafeReason = "Nested or in-text clipping path"
+        }
         pendingClip = true
       case "n", "S", "s", "f", "F", "f*", "B", "B*", "b", "b*":
         if pendingClip {
           if let rect = rectangle, rect.allSatisfy({ $0.isFinite && abs($0) <= 1_000_000 }) {
             let next = clip.map { [max($0[0],rect[0]), max($0[1],rect[1]), min($0[2],rect[2]), min($0[3],rect[3])] } ?? rect
-            if next[2] > next[0], next[3] > next[1] { clip = next } else { unsafe = true }
-          } else { unsafe = true }
+            if next[2] > next[0], next[3] > next[1] {
+              clip = next
+            } else {
+              unsafe = true
+              unsafeReason = "Empty rectangular clip intersection"
+            }
+          } else {
+            unsafe = true
+            unsafeReason = "Non-rectangular clipping path"
+          }
         }
         hasPath = false; rectangle = nil; pendingClip = false
       case "BT":
@@ -190,25 +287,57 @@ fileprivate struct ParagraphRewriteAnalysis {
         inText = false
         // Glyph clip outlines accumulate until ET, independently of a q/Q
         // inside the text object. Restoring Tr alone cannot erase that clip.
-        if textClipping { unsafe = true; textClipping = false }
-      case "gs": if !ordinaryGraphicsState(instruction) { unsafe = true }
-      case "cs", "sc", "scn": unknownFill = true
-      case "g": unknownFill = !deviceColorIsKnown(instruction, components: 1, defaultName: "DefaultGray")
-      case "rg": unknownFill = !deviceColorIsKnown(instruction, components: 3, defaultName: "DefaultRGB")
+        if textClipping {
+          unsafe = true
+          unsafeReason = "Text clipping render mode"
+          textClipping = false
+        }
+      case "gs":
+        if let state = ordinaryGraphicsState(instruction) {
+          overprint = state.overprint
+        } else {
+          unsafe = true
+          unsafeReason = "Unsupported or unknown ExtGState"
+        }
+      case "cs", "sc", "scn":
+        unknownFill = true
+        unknownFillReason = "Unsupported or unresolved fill color space"
+      case "g":
+        unknownFill = !deviceColorIsKnown(
+          instruction, components: 1, defaultName: "DefaultGray")
+        unknownFillReason = unknownFill ? "Unsupported DeviceGray fill color" : nil
+      case "rg":
+        unknownFill = !deviceColorIsKnown(
+          instruction, components: 3, defaultName: "DefaultRGB")
+        unknownFillReason = unknownFill ? "Unsupported DeviceRGB fill color" : nil
       case "k":
         // Retain the existing CMYK profile; it cannot establish a new known
         // RGB preview after an unsupported color-space operation.
-        unknownFill = unknownFill || !deviceColorIsKnown(instruction, components: 4, defaultName: "DefaultCMYK")
+        unknownFill = unknownFill || !deviceColorIsKnown(
+          instruction, components: 4, defaultName: "DefaultCMYK")
+        if unknownFill { unknownFillReason = "Unsupported DeviceCMYK fill color" }
       case "Tr":
         if case .integer(let value)? = instruction.operands.first?.value {
           mode = Int(value)
-          if value >= 4 { unsafe = true; textClipping = true }
-        } else { unsafe = true }
+          if value >= 4 {
+            unsafe = true
+            unsafeReason = "Text clipping render mode"
+            textClipping = true
+          }
+        } else {
+          unsafe = true
+          unsafeReason = "Malformed text render mode"
+        }
       default: break
       }
       if !unsafe, !unknownFill, !pendingClip, mode == 0 {
         safe.insert(index)
+        if overprint { overprinted.insert(index) }
         if let clip { clips[index] = clip }
+      } else {
+        issues[index] = unsafeReason
+          ?? unknownFillReason
+          ?? (pendingClip ? "Unfinished clipping path" : "Unsupported text render mode")
       }
     }
     guard stack.isEmpty, !inText, !pendingClip else {
@@ -223,6 +352,8 @@ fileprivate struct ParagraphRewriteAnalysis {
     fonts = resolved
     standardIndices = Set(try StandardTextFont.editableRunIndices(pageID: pageID, in: graph))
     safeInstructions = safe
+    overprintInstructions = overprinted
+    instructionIssues = issues
     self.clips = clips
     instructionRuns = Dictionary(grouping: allRuns.indices, by: { allRuns[$0].instructionIndex })
   }
@@ -286,6 +417,12 @@ public struct RewritePageTextCommand: PDFEditCommand, Equatable, Sendable {
       let transform = TextCanvasSupport.concatenate(run.ctm, run.matrix)
       guard analysis.safeInstructions.contains(run.instructionIndex) else {
         throw PDFError(.unsupported, "This text uses an unsupported graphics or clipping state")
+      }
+      if analysis.overprintInstructions.contains(run.instructionIndex),
+        zip(color, run.fillColor).contains(where: { abs($0.0 - $0.1) > 1e-6 }) {
+        throw PDFError(
+          .unsupported,
+          "Changing the color of overprint-enabled text is not supported; the original color can still be edited")
       }
       guard run.text == originalText[index], ["Tj", "TJ"].contains(instruction.operatorName),
         run.fontSize.isFinite, run.fontSize > 0,

@@ -29,12 +29,20 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
       }
       if let index = CommandLine.arguments.firstIndex(of: "--test-corpus-paragraphs"),
         CommandLine.arguments.count > index + 2 {
+        let sourceIndex =
+          CommandLine.arguments.firstIndex(of: "--corpus-source").map { $0 + 1 } ?? index + 1
+        let outputIndex =
+          CommandLine.arguments.firstIndex(of: "--corpus-output").map { $0 + 1 } ?? index + 2
+        guard CommandLine.arguments.indices.contains(sourceIndex),
+          CommandLine.arguments.indices.contains(outputIndex) else { return }
         let matchIndex = CommandLine.arguments.firstIndex(of: "--text-prefix")
         let matching = matchIndex.flatMap { CommandLine.arguments.indices.contains($0 + 1) ? CommandLine.arguments[$0 + 1] : nil }
         let wordIndex = CommandLine.arguments.firstIndex(of: "--edit-word")
         let word = wordIndex.flatMap { CommandLine.arguments.indices.contains($0 + 1) ? CommandLine.arguments[$0 + 1] : nil }
-        Task { await CorpusParagraphSmoke.run(source: URL(fileURLWithPath: CommandLine.arguments[index + 1]),
-          output: URL(fileURLWithPath: CommandLine.arguments[index + 2]), matching: matching, wordOverride: word) }
+        Task { await CorpusParagraphSmoke.run(
+          source: URL(fileURLWithPath: CommandLine.arguments[sourceIndex]),
+          output: URL(fileURLWithPath: CommandLine.arguments[outputIndex]),
+          matching: matching, wordOverride: word) }
         return
       }
       if let index = CommandLine.arguments.firstIndex(of: "--test-corpus-image"),

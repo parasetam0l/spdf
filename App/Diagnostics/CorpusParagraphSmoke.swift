@@ -274,24 +274,74 @@
       defer { SPDFDocument.recoveryDirectoryOverride = priorRecovery }
       SPDFDocument.recoveryDirectoryOverride = output.appendingPathComponent("Recovery")
       let document = try SPDFDocument(contentsOf: source, ofType: "com.adobe.pdf")
-      NSDocumentController.shared.addDocument(document)
       document.makeWindowControllers()
       defer { document.close() }
       guard let graph = document.editSession.currentGraph, let viewer = document.viewer,
         let reader = viewer.view.document else { throw PDFError(.malformed, "Missing corpus document") }
       var chosen: PageTextTarget?
       var targetInventory: [[String: Any]] = []
+      var pageDiagnostics: [[String: Any]] = []
       for index in 0..<min(3, document.editSession.pageIDs.count) {
         guard let page = reader.page(at: index) else { continue }
         let pageID = document.editSession.pageIDs[index]
         let blocks = try PageTextEditing.blocks(pageID: pageID, in: graph)
+        let sources = (try? PageTextEditing.sourceRuns(pageID: pageID, in: graph)) ?? []
+        let profiles = (try? PageTextEditing.fontProfiles(pageID: pageID, in: graph)) ?? [:]
+        var targetDiagnostics: [String] = []
         let targets = NativeParagraphEditing.targets(
-          from: blocks, pageID: pageID, graph: graph, page: page, pageIndex: index)
+          from: blocks, pageID: pageID, graph: graph, page: page, pageIndex: index,
+          diagnostic: { message in
+            if targetDiagnostics.count < 120 { targetDiagnostics.append(message) }
+          })
         targetInventory += targets.map { target in
           ["page": index, "textPrefix": String(target.text.prefix(48)),
             "rect": target.rect, "runs": target.runIndices.count,
             "paragraph": target.paragraph != nil, "wraps": target.paragraph?.wraps ?? false]
         }
+        pageDiagnostics.append([
+          "page": index,
+          "blocks": blocks.count,
+          "targets": targets.count,
+          "paragraphTargets": targets.filter { $0.paragraph != nil }.count,
+          "targetDetails": targets.map { target in
+            [
+              "text": String(target.text.prefix(120)), "rect": target.rect,
+              "runs": target.runIndices, "paragraph": target.paragraph != nil,
+            ] as [String: Any]
+          },
+          "sourceRuns": sources.count,
+          "reusableSourceRuns": sources.filter { $0.format.sourceFont != nil }.count,
+          "targetDiagnostics": targetDiagnostics,
+          "profiles": profiles.map { resource, profile in
+            [
+              "resource": String(decoding: resource.bytes, as: UTF8.self),
+              "name": profile.source.name,
+              "glyphCount": profile.glyphs.count,
+              "programBytes": profile.program.count,
+            ] as [String: Any]
+          },
+          "sourceSamples": sources.prefix(80).map { source in
+            [
+              "index": source.index, "text": String(source.text.prefix(80)),
+              "x": source.x, "baseline": source.baseline,
+              "scale": source.textScale,
+              "spacing": source.format.characterSpacing,
+              "font": source.format.fontName,
+              "sourceFont": source.format.sourceFont?.name as Any,
+              "sourceResource": source.format.sourceFont.map {
+                String(decoding: $0.resource.bytes, as: UTF8.self)
+              } as Any,
+              "fragments": source.fragments.count,
+            ] as [String: Any]
+          },
+          "blockSamples": blocks.prefix(80).map { block in
+            [
+              "text": String(block.text.prefix(80)), "rect": block.rect,
+              "runs": block.runIndices.count,
+              "font": block.style.fontFamily as Any,
+            ] as [String: Any]
+          },
+        ])
         if let matching {
           chosen = targets.first { $0.paragraph != nil && $0.text.hasPrefix(matching) }
         } else {
@@ -306,6 +356,9 @@
       try JSONSerialization.data(withJSONObject: targetInventory,
         options: [.prettyPrinted, .sortedKeys])
         .write(to: output.appendingPathComponent("targets.json"))
+      try JSONSerialization.data(withJSONObject: pageDiagnostics,
+        options: [.prettyPrinted, .sortedKeys])
+        .write(to: output.appendingPathComponent("diagnostics.json"))
       guard let target = chosen else { throw PDFError(.unsupported, "No representative editable paragraph") }
       let pageIndex = target.pageIndex, pageID = document.editSession.pageIDs[pageIndex]
       func dictionary(_ value: PDFValue?) -> [PDFName: PDFValue]? {
@@ -357,8 +410,31 @@
         // A refusal must fail the diagnostic rather than block in a modal.
         let hit = viewer.textRunProvider?(pageIndex, [bounds.midX, bounds.midY])
         let hitPreview = hit.flatMap { viewer.onTextBlockPreview?($0) }
+        let hitSources = (try? PageTextEditing.sourceRuns(pageID: pageID, in: graph)) ?? []
+        let hitBlocks = (try? PageTextEditing.blocks(pageID: pageID, in: graph)) ?? []
+        func sourceDescription(_ indices: [Int]) -> [[String: Any]] {
+          let set = Set(indices)
+          return hitSources.filter { set.contains($0.index) }.map {
+            [
+              "index": $0.index, "text": $0.text, "x": $0.x,
+              "baseline": $0.baseline, "scale": $0.textScale,
+            ]
+          }
+        }
+        func blockDescription(_ indices: [Int]) -> [[String: Any]] {
+          let set = Set(indices)
+          return hitBlocks.filter { !set.isDisjoint(with: $0.runIndices) }.map {
+            ["text": $0.text, "rect": $0.rect, "runs": $0.runIndices]
+          }
+        }
         try JSONSerialization.data(withJSONObject: [
           "detectedRuns": target.runIndices, "hitRuns": hit?.runIndices ?? [],
+          "detectedText": target.text, "detectedRect": target.rect,
+          "hitText": hit?.text ?? "", "hitRect": hit?.rect ?? [],
+          "detectedSources": sourceDescription(target.runIndices),
+          "hitSources": sourceDescription(hit?.runIndices ?? []),
+          "detectedBlocks": blockDescription(target.runIndices),
+          "hitBlocks": blockDescription(hit?.runIndices ?? []),
           "hitIsParagraph": hit?.paragraph != nil,
           "hitPreviewAvailable": hitPreview != nil,
           "point": [bounds.midX, bounds.midY]

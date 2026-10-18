@@ -344,7 +344,7 @@ struct ImportedParagraphInteropTests {
         PDFName("op"): .boolean(false), PDFName("OPM"): .integer(1)], true),
       ([PDFName("SA"): .boolean(true), PDFName("SM"): .integer(1)], true),
       ([PDFName("ca"): .real(0.5)], false),
-      ([PDFName("OP"): .boolean(true)], false), ([PDFName("op"): .boolean(true)], false),
+      ([PDFName("OP"): .boolean(true)], true), ([PDFName("op"): .boolean(true)], true),
       ([PDFName("OPM"): .integer(2)], false), ([PDFName("SA"): .integer(0)], false),
       ([PDFName("SM"): .real(-0.1)], false), ([PDFName("SM"): .real(1.1)], false),
       ([PDFName("Font"): .array([.reference(PDFObjectID(4)), .integer(16)])], false)
