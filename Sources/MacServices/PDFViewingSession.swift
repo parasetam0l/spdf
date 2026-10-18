@@ -352,7 +352,7 @@ public final class PDFViewingSession: NSObject, ObservableObject, PDFViewDelegat
   private var searchMatches: [PDFSelection] = []
   private var observations: Set<AnyCancellable> = []
   private var graphicPreviewState:
-    (document: PDFDocument, scale: Double, autoScales: Bool, page: Int, scroll: NSPoint?)?
+    (document: PDFDocument, scale: CGFloat, autoScales: Bool, page: Int, scroll: NSPoint?)?
 
   public override init() {
     super.init()
