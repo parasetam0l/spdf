@@ -33,6 +33,10 @@ public struct TrueTypeInspector: Sendable, Equatable {
   /// Unicode scalar value to glyph ID, merged from format-4 and format-12
   /// cmap subtables (format 12 wins ties).
   public let unicodeToGlyph: [Int: Int]
+  /// Raw code-to-glyph entries from platform-1 cmaps. Some PDF subsetters
+  /// key these by PDF character code instead of MacRoman byte; callers must
+  /// still validate the resulting glyph against ToUnicode and `/Widths`.
+  public let platform1CodeToGlyph: [Int: Int]
   /// Glyph ID to horizontal advance in font units.
   public let advances: [Int: Int]
   /// Glyph ID to byte offset of its outline data (loca-decoded).
@@ -197,6 +201,7 @@ public struct TrueTypeInspector: Sendable, Equatable {
       throw PDFError(.malformed, "TrueType cmap subtable count is implausible")
     }
     var unicodeToGlyph: [Int: Int] = [:]
+    var platform1CodeToGlyph: [Int: Int] = [:]
     var format12: [(Int, Int, Int)] = []
     // Macintosh-platform subtables address MacRoman bytes, not Unicode.
     func translate(_ code: Int, platform: Int) -> Int? {
@@ -229,11 +234,17 @@ public struct TrueTypeInspector: Sendable, Equatable {
       }
       let format = try u16(bytes, at: subtable)
       if format == 0 {
-        merge(try parseCmapFormat0(bytes, at: subtable), platform: platform)
+        let parsed = try parseCmapFormat0(bytes, at: subtable)
+        if platform == 1 { platform1CodeToGlyph.merge(parsed) { _, new in new } }
+        merge(parsed, platform: platform)
       } else if format == 4 {
-        merge(try parseCmapFormat4(bytes, at: subtable), platform: platform)
+        let parsed = try parseCmapFormat4(bytes, at: subtable)
+        if platform == 1 { platform1CodeToGlyph.merge(parsed) { _, new in new } }
+        merge(parsed, platform: platform)
       } else if format == 6 {
-        merge(try parseCmapFormat6(bytes, at: subtable), platform: platform)
+        let parsed = try parseCmapFormat6(bytes, at: subtable)
+        if platform == 1 { platform1CodeToGlyph.merge(parsed) { _, new in new } }
+        merge(parsed, platform: platform)
       } else if format == 12 {
         format12 += try parseCmapFormat12(bytes, at: subtable)
       }    }
@@ -251,6 +262,7 @@ public struct TrueTypeInspector: Sendable, Equatable {
       tables: tables, unitsPerEm: unitsPerEm, ascent: ascent, descent: descent,
       fontBBox: bbox, italicAngle: italicAngle, glyphCount: glyphCount,
       locaIsLong: locaIsLong, isCFF: isCFF, unicodeToGlyph: unicodeToGlyph,
+      platform1CodeToGlyph: platform1CodeToGlyph,
       advances: advances, glyphOffsets: glyphOffsets)
   }
 

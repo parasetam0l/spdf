@@ -184,7 +184,11 @@ struct IndexedTextFont {
         glyph.text != "\u{FFFD}", let width = glyph.width, width.isFinite, width >= 0,
         encode(glyph.text) == codes else { continue }
       let gid: Int?
-      if simple != nil { gid = glyph.text.unicodeScalars.first.flatMap { inspector.unicodeToGlyph[Int($0.value)] } }
+      if simple != nil {
+        gid = glyph.text.unicodeScalars.first.flatMap {
+          inspector.unicodeToGlyph[Int($0.value)]
+        } ?? inspector.platform1CodeToGlyph[code]
+      }
       else if let gids {
         guard code * 2 + 1 < gids.count else { continue }
         gid = Int(gids[code * 2]) * 256 + Int(gids[code * 2 + 1])
