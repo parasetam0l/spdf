@@ -450,19 +450,28 @@ final class SPDFDocument: NSDocument {
     viewer.graphicsListProvider = { [weak self] pageIndex in
       self?.graphicsList(pageIndex: pageIndex) ?? []
     }
+    viewer.graphicRefusalProvider = { [weak self] pageIndex, pagePoint in
+      self?.graphicRefusal(pageIndex: pageIndex, pagePoint: pagePoint)
+    }
     viewer.onMoveGraphics = { [weak self] moves in
       _ = self?.moveGraphics(moves)
     }
     viewer.onResizeGraphics = { [weak self] resizes in
       _ = self?.resizeGraphics(resizes)
     }
-    viewer.onRotateGraphic = { [weak self] streamID in
-      _ = self?.rotateGraphic(streamID: streamID)
+    viewer.graphicPreviewProvider = { [weak self] resizes in
+      self?.previewGraphics(resizes)
     }
-    viewer.onDeleteGraphics = { [weak self] ids in
-      guard let self, let selection = self.viewer?.selectedGraphics.first,
-        let pageID = self.pageID(at: selection.pageIndex) else { return }
-      _ = self.applyImageTransaction([DeleteAddedGraphicsCommand(pageID: pageID, streamIDs: ids)])
+    viewer.onRotateGraphic = { [weak self] target in
+      _ = self?.rotateGraphic(target)
+    }
+    viewer.onDeleteGraphics = { [weak self] targets in
+      guard let self, let pageIndex = targets.first?.pageIndex,
+        let pageID = self.pageID(at: pageIndex),
+        targets.allSatisfy({ $0.imagePlacementIndex == nil }) else { return }
+      _ = self.applyImageTransaction([
+        DeleteAddedGraphicsCommand(pageID: pageID, streamIDs: targets.map(\.streamID))
+      ])
     }
     viewer.onInsertImage = { [weak self] in self?.promptInsertImage() }
     let window = NSWindow(
@@ -1340,50 +1349,11 @@ final class SPDFDocument: NSDocument {
       textBlockCacheRevision = editSession.documentRevision
     }
     if textBlockCache[pageIndex] == nil,
-      let page = viewer?.view.document?.page(at: pageIndex), let pageText = page.string
-    {
-      let string = pageText as NSString
-      var used = Set<Int>()
-      let blocks: [PageTextTarget] =
-        (try? PageTextEditing.blocks(
-          pageID: editSession.pageIDs[pageIndex], in: graph))?.compactMap { block in
-          var remaining = NSRange(location: 0, length: string.length)
-          var matches: [(NSRange, CGRect)] = []
-          // Readers omit trailing wrap whitespace from extracted lines. Keep
-          // the original operand for rewriting, but match its visible text.
-          let needle = block.text.trimmingCharacters(in: .whitespacesAndNewlines)
-          // Some producers paint spaces in their own text-show instructions.
-          // Keep them for paragraph reconstruction even though PDFKit offers
-          // no visible selection to match for a whitespace-only operand.
-          if needle.isEmpty {
-            return PageTextTarget(pageIndex: pageIndex, runIndex: block.runIndices[0],
-              rect: block.rect, text: block.text, style: block.style, runIndices: block.runIndices)
-          }
-          while remaining.length > 0 {
-            let found = string.range(of: needle, range: remaining)
-            guard found.location != NSNotFound else { break }
-            if !used.contains(found.location), let selection = page.selection(for: found) {
-              matches.append((found, selection.bounds(for: page)))
-            }
-            let next = NSMaxRange(found)
-            remaining = NSRange(location: next, length: string.length - next)
-          }
-          let x = (block.rect[0] + block.rect[2]) / 2
-          let y = (block.rect[1] + block.rect[3]) / 2
-          guard
-            let match = matches.min(by: {
-              hypot($0.1.midX - x, $0.1.midY - y) < hypot($1.1.midX - x, $1.1.midY - y)
-            }), let first = block.runIndices.first
-          else { return nil }
-          used.insert(match.0.location)
-          let rect = match.1
-          return PageTextTarget(
-            pageIndex: pageIndex, runIndex: first,
-            rect: [rect.minX, rect.minY, rect.maxX, rect.maxY], text: block.text,
-            style: block.style, runIndices: block.runIndices)
-        } ?? []
-      textBlockCache[pageIndex] = NativeParagraphEditing.targets(
-        from: blocks, pageID: editSession.pageIDs[pageIndex], graph: graph, page: page, pageIndex: pageIndex)
+      let page = viewer?.view.document?.page(at: pageIndex) {
+      let pageID = editSession.pageIDs[pageIndex]
+      let blocks = (try? PageTextEditing.blocks(pageID: pageID, in: graph)) ?? []
+      textBlockCache[pageIndex] = NativeParagraphEditing.targets(from: blocks,
+        pageID: pageID, graph: graph, page: page, pageIndex: pageIndex)
     }
     return textBlockCache[pageIndex]?.first { target in
       let r = target.rect
@@ -3679,7 +3649,7 @@ final class SPDFDocument: NSDocument {
     // NSMenuItem.representedObject is Any?; the struct round-trips as-is.
     guard let command = sender.representedObject as? GraphicMenuCommand else { return }
     viewer?.selectGraphics([command.target])
-    _ = rotateGraphic(streamID: command.target.streamID)
+    _ = rotateGraphic(command.target)
   }
 
   private func imagePlacementMenu(pageIndex: Int, placementIndex: Int) -> NSMenu {
@@ -3748,10 +3718,10 @@ final class SPDFDocument: NSDocument {
       shared
       ? ReplaceSharedImageCommand(
         pageID: pageID, placementIndex: placementIndex, width: raster.width,
-        height: raster.height, rgb8: raster.rgb8)
+        height: raster.height, rgb8: raster.rgb8, alpha8: raster.alpha8)
       : ReplaceImageDataCommand(
         pageID: pageID, placementIndex: placementIndex, width: raster.width,
-        height: raster.height, rgb8: raster.rgb8)
+        height: raster.height, rgb8: raster.rgb8, alpha8: raster.alpha8)
     var commands: [any PDFEditCommand] = []
     if let graph = editSession.currentGraph,
       OCRLayer.hasGeneratedLayer(in: graph, pageID: pageID)
@@ -3794,7 +3764,8 @@ final class SPDFDocument: NSDocument {
     let rect = [crop.midX - width / 2, crop.midY - height / 2, crop.midX + width / 2, crop.midY + height / 2]
     let existing = Set(graphicsList(pageIndex: pageIndex).map(\.streamID))
     guard applyImageTransaction([PlaceImageCommand(pageID: pageID, rect: rect,
-      width: raster.width, height: raster.height, rgb8: raster.rgb8)]) else { return false }
+      width: raster.width, height: raster.height, rgb8: raster.rgb8,
+      alpha8: raster.alpha8)]) else { return false }
     _ = viewer.activateTool(.imageEdit)
     viewer.selectGraphics(graphicsList(pageIndex: pageIndex).filter { !existing.contains($0.streamID) })
     viewer.graphicSelectionFocuser?()
@@ -3821,6 +3792,11 @@ final class SPDFDocument: NSDocument {
         pageIndex: pageIndex, streamID: graphic.streamID,
         kind: graphic.kind == .imageStamp ? "Image stamp" : "Rectangle", rect: bounds)
     }
+    for image in nativeImageTargets(pageIndex: pageIndex).reversed() {
+      let bounds = image.rect
+      if pagePoint[0] >= bounds[0], pagePoint[0] <= bounds[2],
+        pagePoint[1] >= bounds[1], pagePoint[1] <= bounds[3] { return image }
+    }
     return nil
   }
 
@@ -3832,21 +3808,77 @@ final class SPDFDocument: NSDocument {
     guard let selectables = try? AddedGraphics.selectable(pageID: pageID, in: graph) else {
       return []
     }
-    return selectables.map {
+    let added = selectables.map {
       AddedGraphicTarget(
         pageIndex: pageIndex, streamID: $0.streamID,
         kind: $0.kind == .imageStamp ? "Image stamp" : "Rectangle", rect: $0.bounds)
     }
+    // A directly drawn app-created image is already represented by its
+    // marked content stream. Do not expose the same visual twice.
+    let native = nativeImageTargets(pageIndex: pageIndex).filter { image in
+      !added.contains { existing in
+        zip(existing.rect, image.rect).allSatisfy { abs($0 - $1) < 0.01 }
+      }
+    }
+    return added + native
+  }
+
+  /// Existing images can use the same canvas handles as app-created stamps
+  /// only when their `q … cm … Do … Q` placement is directly rewriteable.
+  /// Rotated/skewed matrices remain available through the explicit context
+  /// menu; the canvas currently maps an axis-aligned resize rectangle.
+  private func nativeImageTargets(pageIndex: Int) -> [AddedGraphicTarget] {
+    guard pageIndex >= 0, pageIndex < editSession.pageIDs.count,
+      let graph = editSession.currentGraph
+    else { return [] }
+    let pageID = editSession.pageIDs[pageIndex]
+    guard let placements = try? ImageInventory.placements(in: graph, pageID: pageID) else {
+      return []
+    }
+    return placements.enumerated().compactMap { index, placement in
+      guard placement.isDirectlyEditable, placement.matrix.count == 6,
+        placement.matrix[0] > 0, placement.matrix[3] > 0,
+        abs(placement.matrix[1]) < 1e-9, abs(placement.matrix[2]) < 1e-9
+      else { return nil }
+      return AddedGraphicTarget(
+        pageIndex: pageIndex, streamID: placement.imageID, kind: "Document image",
+        rect: placement.bounds, imagePlacementIndex: index)
+    }
+  }
+
+  private func graphicRefusal(pageIndex: Int, pagePoint: [Double]) -> String? {
+    guard pageIndex >= 0, pageIndex < editSession.pageIDs.count,
+      let graph = editSession.currentGraph, pagePoint.count == 2
+    else { return nil }
+    let pageID = editSession.pageIDs[pageIndex]
+    guard let placements = try? ImageInventory.placements(in: graph, pageID: pageID),
+      let placement = placements.last(where: { $0.contains(point: pagePoint) })
+    else { return nil }
+    if placement.depth > 0 {
+      return "This image is drawn inside a reusable form. Canvas movement is disabled because its shared containing transform cannot be rewritten safely."
+    }
+    if !placement.isDirectlyEditable {
+      return "This image is not drawn in the supported q…cm…Do…Q pattern. Canvas movement is disabled; use the image context menu for supported rotate, scale or replacement actions."
+    }
+    return "This image has a rotated or skewed placement. Use the image context menu to rotate, scale or replace it."
   }
 
   /// Move a multi-selection drag as one transaction with one undo step.
   @discardableResult
-  func moveGraphics(_ moves: [(streamID: PDFObjectID, dx: Double, dy: Double)]) -> Bool {
+  func moveGraphics(
+    _ moves: [(target: AddedGraphicTarget, dx: Double, dy: Double)]
+  ) -> Bool {
     let commands: [any PDFEditCommand] = moves.compactMap { move in
       guard move.dx.isFinite, move.dy.isFinite,
         hypot(move.dx, move.dy) > 0.001
       else { return nil }
-      return MoveAddedGraphicCommand(streamID: move.streamID, dx: move.dx, dy: move.dy)
+      if let placementIndex = move.target.imagePlacementIndex,
+        let pageID = pageID(at: move.target.pageIndex) {
+        return MoveImageCommand(
+          pageID: pageID, placementIndex: placementIndex, dx: move.dx, dy: move.dy)
+      }
+      return MoveAddedGraphicCommand(
+        streamID: move.target.streamID, dx: move.dx, dy: move.dy)
     }
     guard !commands.isEmpty else { return false }
     return applyImageTransaction(commands)
@@ -3858,32 +3890,78 @@ final class SPDFDocument: NSDocument {
   @discardableResult
   func resizeGraphics(
     _ resizes: [(
-      streamID: PDFObjectID, dx: Double, dy: Double, scaleX: Double, scaleY: Double
+      target: AddedGraphicTarget, dx: Double, dy: Double, scaleX: Double, scaleY: Double
     )]
   ) -> Bool {
+    let commands = graphicTransformCommands(resizes)
+    guard !commands.isEmpty else { return false }
+    return applyImageTransaction(commands)
+  }
+
+  private func graphicTransformCommands(
+    _ resizes: [(
+      target: AddedGraphicTarget, dx: Double, dy: Double, scaleX: Double, scaleY: Double
+    )]
+  ) -> [any PDFEditCommand] {
     var commands: [any PDFEditCommand] = []
     for resize in resizes {
       guard resize.scaleX.isFinite, resize.scaleY.isFinite,
         resize.scaleX > 0, resize.scaleY > 0
       else { continue }
+      if let placementIndex = resize.target.imagePlacementIndex,
+        let pageID = pageID(at: resize.target.pageIndex) {
+        if hypot(resize.dx, resize.dy) > 0.001 {
+          commands.append(
+            MoveImageCommand(
+              pageID: pageID, placementIndex: placementIndex,
+              dx: resize.dx, dy: resize.dy))
+        }
+        if abs(resize.scaleX - 1) > 0.0001 || abs(resize.scaleY - 1) > 0.0001 {
+          commands.append(
+            ScaleImageCommand(
+              pageID: pageID, placementIndex: placementIndex,
+              scaleX: resize.scaleX, scaleY: resize.scaleY))
+        }
+        continue
+      }
       if hypot(resize.dx, resize.dy) > 0.001 {
         commands.append(
           MoveAddedGraphicCommand(
-            streamID: resize.streamID, dx: resize.dx, dy: resize.dy))
+            streamID: resize.target.streamID, dx: resize.dx, dy: resize.dy))
       }
       if abs(resize.scaleX - 1) > 0.0001 || abs(resize.scaleY - 1) > 0.0001 {
         commands.append(
           ScaleAddedGraphicCommand(
-            streamID: resize.streamID, scaleX: resize.scaleX, scaleY: resize.scaleY))
+            streamID: resize.target.streamID, scaleX: resize.scaleX, scaleY: resize.scaleY))
       }
     }
-    guard !commands.isEmpty else { return false }
-    return applyImageTransaction(commands)
+    return commands
+  }
+
+  private func previewGraphics(
+    _ resizes: [(
+      target: AddedGraphicTarget, dx: Double, dy: Double, scaleX: Double, scaleY: Double
+    )]
+  ) -> Data? {
+    guard let graph = editSession.currentGraph else { return nil }
+    let commands = graphicTransformCommands(resizes)
+    guard !commands.isEmpty,
+      let preview = try? PDFEditingEngine.commit(PDFTransaction(commands), to: graph)
+    else { return nil }
+    return try? PDFWriter.write(preview)
   }
 
   @discardableResult
-  func rotateGraphic(streamID: PDFObjectID) -> Bool {
-    applyImageTransaction([RotateAddedGraphicCommand(streamID: streamID, degrees: 90)])
+  func rotateGraphic(_ target: AddedGraphicTarget) -> Bool {
+    if let placementIndex = target.imagePlacementIndex,
+      let pageID = pageID(at: target.pageIndex) {
+      return applyImageTransaction([
+        RotateImageCommand(pageID: pageID, placementIndex: placementIndex, degrees: 90)
+      ])
+    }
+    return applyImageTransaction([
+      RotateAddedGraphicCommand(streamID: target.streamID, degrees: 90)
+    ])
   }
 
   // MARK: - OCR (P26)
@@ -4384,7 +4462,7 @@ final class SPDFDocument: NSDocument {
     viewer?.activateTool(tool)
     if page > 0 { viewer?.go(to: page) }
     let refreshedGraphics = selectedGraphics.compactMap { selected in
-      graphicsList(pageIndex: selected.pageIndex).first { $0.streamID == selected.streamID }
+      graphicsList(pageIndex: selected.pageIndex).first { $0.identity == selected.identity }
     }
     if !refreshedGraphics.isEmpty { viewer?.selectGraphics(refreshedGraphics) }
     refreshComments()

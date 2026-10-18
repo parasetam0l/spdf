@@ -37,7 +37,7 @@ struct ImageImportTests {
     #expect(bytes[1] > 200 && bytes[0] < 60 && bytes[2] < 60)
   }
 
-  @Test func convertsGrayscaleAndCompositesTransparency() throws {
+  @Test func convertsGrayscaleAndPreservesTransparency() throws {
     // Grayscale converts explicitly to DeviceRGB.
     let gray = try pngData(
       width: 2, height: 2, colorSpace: CGColorSpaceCreateDeviceGray(),
@@ -50,14 +50,24 @@ struct ImageImportTests {
     let grayBytes = [UInt8](grayRaster.rgb8)
     #expect(grayBytes[0] == grayBytes[1] && grayBytes[1] == grayBytes[2])
     #expect(grayBytes[0] > 40 && grayBytes[0] < 90)
+    #expect(grayRaster.alpha8 == nil)
 
-    // Fully transparent pixels composite over white.
+    // Fully transparent pixels retain an explicit zero alpha plane.
     let alpha = try pngData(width: 2, height: 2) { context in
       context.clear(CGRect(x: 0, y: 0, width: 2, height: 2))
     }
     let alphaRaster = try #require(ImageImport.decode(alpha))
-    let alphaBytes = [UInt8](alphaRaster.rgb8)
-    #expect(alphaBytes[0] > 250 && alphaBytes[1] > 250 && alphaBytes[2] > 250)
+    #expect(alphaRaster.alpha8 == Data(repeating: 0, count: 4))
+
+    // Premultiplied source pixels become straight RGB plus a grayscale mask.
+    let partial = try pngData(width: 1, height: 1) { context in
+      context.setFillColor(CGColor(red: 1, green: 0, blue: 0, alpha: 0.5))
+      context.fill(CGRect(x: 0, y: 0, width: 1, height: 1))
+    }
+    let partialRaster = try #require(ImageImport.decode(partial))
+    #expect(partialRaster.alpha8?.count == 1)
+    #expect((partialRaster.alpha8?.first ?? 0) > 120)
+    #expect((partialRaster.rgb8.first ?? 0) > 240)
   }
 
   @Test func rejectsInvalidData() {

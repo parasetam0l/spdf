@@ -72,16 +72,8 @@ struct ImportedParagraphInteropTests {
   @MainActor private func targets(_ graph: PDFGraph, pageID: PDFObjectID) throws -> [PageTextTarget] {
     let reader = try #require(PDFDocument(data: PDFWriter.write(graph)))
     let page = try #require(reader.page(at: 0))
-    let blocks = try PageTextEditing.blocks(pageID: pageID, in: graph).map { block in
-      let matches = reader.findString(block.text.trimmingCharacters(in: .whitespacesAndNewlines), withOptions: [])
-      let nearest = matches.map { $0.bounds(for: page) }.min {
-        hypot($0.minX - block.rect[0], $0.minY - block.rect[1]) < hypot($1.minX - block.rect[0], $1.minY - block.rect[1])
-      }
-      let rect = nearest.map { [$0.minX, $0.minY, $0.maxX, $0.maxY] } ?? block.rect
-      return PageTextTarget(pageIndex: 0, runIndex: block.runIndices[0], rect: rect,
-        text: block.text, style: block.style, runIndices: block.runIndices)
-    }
-    return NativeParagraphEditing.targets(from: blocks, pageID: pageID, graph: graph, page: page)
+    let blocks = try PageTextEditing.blocks(pageID: pageID, in: graph)
+    return NativeParagraphEditing.targets(from: blocks, pageID: pageID, graph: graph, page: page, pageIndex: 0)
   }
 
   @Test @MainActor func embeddedSimpleAndIdentitySubsetParagraphsKeepTheOriginalFont() throws {
@@ -150,6 +142,9 @@ struct ImportedParagraphInteropTests {
     #expect(profile.glyphs["â"]?.codes == [137])
     #expect(profile.glyphs["ﬁ"]?.codes == [222])
     #expect(profile.glyphs["Z"] == nil)
+    let readerText = try #require(PDFDocument(data: PDFWriter.write(graph))?.string)
+    #expect(readerText.contains("ABC â fi"))
+    #expect(!readerText.contains("ﬁ"))
     let target = try #require(targets(graph, pageID: pageID).first { $0.paragraph != nil })
     let paragraph = try #require(target.paragraph)
     #expect(target.text.contains("ABC â ﬁ"))
@@ -342,11 +337,19 @@ struct ImportedParagraphInteropTests {
 
   @Test @MainActor func opaqueDefaultGraphicsStatesAreEditableButTransparencyAndUnknownStatesRefuse() throws {
     let (base, pageID) = try fixture(composite: true)
-    let states: [[PDFName: PDFValue]] = [
-      [PDFName("BM"): .name(PDFName("Normal")), PDFName("ca"): .real(1)],
-      [PDFName("ca"): .real(0.5)], [PDFName("Font"): .array([.reference(PDFObjectID(4)), .integer(16)])]
+    let states: [([PDFName: PDFValue], Bool)] = [
+      ([PDFName("BM"): .name(PDFName("Normal")), PDFName("ca"): .real(1)], true),
+      ([PDFName("Type"): .name(PDFName("ExtGState")), PDFName("SA"): .boolean(false),
+        PDFName("SM"): .real(0.02), PDFName("OP"): .boolean(false),
+        PDFName("op"): .boolean(false), PDFName("OPM"): .integer(1)], true),
+      ([PDFName("SA"): .boolean(true), PDFName("SM"): .integer(1)], true),
+      ([PDFName("ca"): .real(0.5)], false),
+      ([PDFName("OP"): .boolean(true)], false), ([PDFName("op"): .boolean(true)], false),
+      ([PDFName("OPM"): .integer(2)], false), ([PDFName("SA"): .integer(0)], false),
+      ([PDFName("SM"): .real(-0.1)], false), ([PDFName("SM"): .real(1.1)], false),
+      ([PDFName("Font"): .array([.reference(PDFObjectID(4)), .integer(16)])], false)
     ]
-    for state in states {
+    for (state, expected) in states {
       var graph = base
       guard case .dictionary(var page)? = graph.objects[pageID],
         case .dictionary(var resources)? = page[PDFName("Resources")],
@@ -359,7 +362,7 @@ struct ImportedParagraphInteropTests {
       graph.objects[PDFObjectID(40)] = .dictionary(state)
       graph.objects[PDFObjectID(5)] = .stream(PDFStream(bytes: Data("/GS gs\n".utf8) + content.bytes))
       let hasParagraph = try targets(graph, pageID: pageID).contains { $0.paragraph != nil }
-      #expect(hasParagraph == (state[PDFName("BM")] != nil))
+      #expect(hasParagraph == expected, "\(state)")
     }
   }
 

@@ -204,12 +204,16 @@ public enum PageTextEditing {
     let content = try PageContent.load(pageID: pageID, in: graph)
     let runs = try TextRunIndexer.runs(in: content, graph: graph)
     let instructions = Set(originalText.keys.map { runs[$0].instructionIndex })
-    let ranges = instructions.sorted().flatMap { index -> [(range: Range<Int>, replacement: [UInt8])] in
+    let ranges = instructions.sorted().map { index -> (range: Range<Int>, replacement: [UInt8]) in
       let range = TextStyleSupport.fullSpan(of: content.instructions[index])
-      return [(range.lowerBound..<range.lowerBound, Array("\n3 Tr\n".utf8)),
-        (range.upperBound..<range.upperBound, Array("\n0 Tr\n".utf8))]
+      return (range, Array("\n3 Tr\n".utf8) + content.bytes[range] + Array("\n0 Tr\n".utf8))
     }
-    return try content.replacing(ranges: ranges, in: graph)
+    var result = graph
+    for index in content.segments.indices {
+      let local = ranges.filter { content.segmentIndex(for: $0.range) == index }
+      if !local.isEmpty { result = try content.replacing(ranges: local, in: result) }
+    }
+    return result
   }
   public static func blocks(pageID: PDFObjectID, in graph: PDFGraph) throws -> [PageTextBlock] {
     let content = try PageContent.load(pageID: pageID, in: graph)

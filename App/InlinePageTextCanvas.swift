@@ -59,8 +59,16 @@ final class InlinePageTextView: NSTextView {
   var onMagnify: ((NSEvent) -> Void)?
   var toggleBold: (() -> Void)?
   var toggleItalic: (() -> Void)?
+  /// Return true when the canvas inserted an attributed string because the
+  /// active embedded subset needed another verified font from the paragraph.
+  var insertWithSourceFallback: ((Any, NSRange) -> Bool)?
   override var undoManager: UndoManager? { typingUndo }
   override func paste(_ sender: Any?) { pasteAsPlainText(sender) }
+
+  override func insertText(_ string: Any, replacementRange: NSRange) {
+    if insertWithSourceFallback?(string, replacementRange) == true { return }
+    super.insertText(string, replacementRange: replacementRange)
+  }
 
   override func insertNewline(_ sender: Any?) {
     if acceptsLineBreaks { super.insertNewline(sender) } else { finish?() }
@@ -296,6 +304,22 @@ final class InlinePageTextCanvas: NSView, NSTextViewDelegate {
     textView.cancel = { [weak self] in self?.cancel() }
     textView.onScroll = { [weak viewer] event in viewer?.scrollPage(with: event) }
     textView.onMagnify = { [weak viewer] event in viewer?.view.magnify(with: event) }
+    textView.insertWithSourceFallback = { [weak self, weak textView] value, range in
+      guard let self, let textView, let formatting = self.formatting,
+        !textView.hasMarkedText(), !(value is NSAttributedString) else { return false }
+      guard let text = value as? String else { return false }
+      let plan = formatting.insertionPlan(text, replacing: range)
+      if let issue = plan.issue {
+        self.viewer?.pageTextFormattingIssue = issue
+        NSSound.beep()
+        return true
+      }
+      guard plan.usesSourceFontFallback, let attributed = plan.attributedText else {
+        return false
+      }
+      textView.insertText(attributed, replacementRange: range)
+      return true
+    }
     addSubview(textView)
     addSubview(moveHandle)
     addSubview(widthHandle)

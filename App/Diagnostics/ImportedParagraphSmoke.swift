@@ -323,12 +323,62 @@
       try PDFWriter.serialize(leadingGraph).write(to: leadingSource)
       try await CorpusParagraphSmoke.checks(source: leadingSource, output: leadingOutput,
         matching: "This imported paragraph")
+      try await readerExpansionChecks(fixtures: fixtures, output: output.appendingPathComponent("ReaderExpansion"))
       try JSONSerialization.data(withJSONObject: ["status": "passed", "font": "DejaVuSans",
         "sourceRuns": paragraph.originalText.count, "savedLines": lines.count,
         "savedWidth": expectedBox.width, "nativeText": expectedText,
         "coverage": "missing glyph refused before insertion; explicit standard-font choice available",
         "checks": "selection, original glyph program, selected formatting, longer typing, resize/move, atomic Undo/Redo, Save and reselection"],
         options: [.prettyPrinted, .sortedKeys]).write(to: output.appendingPathComponent("result.json"))
+    }
+
+    /// Exercise the actual hit target when PDFKit expands a ligature and its
+    /// extracted string cannot match the PDF's original text-show operand.
+    private static func readerExpansionChecks(fixtures: URL, output: URL) async throws {
+      try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
+      var graph = try PDFParser.parse(Data(contentsOf: fixtures.appendingPathComponent("font-embedded.pdf"))).graph
+      guard case .dictionary(var font)? = graph.objects[PDFObjectID(4)],
+        case .stream(let stream)? = graph.objects[PDFObjectID(7)],
+        case .dictionary(var page)? = graph.objects[PDFObjectID(3)],
+        case .dictionary(var resources)? = page[PDFName("Resources")] else {
+        throw PDFError(.malformed, "Missing reader-expansion fixture font")
+      }
+      let inspector = try TrueTypeInspector.inspect(PDFFilters.decoded(stream))
+      let scalars = [32: 32, 65: 65, 66: 66, 67: 67, 137: 0xE2, 222: 0xFB01]
+      font[PDFName("Encoding")] = .name(PDFName("MacRomanEncoding"))
+      font.removeValue(forKey: PDFName("ToUnicode"))
+      font[PDFName("FirstChar")] = .integer(32)
+      font[PDFName("LastChar")] = .integer(255)
+      font[PDFName("Widths")] = .array((32...255).map { code in
+        let glyph = scalars[code].flatMap { inspector.unicodeToGlyph[$0] }
+        let advance = glyph.flatMap { inspector.advances[$0] } ?? 0
+        return .real((Double(advance) * 1_000 / Double(inspector.unitsPerEm)).rounded())
+      })
+      graph.objects[PDFObjectID(4)] = .dictionary(font)
+      resources[PDFName("ExtGState")] = .dictionary([PDFName("GS"): .dictionary([
+        PDFName("SA"): .boolean(false), PDFName("SM"): .real(0.02),
+        PDFName("OP"): .boolean(false), PDFName("op"): .boolean(false), PDFName("OPM"): .integer(1)])])
+      resources[PDFName("ColorSpace")] = .dictionary([PDFName("Custom"): .name(PDFName("DeviceRGB"))])
+      page[PDFName("Resources")] = .dictionary(resources)
+      page[PDFName("Contents")] = .array([.reference(PDFObjectID(5)), .reference(PDFObjectID(9)), .reference(PDFObjectID(10))])
+      graph.objects[PDFObjectID(3)] = .dictionary(page)
+      graph.objects[PDFObjectID(5)] = .stream(PDFStream(bytes: Data("""
+        /GS gs /Custom cs 0 0 1 scn 0 g
+        BT /F1 16 Tf 1 0 0 1 42 700 Tm <414243208920DE204142432041424320414243> Tj
+
+        """.utf8)))
+      graph.objects[PDFObjectID(9)] = .stream(PDFStream(bytes: Data(
+        "0 -22 Td <414243208920DE204142432041424320414243> Tj ET\n".utf8)))
+      graph.objects[PDFObjectID(10)] = .stream(PDFStream(bytes: Data(
+        "BT /F1 16 Tf 1 0 0 1 42 600 Tm (CBA ABC) Tj ET\n".utf8)))
+      let bytes = try PDFWriter.write(graph)
+      guard let reader = PDFDocument(data: bytes)?.string,
+        reader.contains("ABC â fi"), !reader.contains("ﬁ") else {
+        throw PDFError(.malformed, "Reader-expansion regression did not exercise the extraction mismatch")
+      }
+      let source = output.appendingPathComponent("source.pdf")
+      try bytes.write(to: source)
+      try await CorpusParagraphSmoke.checks(source: source, output: output, matching: "ABC â")
     }
   }
 #endif

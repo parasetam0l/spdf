@@ -34,12 +34,34 @@
           var image: [String: Any]?
           for index in 0..<min(3, document.editSession.pageIDs.count) {
             let id = document.editSession.pageIDs[index]
-            guard let placement = try ImageInventory.placements(in: graph, pageID: id).first else { continue }
+            let placements = try ImageInventory.placements(in: graph, pageID: id)
+            guard !placements.isEmpty else { continue }
+            let selectedIndex = placements.firstIndex {
+              $0.isDirectlyEditable && $0.matrix.count == 6
+                && $0.matrix[0] > 0 && $0.matrix[3] > 0
+                && abs($0.matrix[1]) < 1e-9 && abs($0.matrix[2]) < 1e-9
+            }
+            guard let selectedIndex else {
+              image = ["page": index, "placementIndex": 0,
+                "placementCount": placements.count, "directPlacementCount": 0,
+                "placements": placements.map {
+                  ["imageID": $0.imageID.number, "matrix": $0.matrix,
+                    "bounds": $0.bounds, "depth": $0.depth,
+                    "directlyEditable": $0.isDirectlyEditable]
+                },
+                "status": "no-axis-aligned-direct-placement"]
+              break
+            }
+            let placement = placements[selectedIndex]
             let bounds = placement.bounds
             let target = viewer.graphicTargetProvider?(index,
               [(bounds[0] + bounds[2]) / 2, (bounds[1] + bounds[3]) / 2])
-            image = ["page": index, "placementIndex": 0,
-              "status": target == nil ? "refused-by-canvas-targeting" : "selectable-not-edit-qualified"]
+            image = ["page": index, "placementIndex": selectedIndex,
+              "placementCount": placements.count,
+              "directPlacementCount": placements.filter(\.isDirectlyEditable).count,
+              "matrix": placement.matrix,
+              "status": target?.imagePlacementIndex == selectedIndex
+                ? "native-canvas-target" : "refused-by-canvas-targeting"]
             break
           }
           result["imageTask"] = image ?? ["status": "no-image-placement-resolved-in-fixed-page-sample"]
@@ -92,9 +114,9 @@
       exit(0)
     }
 
-    static func run(source: URL, output: URL, matching: String? = nil) async {
+    static func run(source: URL, output: URL, matching: String? = nil, wordOverride: String? = nil) async {
       do {
-        try await checks(source: source, output: output, matching: matching)
+        try await checks(source: source, output: output, matching: matching, wordOverride: wordOverride)
         print("sPDF corpus paragraph check passed")
         exit(0)
       } catch {
@@ -103,7 +125,149 @@
       }
     }
 
-    static func checks(source: URL, output: URL, matching: String? = nil) async throws {
+    /// Exercise the same native canvas path users invoke for an existing,
+    /// direct image placement: select, move, resize, exact Undo/Redo, Save As,
+    /// actual close/reopen and reselection.
+    static func imageEdit(source: URL, output: URL) async {
+      do {
+        try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
+        let sourceBytes = try Data(contentsOf: source)
+        let previousRecovery = SPDFDocument.recoveryDirectoryOverride
+        defer { SPDFDocument.recoveryDirectoryOverride = previousRecovery }
+        SPDFDocument.recoveryDirectoryOverride = output.appendingPathComponent("Recovery")
+        let document = try SPDFDocument(contentsOf: source, ofType: "com.adobe.pdf")
+        NSDocumentController.shared.addDocument(document)
+        document.makeWindowControllers()
+        defer { document.close() }
+        guard let viewer = document.viewer,
+          let window = document.windowControllers.first?.window,
+          let content = window.contentView
+        else { throw PDFError(.malformed, "Missing native image workspace") }
+        window.makeKeyAndOrderFront(nil)
+        viewer.setZoom(1)
+        _ = viewer.activateTool(.imageEdit)
+        try await Task.sleep(for: .milliseconds(100))
+        guard let target = (0..<min(3, document.editSession.pageIDs.count))
+          .lazy.flatMap({ viewer.graphicsListProvider?($0) ?? [] })
+          .first(where: { $0.imagePlacementIndex != nil })
+        else { throw PDFError(.unsupported, "No directly editable image in the fixed page sample") }
+        guard let page = viewer.view.document?.page(at: target.pageIndex) else {
+          throw PDFError(.malformed, "Missing native image page")
+        }
+        func find<T: NSView>(_ type: T.Type, in view: NSView) -> T? {
+          if let found = view as? T { return found }
+          return view.subviews.lazy.compactMap { find(type, in: $0) }.first
+        }
+        guard let overlay = find(GraphicSelectionOverlayView.self, in: content) else {
+          throw PDFError(.malformed, "Missing native image overlay")
+        }
+        let initial = CGRect(
+          x: target.rect[0], y: target.rect[1],
+          width: target.rect[2] - target.rect[0],
+          height: target.rect[3] - target.rect[1])
+        let start = viewer.view.convert(
+          viewer.view.convert(NSPoint(x: initial.midX, y: initial.midY), from: page), to: nil)
+        let movedPointer = viewer.view.convert(
+          viewer.view.convert(NSPoint(x: initial.midX + 36, y: initial.midY - 24), from: page),
+          to: nil)
+        func mouse(_ type: NSEvent.EventType, _ point: NSPoint) throws -> NSEvent {
+          guard let event = NSEvent.mouseEvent(
+            with: type, location: point, modifierFlags: [],
+            timestamp: ProcessInfo.processInfo.systemUptime,
+            windowNumber: window.windowNumber, context: nil, eventNumber: 0,
+            clickCount: 1, pressure: type == .leftMouseUp ? 0 : 1
+          ) else { throw PDFError(.malformed, "Missing native image pointer event") }
+          return event
+        }
+        let original = try document.editSession.bytesForSave()
+        overlay.mouseDown(with: try mouse(.leftMouseDown, start))
+        overlay.mouseDragged(with: try mouse(.leftMouseDragged, movedPointer))
+        overlay.mouseUp(with: try mouse(.leftMouseUp, movedPointer))
+        guard viewer.selectedGraphics.count == 1,
+          viewer.selectedGraphics[0].imagePlacementIndex != nil,
+          let movedBounds = viewer.selectedGraphicBounds,
+          abs(movedBounds.minX - initial.minX - 36) < 0.02,
+          abs(movedBounds.minY - initial.minY + 24) < 0.02
+        else { throw PDFError(.malformed, "Native image pointer drag did not move the actual image") }
+        let movedBytes = try document.editSession.bytesForSave()
+        let destination = CGRect(
+          x: movedBounds.minX, y: movedBounds.minY,
+          width: initial.width * 1.2, height: initial.height * 0.8)
+        viewer.setGraphicBounds(destination)
+        guard let moved = viewer.selectedGraphicBounds,
+          abs(moved.minX - destination.minX) < 0.01,
+          abs(moved.minY - destination.minY) < 0.01,
+          abs(moved.width - destination.width) < 0.01,
+          abs(moved.height - destination.height) < 0.01,
+          document.isDocumentEdited
+        else { throw PDFError(.malformed, "Native image move/resize did not reach its target bounds") }
+        let edited = try document.editSession.bytesForSave()
+        document.undoEdit()
+        guard try document.editSession.bytesForSave() == movedBytes else {
+          throw PDFError(.malformed, "Native image resize Undo did not restore its prior bytes")
+        }
+        document.undoEdit()
+        guard try document.editSession.bytesForSave() == original else {
+          throw PDFError(.malformed, "Native image pointer Undo did not restore exact source bytes")
+        }
+        document.redoEdit()
+        guard try document.editSession.bytesForSave() == movedBytes else {
+          throw PDFError(.malformed, "Native image pointer Redo did not restore its moved bytes")
+        }
+        document.redoEdit()
+        guard try document.editSession.bytesForSave() == edited else {
+          throw PDFError(.malformed, "Native image Redo did not restore exact bytes")
+        }
+        let saved = output.appendingPathComponent("saved.pdf")
+        let saveError: Error? = await withCheckedContinuation { continuation in
+          document.save(to: saved, ofType: "com.adobe.pdf", for: .saveAsOperation) {
+            continuation.resume(returning: $0)
+          }
+        }
+        if let saveError { throw saveError }
+        document.close()
+        let reopened = try SPDFDocument(contentsOf: saved, ofType: "com.adobe.pdf")
+        NSDocumentController.shared.addDocument(reopened)
+        reopened.makeWindowControllers()
+        defer { reopened.close() }
+        guard let again = reopened.viewer else {
+          throw PDFError(.malformed, "Missing reopened native image workspace")
+        }
+        _ = again.activateTool(.imageEdit)
+        guard let reselected = again.graphicsListProvider?(target.pageIndex).first(where: {
+          abs($0.rect[0] - destination.minX) < 0.02
+            && abs($0.rect[1] - destination.minY) < 0.02
+            && abs($0.rect[2] - destination.maxX) < 0.02
+            && abs($0.rect[3] - destination.maxY) < 0.02
+            && $0.imagePlacementIndex != nil
+        }) else { throw PDFError(.malformed, "Saved native image geometry did not reopen") }
+        again.selectGraphics([reselected])
+        guard again.selectedGraphics.count == 1, !reopened.isDocumentEdited,
+          try Data(contentsOf: source) == sourceBytes
+        else { throw PDFError(.malformed, "Native image reopen/reselection was not clean") }
+        try original.write(to: output.appendingPathComponent("before.pdf"))
+        try edited.write(to: output.appendingPathComponent("after.pdf"))
+        try JSONSerialization.data(withJSONObject: [
+          "status": "passed", "page": target.pageIndex,
+          "imagePlacementIndex": target.imagePlacementIndex as Any,
+          "initialBounds": [initial.minX, initial.minY, initial.maxX, initial.maxY],
+          "pointerMovedBounds": [
+            movedBounds.minX, movedBounds.minY, movedBounds.maxX, movedBounds.maxY,
+          ],
+          "savedBounds": [destination.minX, destination.minY, destination.maxX, destination.maxY],
+          "undoRedoExact": true, "saveReopenReselect": true,
+          "sourceFileUnchanged": true,
+        ], options: [.prettyPrinted, .sortedKeys])
+          .write(to: output.appendingPathComponent("result.json"))
+        print("sPDF native image check passed")
+        exit(0)
+      } catch {
+        FileHandle.standardError.write(Data("Corpus native image check failed: \(error)\n".utf8))
+        exit(1)
+      }
+    }
+
+    static func checks(source: URL, output: URL, matching: String? = nil, wordOverride: String? = nil) async throws {
       try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
       let sourceBytes = try Data(contentsOf: source)
       let priorRecovery = SPDFDocument.recoveryDirectoryOverride
@@ -116,20 +280,32 @@
       guard let graph = document.editSession.currentGraph, let viewer = document.viewer,
         let reader = viewer.view.document else { throw PDFError(.malformed, "Missing corpus document") }
       var chosen: PageTextTarget?
+      var targetInventory: [[String: Any]] = []
       for index in 0..<min(3, document.editSession.pageIDs.count) {
         guard let page = reader.page(at: index) else { continue }
         let pageID = document.editSession.pageIDs[index]
-        let blocks = try PageTextEditing.blocks(pageID: pageID, in: graph).map {
-          PageTextTarget(pageIndex: index, runIndex: $0.runIndices[0], rect: $0.rect,
-            text: $0.text, style: $0.style, runIndices: $0.runIndices)
+        let blocks = try PageTextEditing.blocks(pageID: pageID, in: graph)
+        let targets = NativeParagraphEditing.targets(
+          from: blocks, pageID: pageID, graph: graph, page: page, pageIndex: index)
+        targetInventory += targets.map { target in
+          ["page": index, "textPrefix": String(target.text.prefix(48)),
+            "rect": target.rect, "runs": target.runIndices.count,
+            "paragraph": target.paragraph != nil, "wraps": target.paragraph?.wraps ?? false]
         }
-        chosen = NativeParagraphEditing.targets(from: blocks, pageID: pageID, graph: graph, page: page)
-          .first {
-            if let matching { return $0.paragraph != nil && $0.text.hasPrefix(matching) }
-            return $0.paragraph?.wraps == true && $0.text.count >= 50 && $0.rect[1] > 100
+        if let matching {
+          chosen = targets.first { $0.paragraph != nil && $0.text.hasPrefix(matching) }
+        } else {
+          chosen = targets.first {
+            $0.paragraph?.wraps == true && $0.text.count >= 50 && $0.rect[1] > 100
+          } ?? targets.first {
+            $0.paragraph != nil && $0.text.count >= 15
           }
+        }
         if chosen != nil { break }
       }
+      try JSONSerialization.data(withJSONObject: targetInventory,
+        options: [.prettyPrinted, .sortedKeys])
+        .write(to: output.appendingPathComponent("targets.json"))
       guard let target = chosen else { throw PDFError(.unsupported, "No representative editable paragraph") }
       let pageIndex = target.pageIndex, pageID = document.editSession.pageIDs[pageIndex]
       func dictionary(_ value: PDFValue?) -> [PDFName: PDFValue]? {
@@ -177,6 +353,19 @@
           throw PDFError(.malformed, "Missing corpus pointer target")
         }
         let bounds = match.bounds(for: page)
+        // Use the actual app's resolver before dispatching pointer events.
+        // A refusal must fail the diagnostic rather than block in a modal.
+        let hit = viewer.textRunProvider?(pageIndex, [bounds.midX, bounds.midY])
+        let hitPreview = hit.flatMap { viewer.onTextBlockPreview?($0) }
+        try JSONSerialization.data(withJSONObject: [
+          "detectedRuns": target.runIndices, "hitRuns": hit?.runIndices ?? [],
+          "hitIsParagraph": hit?.paragraph != nil,
+          "hitPreviewAvailable": hitPreview != nil,
+          "point": [bounds.midX, bounds.midY]
+        ], options: [.prettyPrinted, .sortedKeys]).write(to: output.appendingPathComponent("hit-target.json"))
+        guard let hit, hit.paragraph != nil, hitPreview != nil else {
+          throw PDFError(.unsupported, "The actual paragraph hit or its preview is unavailable")
+        }
         let point = viewer.view.convert(NSPoint(x: bounds.midX, y: bounds.midY), from: page)
         let pointer = viewer.view.convert(point, to: nil)
         for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
@@ -237,7 +426,9 @@
           .write(to: output.appendingPathComponent("selection.json"))
       }
       canvas.beginTyping()
-      let word = String(canvas.textView.string.split(whereSeparator: \.isWhitespace).last ?? "")
+      let words = canvas.textView.string.split(whereSeparator: \.isWhitespace).map(String.init)
+      let word = wordOverride ?? words.last ?? ""
+      guard words.contains(word), !word.isEmpty else { throw PDFError(.malformed, "The requested diagnostic word is absent") }
       guard !word.isEmpty else { throw PDFError(.malformed, "No source-font word for typing") }
       let clippingRect = target.paragraph?.clippingRect
       if let clippingRect {
@@ -312,6 +503,7 @@
         "clippingRect": clippingRect as Any? ?? NSNull(),
         "clippedOverflowBlockedAndRepaired": clippingRect != nil,
         "matchedTarget": matching != nil,
+        "editedWord": word, "taskWordOverride": wordOverride != nil,
         "sourceFileUnchanged": true, "fontProgramsAndMappingsUnchanged": true],
         options: [.prettyPrinted, .sortedKeys]).write(to: output.appendingPathComponent("result.json"))
     }

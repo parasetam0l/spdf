@@ -9,6 +9,78 @@ import Testing
 /// per-instance copy-on-write replacement.
 @Suite("Image editing")
 struct ImageEditTests {
+  @Test func imageAlphaRoundTripsThroughInsertionAndReplacement() throws {
+    let blank = try PDFParser.parse(BlankPDF.data())
+    let pageID = blank.pageIDs[0]
+    let rgb = Data([255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 255])
+    let alpha = Data([0, 64, 128, 255])
+    let inserted = try PDFEditingEngine.commit(
+      PDFTransaction([
+        PlaceImageCommand(
+          pageID: pageID, rect: [40, 40, 90, 90], width: 2, height: 2,
+          rgb8: rgb, alpha8: alpha)
+      ]), to: blank.graph)
+    let placement = try #require(
+      ImageInventory.placements(in: inserted, pageID: pageID).first)
+    guard case .stream(let image)? = inserted.objects[placement.imageID],
+      case .reference(let maskID)? = image.dictionary[PDFName("SMask")],
+      case .stream(let mask)? = inserted.objects[maskID]
+    else {
+      Issue.record("Inserted image lost its transparency soft mask")
+      return
+    }
+    #expect(mask.dictionary[PDFName("ColorSpace")] == .name(PDFName("DeviceGray")))
+    #expect(try PDFFilters.decoded(mask) == alpha)
+    let insertedBytes = try PDFWriter.write(inserted)
+    let reopened = try PDFParser.parse(insertedBytes)
+    #expect(try ImageInventory.placements(in: reopened.graph, pageID: pageID).count == 1)
+    #expect(try PDFFilters.decoded(
+      try #require(
+        reopened.graph.objects[maskID].flatMap {
+          if case .stream(let stream) = $0 { return stream }; return nil
+        })) == alpha)
+
+    let source = try PDFParser.parse(PDFFixtures.imagePages())
+    let replaced = try PDFEditingEngine.commit(
+      PDFTransaction([
+        ReplaceImageDataCommand(
+          pageID: source.pageIDs[0], placementIndex: 0, width: 2, height: 2,
+          rgb8: rgb, alpha8: alpha)
+      ]), to: source.graph)
+    let replacedPlacement = try #require(
+      ImageInventory.placements(in: replaced, pageID: source.pageIDs[0]).first)
+    guard case .stream(let replacedImage)? = replaced.objects[replacedPlacement.imageID],
+      case .reference(let replacedMaskID)? = replacedImage.dictionary[PDFName("SMask")],
+      case .stream(let replacedMask)? = replaced.objects[replacedMaskID]
+    else {
+      Issue.record("Replacement image lost its transparency soft mask")
+      return
+    }
+    #expect(try PDFFilters.decoded(replacedMask) == alpha)
+  }
+
+  @Test func indirectResourceDictionariesStillResolveImagePlacements() throws {
+    var graph = try PDFParser.parse(PDFFixtures.imagePages()).graph
+    let pageID = PDFObjectID(3)
+    guard case .dictionary(var page)? = graph.objects[pageID],
+      case .dictionary(var resources)? = page[PDFName("Resources")],
+      case .dictionary(let xobjects)? = resources[PDFName("XObject")]
+    else {
+      Issue.record("Missing image fixture resources")
+      return
+    }
+    graph.objects[PDFObjectID(90)] = .dictionary(xobjects)
+    resources[PDFName("XObject")] = .reference(PDFObjectID(90))
+    page[PDFName("Resources")] = .dictionary(resources)
+    graph.objects[pageID] = .dictionary(page)
+    let indirect = try ImageInventory.placements(in: graph, pageID: pageID)
+    #expect(indirect.count == 2)
+    #expect(indirect.map(\.imageID) == [PDFObjectID(6), PDFObjectID(6)])
+    #expect(indirect.map(\.bounds) == [
+      [80, 600, 200, 720], [80, 400, 200, 520],
+    ])
+  }
+
   @Test func inventorySeparatesInstancesFromTheSharedResource() throws {
     let parsed = try PDFParser.parse(PDFFixtures.imagePages())
     let page1 = parsed.pageIDs[0]
@@ -49,6 +121,65 @@ struct ImageEditTests {
     let reopened = try PDFParser.parse(PDFWriter.write(graph))
     let reopenedPlacements = try ImageInventory.placements(in: reopened.graph, pageID: page1)
     #expect(reopenedPlacements[0].matrix == [120, 0, 0, 120, 120, 575])
+  }
+
+  @Test func enclosingPageScaleKeepsCanvasMoveResizeAndRotationExact() throws {
+    var graph = try PDFParser.parse(PDFFixtures.imagePages()).graph
+    guard case .stream(let content)? = graph.objects[PDFObjectID(5)] else {
+      Issue.record("Content stream missing")
+      return
+    }
+    graph.objects[PDFObjectID(5)] = .stream(
+      PDFStream(
+        dictionary: content.dictionary,
+        bytes: Data("q 0.1 0 0 0.1 0 0 cm\n".utf8) + content.bytes + Data("Q\n".utf8)))
+    let parsed = try PDFParser.parse(PDFWriter.write(graph))
+    let pageID = parsed.pageIDs[0]
+    let initial = try ImageInventory.placements(in: parsed.graph, pageID: pageID)
+    #expect(initial.count == 2)
+    #expect(initial.allSatisfy { $0.isDirectlyEditable })
+    #expect(initial.map(\.matrix) == [
+      [12, 0, 0, 12, 8, 60], [12, 0, 0, 12, 8, 40],
+    ])
+    #expect(initial.map(\.outerMatrix) == [
+      [0.1, 0, 0, 0.1, 0, 0], [0.1, 0, 0, 0.1, 0, 0],
+    ])
+
+    let moved = try PDFEditingEngine.commit(
+      PDFTransaction([
+        MoveImageCommand(pageID: pageID, placementIndex: 0, dx: 40, dy: -25)
+      ]), to: parsed.graph)
+    let movedPlacements = try ImageInventory.placements(in: moved, pageID: pageID)
+    #expect(movedPlacements[0].matrix == [12, 0, 0, 12, 48, 35])
+    #expect(movedPlacements[1].matrix == initial[1].matrix)
+    let movedText = String(
+      decoding: try PageContent.load(pageID: pageID, in: moved).bytes, as: UTF8.self)
+    #expect(movedText.contains("120 0 0 120 480 350"))
+    #expect(movedText.contains("q 0.1 0 0 0.1 0 0 cm"))
+
+    let resized = try PDFEditingEngine.commit(
+      PDFTransaction([
+        ScaleImageCommand(
+          pageID: pageID, placementIndex: 0, scaleX: 2, scaleY: 0.5)
+      ]), to: moved)
+    let resizedPlacement = try #require(
+      ImageInventory.placements(in: resized, pageID: pageID).first)
+    #expect(resizedPlacement.matrix == [24, 0, 0, 6, 48, 35])
+
+    let rotated = try PDFEditingEngine.commit(
+      PDFTransaction([
+        RotateImageCommand(pageID: pageID, placementIndex: 0, degrees: 90)
+      ]), to: parsed.graph)
+    let turned = try #require(ImageInventory.placements(in: rotated, pageID: pageID).first)
+    let before = initial[0].bounds
+    #expect(abs((turned.bounds[0] + turned.bounds[2]) / 2
+      - (before[0] + before[2]) / 2) < 0.0001)
+    #expect(abs((turned.bounds[1] + turned.bounds[3]) / 2
+      - (before[1] + before[3]) / 2) < 0.0001)
+    #expect(abs((turned.bounds[2] - turned.bounds[0])
+      - (before[3] - before[1])) < 0.0001)
+    #expect(abs((turned.bounds[3] - turned.bounds[1])
+      - (before[2] - before[0])) < 0.0001)
   }
 
   @Test func moveRefusesUnsupportedMatrixPatterns() throws {
@@ -140,7 +271,7 @@ struct ImageEditTests {
     #expect(page2Placements[0].imageID == PDFObjectID(6))
   }
 
-  @Test func replacementRefusesMasksAndForeignColorSpaces() throws {
+  @Test func replacementReplacesSoftMasksAndRefusesSampleChangingMasks() throws {
     let magenta = Data(repeating: 255, count: 12)
 
     var masked = try PDFParser.parse(PDFFixtures.imagePages()).graph
@@ -152,12 +283,41 @@ struct ImageEditTests {
     maskedDict[PDFName("SMask")] = .dictionary([:])
     masked.objects[PDFObjectID(6)] = .stream(
       PDFStream(dictionary: maskedDict, bytes: image.bytes))
+    let replacementAlpha = Data([0, 64, 128, 255])
+    let replaced = try PDFEditingEngine.commit(
+      PDFTransaction([
+        ReplaceImageDataCommand(
+          pageID: PDFObjectID(3), placementIndex: 0, width: 2, height: 2,
+          rgb8: magenta, alpha8: replacementAlpha)
+      ]), to: masked)
+    let placement = try #require(
+      ImageInventory.placements(in: replaced, pageID: PDFObjectID(3)).first)
+    guard case .stream(let replacement)? = replaced.objects[placement.imageID],
+      case .reference(let maskID)? = replacement.dictionary[PDFName("SMask")],
+      case .stream(let mask)? = replaced.objects[maskID]
+    else {
+      Issue.record("Replacement did not attach its new soft mask")
+      return
+    }
+    #expect(try PDFFilters.decoded(mask) == replacementAlpha)
+
+    var colorKey = try PDFParser.parse(PDFFixtures.imagePages()).graph
+    guard case .stream(let colorKeyImage)? = colorKey.objects[PDFObjectID(6)] else {
+      Issue.record("Image missing")
+      return
+    }
+    var colorKeyDictionary = colorKeyImage.dictionary
+    colorKeyDictionary[PDFName("Mask")] = .array([
+      .integer(255), .integer(255), .integer(255),
+    ])
+    colorKey.objects[PDFObjectID(6)] = .stream(
+      PDFStream(dictionary: colorKeyDictionary, bytes: colorKeyImage.bytes))
     #expect(throws: PDFError.self) {
       _ = try PDFEditingEngine.commit(
         PDFTransaction([
           ReplaceImageDataCommand(
             pageID: PDFObjectID(3), placementIndex: 0, width: 2, height: 2, rgb8: magenta)
-        ]), to: masked)
+        ]), to: colorKey)
     }
 
     var gray = try PDFParser.parse(PDFFixtures.imagePages()).graph

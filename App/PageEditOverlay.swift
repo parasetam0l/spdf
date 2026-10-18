@@ -210,12 +210,15 @@ final class PageEditOverlayView: NSView, NSTextFieldDelegate {
   }
 
   /// Resolve an editable target under an overlay point. The overlay shares
-  /// the PDF view's frame, so overlay and view coordinates agree.
+  /// the PDF view's coordinate space conceptually, but SwiftUI can inset or
+  /// offset the representable. Convert through the actual view hierarchy so
+  /// a click cannot resolve a different block above or below it.
   private func target(at point: NSPoint) -> EditTarget? {
-    guard let viewer, let document = viewer.view.document,
-      let page = viewer.view.page(for: point, nearest: false)
+    guard let viewer, let document = viewer.view.document else { return nil }
+    let viewPoint = convert(point, to: viewer.view)
+    guard let page = viewer.view.page(for: viewPoint, nearest: false)
     else { return nil }
-    let pagePoint = viewer.view.convert(point, to: page)
+    let pagePoint = viewer.view.convert(viewPoint, to: page)
     let index = document.index(for: page)
     let values = [Double(pagePoint.x), Double(pagePoint.y)]
     if viewer.activeTool == .addText {

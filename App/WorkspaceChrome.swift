@@ -402,13 +402,13 @@ struct WorkspaceGraphicInspector: View {
             }.disabled(!editable)
             Divider()
             if viewer.selectedGraphics.count == 1, let target = viewer.selectedGraphics.first {
-              Button { viewer.onRotateGraphic?(target.streamID) } label: {
+              Button { viewer.onRotateGraphic?(target) } label: {
                 Label("Rotate 90°", systemImage: "rotate.right").frame(maxWidth: .infinity)
               }.buttonStyle(.bordered).disabled(!editable)
             }
             Button(role: .destructive) { viewer.deleteSelectedGraphics() } label: {
               Label("Delete Selection", systemImage: "trash").frame(maxWidth: .infinity)
-            }.buttonStyle(.bordered).disabled(!editable)
+            }.buttonStyle(.bordered).disabled(!editable || !viewer.canDeleteSelectedGraphics)
           } else {
             VStack(alignment: .leading, spacing: 10) {
               Image(systemName: "photo.on.rectangle.angled").font(.system(size: 26, weight: .light))
@@ -416,7 +416,7 @@ struct WorkspaceGraphicInspector: View {
               Text("Place an image on the page").font(.system(size: 13, weight: .medium))
               Text("Insert an image, then drag it to move or resize it. Shift-click to select several objects.")
                 .font(.system(size: 12)).foregroundStyle(.secondary)
-              Text("For existing document images, right-click to rotate, scale or replace a supported image.")
+              Text("For supported existing images, choose Images and drag the selection or handles. Right-click for rotate, scale or replace.")
                 .font(.system(size: 11)).foregroundStyle(.secondary)
             }.fixedSize(horizontal: false, vertical: true)
           }

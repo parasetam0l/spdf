@@ -764,13 +764,19 @@ public struct PlaceImageCommand: PDFEditCommand, Equatable, Sendable {
   public let width: Int
   public let height: Int
   public let rgb8: Data
+  /// One byte per pixel (top row first). Kept as a PDF grayscale soft mask.
+  public let alpha8: Data?
 
-  public init(pageID: PDFObjectID, rect: [Double], width: Int, height: Int, rgb8: Data) {
+  public init(
+    pageID: PDFObjectID, rect: [Double], width: Int, height: Int, rgb8: Data,
+    alpha8: Data? = nil
+  ) {
     self.pageID = pageID
     self.rect = rect
     self.width = width
     self.height = height
     self.rgb8 = rgb8
+    self.alpha8 = alpha8
   }
 
   public func affectedPageIDs(in graph: PDFGraph) -> [PDFObjectID] { [pageID] }
@@ -787,24 +793,45 @@ public struct PlaceImageCommand: PDFEditCommand, Equatable, Sendable {
     else {
       throw PDFError(.malformed, "The image data does not match its dimensions")
     }
+    if let alpha8 {
+      guard alpha8.count == width * height else {
+        throw PDFError(.malformed, "The image alpha plane does not match its dimensions")
+      }
+    }
   }
 
   public func apply(to graph: PDFGraph) throws -> PDFGraph {
     var graph = graph
     let imageID = AddedContent.nextObjectID(in: graph)
     let encoded = try PDFFilters.encodeFlate(rgb8)
-    graph.objects[imageID] = .stream(
-      PDFStream(
-        dictionary: [
-          PDFName("Type"): .name(PDFName("XObject")),
-          PDFName("Subtype"): .name(PDFName("Image")),
-          PDFName("Width"): .integer(Int64(width)),
-          PDFName("Height"): .integer(Int64(height)),
-          PDFName("ColorSpace"): .name(PDFName("DeviceRGB")),
-          PDFName("BitsPerComponent"): .integer(8),
-          PDFName("Filter"): .name(PDFName("FlateDecode")),
-          PDFName("Length"): .integer(Int64(encoded.count)),
-        ], bytes: encoded))
+    var dictionary: [PDFName: PDFValue] = [
+      PDFName("Type"): .name(PDFName("XObject")),
+      PDFName("Subtype"): .name(PDFName("Image")),
+      PDFName("Width"): .integer(Int64(width)),
+      PDFName("Height"): .integer(Int64(height)),
+      PDFName("ColorSpace"): .name(PDFName("DeviceRGB")),
+      PDFName("BitsPerComponent"): .integer(8),
+      PDFName("Filter"): .name(PDFName("FlateDecode")),
+      PDFName("Length"): .integer(Int64(encoded.count)),
+    ]
+    if let alpha8 {
+      let maskID = PDFObjectID(imageID.number + 1, generation: imageID.generation)
+      let encodedAlpha = try PDFFilters.encodeFlate(alpha8)
+      graph.objects[maskID] = .stream(
+        PDFStream(
+          dictionary: [
+            PDFName("Type"): .name(PDFName("XObject")),
+            PDFName("Subtype"): .name(PDFName("Image")),
+            PDFName("Width"): .integer(Int64(width)),
+            PDFName("Height"): .integer(Int64(height)),
+            PDFName("ColorSpace"): .name(PDFName("DeviceGray")),
+            PDFName("BitsPerComponent"): .integer(8),
+            PDFName("Filter"): .name(PDFName("FlateDecode")),
+            PDFName("Length"): .integer(Int64(encodedAlpha.count)),
+          ], bytes: encodedAlpha))
+      dictionary[PDFName("SMask")] = .reference(maskID)
+    }
+    graph.objects[imageID] = .stream(PDFStream(dictionary: dictionary, bytes: encoded))
     var existing: Set<String> = []
     if case .dictionary(let objects)? = (try AddedContent.pageResources(
       pageID: pageID, in: graph))?[PDFName("XObject")]

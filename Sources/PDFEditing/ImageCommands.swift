@@ -9,11 +9,16 @@ public struct ImagePlacement: Sendable, Equatable {
   public let instructionIndex: Int
   public let resourceName: PDFName
   public let imageID: PDFObjectID
+  /// Complete page-space placement after all enclosing transforms.
   public let matrix: [Double]
+  /// The `cm` operands immediately before the image draw.
+  public let localMatrix: [Double]
+  /// The enclosing page-space transform before those local operands.
+  public let outerMatrix: [Double]
   public let bounds: [Double]
   /// True when the placement is a page-level `q … cm /Name Do …` pattern with
-  /// an identity outer transform, so commands can rewrite its matrix
-  /// operands in place.
+  /// an axis-aligned enclosing scale, so commands can rewrite its local matrix
+  /// operands while preserving page transformations and clipping.
   public let isDirectlyEditable: Bool
   /// Nesting depth: 0 for page content, >0 inside form XObjects.
   public let depth: Int
@@ -78,6 +83,7 @@ public enum ImageInventory {
     ) throws {
       var transform = initial
       var stack: [[Double]] = []
+      var cmOuterTransform: [Double]?
       for (index, instruction) in instructions.enumerated() {
         try Task.checkCancellation()
         switch instruction.operatorName {
@@ -92,11 +98,12 @@ public enum ImageInventory {
           guard instruction.operands.count == 6 else { break }
           let values = instruction.operands.compactMap { ImageInventory.number(of: $0.value) }
           guard values.count == 6 else { break }
+          cmOuterTransform = transform
           transform = ImageInventory.concat(transform, values)
         case "Do":
           guard case .name(let name)? = instruction.operands.first?.value,
-            let entry = resources?[PDFName("XObject")],
-            case .dictionary(let xobjects) = entry,
+            case .dictionary(let xobjects)? = FontValue.resolve(
+              resources?[PDFName("XObject")], in: graph),
             case .reference(let objectID)? = xobjects[name],
             case .stream(let stream)? = graph.objects[objectID]
           else { continue }
@@ -104,6 +111,8 @@ public enum ImageInventory {
           if subtype == .name(PDFName("Image")) {
             var spans: [Range<Int>] = []
             var simple = false
+            var localMatrix = transform
+            var outerMatrix = [1.0, 0, 0, 1, 0, 0]
             if index > 0 {
               let candidate = instructions[index - 1]
               if candidate.operatorName == "cm", candidate.operands.count == 6 {
@@ -112,13 +121,12 @@ public enum ImageInventory {
                 }
                 if local.count == 6 {
                   spans = candidate.operands.map(\.span)
+                  localMatrix = local
+                  if let cmOuterTransform { outerMatrix = cmOuterTransform }
                   if index - 1 == 0 {
                     simple = true
                   } else if instructions[index - 2].operatorName == "q" {
                     simple = true
-                  }
-                  if simple, !ImageInventory.matricesEqual(transform, local) {
-                    simple = false
                   }
                 }
               }
@@ -126,8 +134,11 @@ public enum ImageInventory {
             placements.append(
               ImagePlacement(
                 pageID: pageID, instructionIndex: index, resourceName: name, imageID: objectID,
-                matrix: transform, bounds: ImageInventory.bounds(of: transform),
-                isDirectlyEditable: depth == 0 && simple, depth: depth,
+                matrix: transform, localMatrix: localMatrix, outerMatrix: outerMatrix,
+                bounds: ImageInventory.bounds(of: transform),
+                isDirectlyEditable: depth == 0 && simple
+                  && ImageInventory.canvasSafeOuter(outerMatrix),
+                depth: depth,
                 containerObjectID: container, operandSpans: spans))
             continue
           }
@@ -141,7 +152,8 @@ public enum ImageInventory {
             let decoded = [UInt8](try PDFFilters.decoded(stream, limits: limits))
             let childInstructions = try ContentParser.instructions(in: decoded, limits: limits)
             var childResources = resources
-            if case .dictionary(let formResources)? = stream.dictionary[PDFName("Resources")] {
+            if case .dictionary(let formResources)? = FontValue.resolve(
+              stream.dictionary[PDFName("Resources")], in: graph) {
               childResources = formResources
             }
             var formMatrix: [Double] = [1, 0, 0, 1, 0, 0]
@@ -176,9 +188,13 @@ public enum ImageInventory {
     ]
   }
 
-  static func matricesEqual(_ lhs: [Double], _ rhs: [Double]) -> Bool {
-    guard lhs.count == 6, rhs.count == 6 else { return false }
-    return zip(lhs, rhs).allSatisfy { abs($0 - $1) < 1e-9 }
+  /// Canvas movement is expressed in page points. An axis-aligned enclosing
+  /// scale lets the writer convert those deltas back to the local `cm`
+  /// operands without replacing a page-level transform or clip.
+  static func canvasSafeOuter(_ matrix: [Double]) -> Bool {
+    matrix.count == 6 && matrix.allSatisfy(\.isFinite)
+      && matrix[0] > 0 && matrix[3] > 0
+      && abs(matrix[1]) < 1e-9 && abs(matrix[2]) < 1e-9
   }
 
   static func number(of value: PDFValue) -> Double? {
@@ -248,8 +264,13 @@ public struct MoveImageCommand: PDFEditCommand, Equatable, Sendable {
     let limits = PDFLimits()
     let placement = try placement(in: graph)
     let content = try PageContent.load(pageID: pageID, in: graph, limits: limits)
-    let e = ImageInventory.numberToken(placement.matrix[4] + dx)
-    let f = ImageInventory.numberToken(placement.matrix[5] + dy)
+    guard let inverseOuter = ImageViewMapping.invert(placement.outerMatrix) else {
+      throw PDFError(.unsupported, "The image has a singular enclosing transform")
+    }
+    let localDX = inverseOuter[0] * dx + inverseOuter[2] * dy
+    let localDY = inverseOuter[1] * dx + inverseOuter[3] * dy
+    let e = ImageInventory.numberToken(placement.localMatrix[4] + localDX)
+    let f = ImageInventory.numberToken(placement.localMatrix[5] + localDY)
     var graph = try content.replacing(
       ranges: [
         (placement.operandSpans[4], Array(e.utf8)),
@@ -311,9 +332,16 @@ public struct ScaleImageCommand: PDFEditCommand, Equatable, Sendable {
   public var name: String { "Resize Image" }
 
   public func validate(in graph: PDFGraph) throws {
-    _ = try editableImagePlacement(pageID: pageID, placementIndex: placementIndex, in: graph)
+    let placement = try editableImagePlacement(
+      pageID: pageID, placementIndex: placementIndex, in: graph)
     guard scaleX > 0, scaleY > 0, scaleX.isFinite, scaleY.isFinite else {
       throw PDFError(.malformed, "Image scale factors must be positive finite numbers")
+    }
+    guard abs(placement.localMatrix[1]) < 1e-9,
+      abs(placement.localMatrix[2]) < 1e-9
+    else {
+      throw PDFError(
+        .unsupported, "Resizing a rotated local image matrix needs a corner-specific transform")
     }
   }
 
@@ -322,8 +350,8 @@ public struct ScaleImageCommand: PDFEditCommand, Equatable, Sendable {
     let placement = try editableImagePlacement(
       pageID: pageID, placementIndex: placementIndex, in: graph)
     let content = try PageContent.load(pageID: pageID, in: graph, limits: limits)
-    let a = ImageInventory.numberToken(placement.matrix[0] * scaleX)
-    let d = ImageInventory.numberToken(placement.matrix[3] * scaleY)
+    let a = ImageInventory.numberToken(placement.localMatrix[0] * scaleX)
+    let d = ImageInventory.numberToken(placement.localMatrix[3] * scaleY)
     var graph = try content.replacing(
       ranges: [
         (placement.operandSpans[0], Array(a.utf8)),
@@ -385,7 +413,11 @@ public struct RotateImageCommand: PDFEditCommand, Equatable, Sendable {
     let center = [(bounds[0] + bounds[2]) / 2, (bounds[1] + bounds[3]) / 2]
     let e = center[0] - (rotated[0] + rotated[2]) / 2
     let f = center[1] - (rotated[1] + rotated[3]) / 2
-    let result = [rotated[0], rotated[1], rotated[2], rotated[3], e, f]
+    let desiredPage = [rotated[0], rotated[1], rotated[2], rotated[3], e, f]
+    guard let inverseOuter = ImageViewMapping.invert(placement.outerMatrix) else {
+      throw PDFError(.unsupported, "The image has a singular enclosing transform")
+    }
+    let result = ImageInventory.concat(inverseOuter, desiredPage)
     let content = try PageContent.load(pageID: pageID, in: graph, limits: limits)
     let ranges = zip(placement.operandSpans, result).map {
       ($0.0, Array(ImageInventory.numberToken($0.1).utf8))
@@ -407,13 +439,18 @@ public struct ReplaceImageDataCommand: PDFEditCommand, Equatable, Sendable {
   public let width: Int
   public let height: Int
   public let rgb8: Data
+  public let alpha8: Data?
 
-  public init(pageID: PDFObjectID, placementIndex: Int, width: Int, height: Int, rgb8: Data) {
+  public init(
+    pageID: PDFObjectID, placementIndex: Int, width: Int, height: Int, rgb8: Data,
+    alpha8: Data? = nil
+  ) {
     self.pageID = pageID
     self.placementIndex = placementIndex
     self.width = width
     self.height = height
     self.rgb8 = rgb8
+    self.alpha8 = alpha8
   }
 
   /// P17-012: the page this command changes.
@@ -440,10 +477,29 @@ public struct ReplaceImageDataCommand: PDFEditCommand, Equatable, Sendable {
     dictionary[PDFName("ColorSpace")] = .name(PDFName("DeviceRGB"))
     dictionary[PDFName("BitsPerComponent")] = .integer(8)
     dictionary[PDFName("Filter")] = .name(PDFName("FlateDecode"))
+    dictionary.removeValue(forKey: PDFName("SMask"))
     let bytes = try PDFFilters.encodeFlate(rgb8, limits: limits)
     dictionary[PDFName("Length")] = .integer(Int64(bytes.count))
     let newImageID = PDFObjectID(nextNumber)
     nextNumber += 1
+    if let alpha8 {
+      let maskID = PDFObjectID(nextNumber)
+      nextNumber += 1
+      let maskBytes = try PDFFilters.encodeFlate(alpha8, limits: limits)
+      graph.objects[maskID] = .stream(
+        PDFStream(
+          dictionary: [
+            PDFName("Type"): .name(PDFName("XObject")),
+            PDFName("Subtype"): .name(PDFName("Image")),
+            PDFName("Width"): .integer(Int64(width)),
+            PDFName("Height"): .integer(Int64(height)),
+            PDFName("ColorSpace"): .name(PDFName("DeviceGray")),
+            PDFName("BitsPerComponent"): .integer(8),
+            PDFName("Filter"): .name(PDFName("FlateDecode")),
+            PDFName("Length"): .integer(Int64(maskBytes.count)),
+          ], bytes: maskBytes))
+      dictionary[PDFName("SMask")] = .reference(maskID)
+    }
     graph.objects[newImageID] = .stream(PDFStream(dictionary: dictionary, bytes: bytes))
 
     // Add a fresh resource name for this instance and point only the target
@@ -458,7 +514,7 @@ public struct ReplaceImageDataCommand: PDFEditCommand, Equatable, Sendable {
         resources[PDFName("XObject")], name: newName, to: newImageID)
       page[PDFName("Resources")] = .dictionary(updated)
       graph.objects[pageID] = .dictionary(page)
-    case .reference(let resourcesID, let resources):
+    case .reference(_, let resources):
       var updated = resources
       updated[PDFName("XObject")] = Self.addingXObject(
         resources[PDFName("XObject")], name: newName, to: newImageID)
@@ -503,6 +559,9 @@ public struct ReplaceImageDataCommand: PDFEditCommand, Equatable, Sendable {
     else {
       throw PDFError(.malformed, "Replacement image dimensions do not match its pixel data")
     }
+    if let alpha8, alpha8.count != width * height {
+      throw PDFError(.malformed, "Replacement image alpha does not match its dimensions")
+    }
     let placements = try ImageInventory.placements(in: graph, pageID: pageID)
     guard placementIndex >= 0, placementIndex < placements.count else {
       throw PDFError(.malformed, "Image placement index is outside the page")
@@ -520,9 +579,12 @@ public struct ReplaceImageDataCommand: PDFEditCommand, Equatable, Sendable {
       throw PDFError(.malformed, "Image resource is missing")
     }
     let imageDictionary = image.dictionary
-    for key in ["ImageMask", "Mask", "SMask", "Decode"] where imageDictionary[PDFName(key)] != nil {
+    // A soft mask is replaced together with the image samples below. Other
+    // masks change the meaning of the samples (stencil/color-key/decode), so
+    // replacing those still needs an explicit workflow.
+    for key in ["ImageMask", "Mask", "Decode"] where imageDictionary[PDFName(key)] != nil {
       throw PDFError(
-        .unsupported, "This profile cannot replace images with masks or decode arrays")
+        .unsupported, "This profile cannot replace stencil, color-key or decoded images")
     }
     guard imageDictionary[PDFName("ColorSpace")] == .name(PDFName("DeviceRGB")),
       imageDictionary[PDFName("BitsPerComponent")] == .integer(8)
@@ -586,13 +648,18 @@ public struct ReplaceSharedImageCommand: PDFEditCommand, Equatable, Sendable {
   public let width: Int
   public let height: Int
   public let rgb8: Data
+  public let alpha8: Data?
 
-  public init(pageID: PDFObjectID, placementIndex: Int, width: Int, height: Int, rgb8: Data) {
+  public init(
+    pageID: PDFObjectID, placementIndex: Int, width: Int, height: Int, rgb8: Data,
+    alpha8: Data? = nil
+  ) {
     self.pageID = pageID
     self.placementIndex = placementIndex
     self.width = width
     self.height = height
     self.rgb8 = rgb8
+    self.alpha8 = alpha8
   }
 
   /// P17-012/P17-022: replacing a shared image object changes every page that
@@ -634,9 +701,30 @@ public struct ReplaceSharedImageCommand: PDFEditCommand, Equatable, Sendable {
     dictionary[PDFName("ColorSpace")] = .name(PDFName("DeviceRGB"))
     dictionary[PDFName("BitsPerComponent")] = .integer(8)
     dictionary[PDFName("Filter")] = .name(PDFName("FlateDecode"))
+    dictionary.removeValue(forKey: PDFName("SMask"))
     let bytes = try PDFFilters.encodeFlate(rgb8, limits: limits)
     dictionary[PDFName("Length")] = .integer(Int64(bytes.count))
     graph.objects[imageID] = .stream(PDFStream(dictionary: dictionary, bytes: bytes))
+    if let alpha8 {
+      let maskID = PDFObjectID((graph.objects.keys.map(\.number).max() ?? 0) + 1)
+      let maskBytes = try PDFFilters.encodeFlate(alpha8, limits: limits)
+      graph.objects[maskID] = .stream(
+        PDFStream(
+          dictionary: [
+            PDFName("Type"): .name(PDFName("XObject")),
+            PDFName("Subtype"): .name(PDFName("Image")),
+            PDFName("Width"): .integer(Int64(width)),
+            PDFName("Height"): .integer(Int64(height)),
+            PDFName("ColorSpace"): .name(PDFName("DeviceGray")),
+            PDFName("BitsPerComponent"): .integer(8),
+            PDFName("Filter"): .name(PDFName("FlateDecode")),
+            PDFName("Length"): .integer(Int64(maskBytes.count)),
+          ], bytes: maskBytes))
+      var updated = dictionary
+      updated[PDFName("SMask")] = .reference(maskID)
+      graph.objects[imageID] = .stream(PDFStream(dictionary: updated, bytes: bytes))
+      graph.trailer[PDFName("Size")] = .integer(Int64(maskID.number + 1))
+    }
     // P20-024: new pixels invalidate generated OCR layers on every page that
     // shows the shared image.
     for page in affectedPageIDs(in: graph) {
@@ -652,6 +740,9 @@ public struct ReplaceSharedImageCommand: PDFEditCommand, Equatable, Sendable {
     else {
       throw PDFError(.malformed, "Replacement image dimensions do not match its pixel data")
     }
+    if let alpha8, alpha8.count != width * height {
+      throw PDFError(.malformed, "Replacement image alpha does not match its dimensions")
+    }
     let placements = try ImageInventory.placements(in: graph, pageID: pageID)
     guard placementIndex >= 0, placementIndex < placements.count else {
       throw PDFError(.malformed, "Image placement index is outside the page")
@@ -660,9 +751,11 @@ public struct ReplaceSharedImageCommand: PDFEditCommand, Equatable, Sendable {
     guard case .stream(let image)? = graph.objects[placement.imageID] else {
       throw PDFError(.malformed, "Image resource is missing")
     }
-    for key in ["ImageMask", "Mask", "SMask", "Decode"] where image.dictionary[PDFName(key)] != nil {
+    // A soft mask is replaced together with the shared image samples below.
+    // Stencil, color-key and decode semantics remain outside this profile.
+    for key in ["ImageMask", "Mask", "Decode"] where image.dictionary[PDFName(key)] != nil {
       throw PDFError(
-        .unsupported, "This profile cannot replace images with masks or decode arrays")
+        .unsupported, "This profile cannot replace stencil, color-key or decoded images")
     }
     guard image.dictionary[PDFName("ColorSpace")] == .name(PDFName("DeviceRGB")),
       image.dictionary[PDFName("BitsPerComponent")] == .integer(8)

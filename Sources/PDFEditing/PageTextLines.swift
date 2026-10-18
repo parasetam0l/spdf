@@ -79,7 +79,8 @@ fileprivate struct ParagraphRewriteAnalysis {
       throw PDFError(.malformed, "The paragraph page is missing")
     }
     func ordinaryGraphicsState(_ instruction: ContentInstruction) -> Bool {
-      guard case .name(let name)? = instruction.operands.first?.value,
+      guard instruction.operands.count == 1,
+        case .name(let name)? = instruction.operands.first?.value,
         case .dictionary(let resources)? = FontValue.resolve(page[PDFName("Resources")], in: graph),
         case .dictionary(let states)? = FontValue.resolve(resources[PDFName("ExtGState")], in: graph),
         case .dictionary(let state)? = FontValue.resolve(states[name], in: graph),
@@ -88,8 +89,13 @@ fileprivate struct ParagraphRewriteAnalysis {
         switch (key, FontValue.resolve(value, in: graph)) {
         case (PDFName("Type"), .name(PDFName("ExtGState"))?),
           (PDFName("BM"), .name(PDFName("Normal"))?),
+          (PDFName("OP"), .boolean(false)?), (PDFName("op"), .boolean(false)?),
+          (PDFName("OPM"), .integer(0)?), (PDFName("OPM"), .integer(1)?),
+          (PDFName("SA"), .boolean(_)?),
           (PDFName("ca"), .integer(1)?), (PDFName("CA"), .integer(1)?),
           (PDFName("ca"), .real(1)?), (PDFName("CA"), .real(1)?): return true
+        case (PDFName("SM"), .integer(let n)?): return (0...1).contains(n)
+        case (PDFName("SM"), .real(let n)?): return n.isFinite && (0...1).contains(n)
         default: return false
         }
       }
@@ -98,7 +104,29 @@ fileprivate struct ParagraphRewriteAnalysis {
       Set(content.segments.map(\.objectID)).count == content.segments.count else {
       throw PDFError(.unsupported, "The paragraph page repeats streams or uses unsupported content filters")
     }
-    var stack: [(unsafe: Bool, mode: Int, ctm: [Double], clip: [Double]?)] = []
+    // Stroke adjustment and gradient smoothness do not affect mode-0 glyph
+    // fills. Overprint mode is inert here because enabled overprint refuses.
+    // Color uncertainty is different from alpha/clipping uncertainty: an
+    // explicit device-gray/RGB operator replaces the current fill color.
+    func deviceColorIsKnown(_ instruction: ContentInstruction?, components: Int, defaultName: String) -> Bool {
+      guard case .dictionary(let resources)? = FontValue.resolve(page[PDFName("Resources")], in: graph) else { return false }
+      if let value = resources[PDFName("ColorSpace")] {
+        guard case .dictionary(let spaces)? = FontValue.resolve(value, in: graph),
+          // Replacement text is painted in RGB even when the source is gray.
+          spaces[PDFName("DefaultRGB")] == nil,
+          spaces[PDFName(defaultName)] == nil else { return false }
+      }
+      guard let instruction else { return true }
+      guard instruction.operands.count == components else { return false }
+      return instruction.operands.allSatisfy {
+        switch $0.value {
+        case .integer(let n): return (0...1).contains(n)
+        case .real(let n): return n.isFinite && (0...1).contains(n)
+        default: return false
+        }
+      }
+    }
+    var stack: [(unsafe: Bool, unknownFill: Bool, mode: Int, ctm: [Double], clip: [Double]?)] = []
     var ctm = [1.0, 0, 0, 1, 0, 0]
     var clip: [Double]?
     var clips: [Int: [Double]] = [:]
@@ -108,6 +136,7 @@ fileprivate struct ParagraphRewriteAnalysis {
     var rectangle: [Double]?
     var pendingClip = false
     var unsafe = false
+    var unknownFill = !deviceColorIsKnown(nil, components: 1, defaultName: "DefaultGray")
     var mode = 0
     var inText = false
     var textClipping = false
@@ -117,10 +146,11 @@ fileprivate struct ParagraphRewriteAnalysis {
         switch operand.value { case .integer(let n): return Double(n); case .real(let n): return n; default: return nil }
       }
       switch instruction.operatorName {
-      case "q": stack.append((unsafe, mode, ctm, clip))
+      case "q": stack.append((unsafe, unknownFill, mode, ctm, clip))
       case "Q":
         guard let state = stack.popLast() else { throw PDFError(.unsupported, "Unbalanced page graphics state") }
         unsafe = state.unsafe || (inText && textClipping)
+        unknownFill = state.unknownFill
         mode = state.mode; ctm = state.ctm; clip = state.clip
       case "cm":
         if numbers.count == 6, numbers.allSatisfy(\.isFinite) {
@@ -162,7 +192,13 @@ fileprivate struct ParagraphRewriteAnalysis {
         // inside the text object. Restoring Tr alone cannot erase that clip.
         if textClipping { unsafe = true; textClipping = false }
       case "gs": if !ordinaryGraphicsState(instruction) { unsafe = true }
-      case "cs", "sc", "scn": unsafe = true
+      case "cs", "sc", "scn": unknownFill = true
+      case "g": unknownFill = !deviceColorIsKnown(instruction, components: 1, defaultName: "DefaultGray")
+      case "rg": unknownFill = !deviceColorIsKnown(instruction, components: 3, defaultName: "DefaultRGB")
+      case "k":
+        // Retain the existing CMYK profile; it cannot establish a new known
+        // RGB preview after an unsupported color-space operation.
+        unknownFill = unknownFill || !deviceColorIsKnown(instruction, components: 4, defaultName: "DefaultCMYK")
       case "Tr":
         if case .integer(let value)? = instruction.operands.first?.value {
           mode = Int(value)
@@ -170,7 +206,7 @@ fileprivate struct ParagraphRewriteAnalysis {
         } else { unsafe = true }
       default: break
       }
-      if !unsafe, !pendingClip, mode == 0 {
+      if !unsafe, !unknownFill, !pendingClip, mode == 0 {
         safe.insert(index)
         if let clip { clips[index] = clip }
       }
@@ -248,6 +284,9 @@ public struct RewritePageTextCommand: PDFEditCommand, Equatable, Sendable {
       let run = allRuns[index]
       let instruction = content.instructions[run.instructionIndex]
       let transform = TextCanvasSupport.concatenate(run.ctm, run.matrix)
+      guard analysis.safeInstructions.contains(run.instructionIndex) else {
+        throw PDFError(.unsupported, "This text uses an unsupported graphics or clipping state")
+      }
       guard run.text == originalText[index], ["Tj", "TJ"].contains(instruction.operatorName),
         run.fontSize.isFinite, run.fontSize > 0,
         transform[0] > 0, abs(transform[0] - transform[3]) < 1e-6,
@@ -255,10 +294,9 @@ public struct RewritePageTextCommand: PDFEditCommand, Equatable, Sendable {
         run.charSpacing.isFinite, abs(run.charSpacing) <= 144,
         run.wordSpacing.isFinite, abs(run.wordSpacing) <= 144,
         abs(run.horizontalScale - 100) < 1e-6, abs(run.rise) < 1e-6,
-        analysis.safeInstructions.contains(run.instructionIndex),
         let font = analysis.fonts[run.fontResource],
         font.isInlineEditable,
-        let segment = content.segmentIndex(for: run.stringSpan),
+        let segment = content.segmentIndex(for: TextStyleSupport.fullSpan(of: instruction)),
         content.segments[segment].isEditable
       else {
         throw PDFError(.unsupported, "This paragraph needs a different font, spacing or transform")

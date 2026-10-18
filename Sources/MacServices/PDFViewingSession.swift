@@ -76,12 +76,23 @@ public struct AddedGraphicTarget: Sendable, Equatable {
   public let kind: String
   /// Axis-aligned page-space bounds ([x0, y0, x1, y1]).
   public let rect: [Double]
+  /// Set only for a directly editable image already present in the PDF.
+  /// App-created graphics remain identified by their content-stream object.
+  public let imagePlacementIndex: Int?
 
-  public init(pageIndex: Int, streamID: PDFObjectID, kind: String, rect: [Double]) {
+  public init(
+    pageIndex: Int, streamID: PDFObjectID, kind: String, rect: [Double],
+    imagePlacementIndex: Int? = nil
+  ) {
     self.pageIndex = pageIndex
     self.streamID = streamID
     self.kind = kind
     self.rect = rect
+    self.imagePlacementIndex = imagePlacementIndex
+  }
+
+  public var identity: String {
+    "\(pageIndex):\(streamID.number):\(streamID.generation):\(imagePlacementIndex ?? -1)"
   }
 }
 
@@ -316,21 +327,32 @@ public final class PDFViewingSession: NSObject, ObservableObject, PDFViewDelegat
   /// P12-017: list every selectable app-created graphic on a page, in
   /// content order, for rubber-band drag selection.
   public var graphicsListProvider: ((Int) -> [AddedGraphicTarget])?
+  /// Explain why a visible image cannot participate in the canvas profile.
+  public var graphicRefusalProvider: ((Int, [Double]) -> String?)?
   /// P12-017: commit graphic moves/resizes/rotates (stream identities plus
   /// the mappings the overlay computed; the app runs the core commands).
   /// Moves and resizes arrive batched so a multi-selection drag commits as
   /// one transaction with one undo step.
-  public var onMoveGraphics: (([(streamID: PDFObjectID, dx: Double, dy: Double)]) -> Void)?
+  public var onMoveGraphics:
+    (([(target: AddedGraphicTarget, dx: Double, dy: Double)]) -> Void)?
   public var onResizeGraphics:
     (
-      ([(streamID: PDFObjectID, dx: Double, dy: Double, scaleX: Double, scaleY: Double)]) -> Void
+      ([(target: AddedGraphicTarget, dx: Double, dy: Double, scaleX: Double, scaleY: Double)])
+        -> Void
     )?
-  public var onRotateGraphic: ((PDFObjectID) -> Void)?
-  public var onDeleteGraphics: (([PDFObjectID]) -> Void)?
+  /// Produces a display-only PDF at the proposed geometry. Its data is never
+  /// adopted by the edit session; release commits once through the callback.
+  public var graphicPreviewProvider:
+    (([(target: AddedGraphicTarget, dx: Double, dy: Double, scaleX: Double, scaleY: Double)])
+      -> Data?)?
+  public var onRotateGraphic: ((AddedGraphicTarget) -> Void)?
+  public var onDeleteGraphics: (([AddedGraphicTarget]) -> Void)?
   public var onInsertImage: (() -> Void)?
   public var graphicSelectionFocuser: (() -> Void)?
   private var searchMatches: [PDFSelection] = []
   private var observations: Set<AnyCancellable> = []
+  private var graphicPreviewState:
+    (document: PDFDocument, scale: Double, autoScales: Bool, page: Int, scroll: NSPoint?)?
 
   public override init() {
     super.init()
@@ -399,6 +421,7 @@ public final class PDFViewingSession: NSObject, ObservableObject, PDFViewDelegat
   }
 
   public func open(_ source: PDFSource) throws {
+    graphicPreviewState = nil
     selectedObjectSummary = nil
     selectionDetails = nil
     selectedGraphics = []
@@ -422,6 +445,7 @@ public final class PDFViewingSession: NSObject, ObservableObject, PDFViewDelegat
 
   /// P12-022: close the viewed document without destroying the session.
   public func closeDocument() {
+    graphicPreviewState = nil
     onPendingPageTextChange?(false)
     isEditingPageText = false
     isTypingPageText = false
@@ -801,11 +825,11 @@ public final class PDFViewingSession: NSObject, ObservableObject, PDFViewDelegat
   public func selectGraphics(_ targets: [AddedGraphicTarget]) {
     // A shared transform belongs to a single page. Deduplicate identities so
     // keyboard and inspector actions never transform the same stream twice.
-    var seen = Set<PDFObjectID>()
+    var seen = Set<String>()
     let targets = targets.filter {
       $0.pageIndex == targets.first?.pageIndex && $0.rect.count == 4
         && $0.rect.allSatisfy(\.isFinite) && $0.rect[2] > $0.rect[0] && $0.rect[3] > $0.rect[1]
-        && seen.insert($0.streamID).inserted
+        && seen.insert($0.identity).inserted
     }
     selectedGraphics = targets
     guard !targets.isEmpty else {
@@ -833,24 +857,104 @@ public final class PDFViewingSession: NSObject, ObservableObject, PDFViewDelegat
     selectGraphics([])
   }
 
+  public func reportGraphicUnavailable(pageIndex: Int, reason: String) {
+    selectedGraphics = []
+    selectedObjectSummary = "Page \(pageIndex + 1): editing unavailable"
+    selectionDetails = SelectionDetails(
+      pageNumber: pageIndex + 1, text: reason, bounds: nil)
+  }
+
   public var selectedGraphicBounds: CGRect? {
     GraphicSelectionModel.union(selectedGraphics.map {
       CGRect(x: $0.rect[0], y: $0.rect[1], width: $0.rect[2] - $0.rect[0], height: $0.rect[3] - $0.rect[1])
     })
   }
 
+  /// Deleting an existing PDF image is a separate content-removal operation.
+  /// The canvas currently exposes geometry editing for those placements.
+  public var canDeleteSelectedGraphics: Bool {
+    !selectedGraphics.isEmpty && selectedGraphics.allSatisfy { $0.imagePlacementIndex == nil }
+  }
+
   /// Inspector changes and pointer drags share the same atomic group mapping.
   public func setGraphicBounds(_ bounds: CGRect) {
     guard activeTool == .imageEdit, allowsContentEditing, !isLocked,
       let group = selectedGraphicBounds else { return }
-    let mappings = selectedGraphics.compactMap { target -> (streamID: PDFObjectID,
+    let mappings = graphicResizeMappings(from: group, to: bounds)
+    if mappings.count == selectedGraphics.count { onResizeGraphics?(mappings) }
+  }
+
+  public func graphicResizeMappings(
+    from group: CGRect, to bounds: CGRect
+  ) -> [(target: AddedGraphicTarget, dx: Double, dy: Double, scaleX: Double, scaleY: Double)] {
+    selectedGraphics.compactMap { target -> (target: AddedGraphicTarget,
       dx: Double, dy: Double, scaleX: Double, scaleY: Double)? in
       let member = CGRect(x: target.rect[0], y: target.rect[1],
         width: target.rect[2] - target.rect[0], height: target.rect[3] - target.rect[1])
       guard let m = GraphicSelectionModel.mapping(member: member, from: group, to: bounds) else { return nil }
-      return (target.streamID, m.dx, m.dy, m.scaleX, m.scaleY)
+      return (target, m.dx, m.dy, m.scaleX, m.scaleY)
     }
-    if mappings.count == selectedGraphics.count { onResizeGraphics?(mappings) }
+  }
+
+  /// Render a proposed object transform into a temporary PDF. The canonical
+  /// document and edit session are untouched; this method only gives the
+  /// overlay a visible, correctly layered preview until the gesture ends.
+  public func previewGraphicTransform(
+    _ mappings: [(target: AddedGraphicTarget, dx: Double, dy: Double,
+      scaleX: Double, scaleY: Double)]
+  ) {
+    guard let data = graphicPreviewProvider?(mappings),
+      let original = view.document,
+      let preview = PDFDocument(data: data)
+    else { return }
+    if graphicPreviewState == nil {
+      graphicPreviewState = (
+        document: original, scale: view.scaleFactor, autoScales: view.autoScales,
+        page: currentPageIndex, scroll: documentScrollOrigin)
+    }
+    let state = graphicPreviewState!
+    view.document = preview
+    view.autoScales = false
+    view.scaleFactor = state.scale
+    view.layoutDocumentView()
+    restoreDocumentScroll(state.scroll)
+    if state.page >= 0, state.page < preview.pageCount,
+      let page = preview.page(at: state.page) {
+      view.go(to: page)
+    }
+  }
+
+  public func endGraphicPreview() {
+    guard let state = graphicPreviewState else { return }
+    graphicPreviewState = nil
+    view.document = state.document
+    view.autoScales = false
+    view.scaleFactor = state.scale
+    view.layoutDocumentView()
+    restoreDocumentScroll(state.scroll)
+    if state.page >= 0, let page = state.document.page(at: state.page) {
+      view.go(to: page)
+    }
+    view.autoScales = state.autoScales
+  }
+
+  public var isPreviewingGraphic: Bool { graphicPreviewState != nil }
+
+  private var currentPageIndex: Int {
+    guard let page = view.currentPage, let document = view.document else { return -1 }
+    return document.index(for: page)
+  }
+
+  private var documentScrollOrigin: NSPoint? {
+    view.documentView?.enclosingScrollView?.contentView.bounds.origin
+  }
+
+  private func restoreDocumentScroll(_ origin: NSPoint?) {
+    guard let origin,
+      let clip = view.documentView?.enclosingScrollView?.contentView
+    else { return }
+    clip.scroll(to: origin)
+    clip.enclosingScrollView?.reflectScrolledClipView(clip)
   }
 
   public func alignGraphics(_ alignment: PageObjectAlignment) {
@@ -863,7 +967,7 @@ public final class PDFViewingSession: NSObject, ObservableObject, PDFViewDelegat
   public func deleteSelectedGraphics() {
     guard activeTool == .imageEdit, allowsContentEditing, !isLocked,
       !selectedGraphics.isEmpty else { return }
-    onDeleteGraphics?(selectedGraphics.map(\.streamID))
+    onDeleteGraphics?(selectedGraphics)
   }
 
   /// P22-017: scroll to a page-space rectangle and select the text inside it

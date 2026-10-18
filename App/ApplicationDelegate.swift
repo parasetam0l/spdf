@@ -31,8 +31,19 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
         CommandLine.arguments.count > index + 2 {
         let matchIndex = CommandLine.arguments.firstIndex(of: "--text-prefix")
         let matching = matchIndex.flatMap { CommandLine.arguments.indices.contains($0 + 1) ? CommandLine.arguments[$0 + 1] : nil }
+        let wordIndex = CommandLine.arguments.firstIndex(of: "--edit-word")
+        let word = wordIndex.flatMap { CommandLine.arguments.indices.contains($0 + 1) ? CommandLine.arguments[$0 + 1] : nil }
         Task { await CorpusParagraphSmoke.run(source: URL(fileURLWithPath: CommandLine.arguments[index + 1]),
-          output: URL(fileURLWithPath: CommandLine.arguments[index + 2]), matching: matching) }
+          output: URL(fileURLWithPath: CommandLine.arguments[index + 2]), matching: matching, wordOverride: word) }
+        return
+      }
+      if let index = CommandLine.arguments.firstIndex(of: "--test-corpus-image"),
+        CommandLine.arguments.count > index + 2 {
+        Task {
+          await CorpusParagraphSmoke.imageEdit(
+            source: URL(fileURLWithPath: CommandLine.arguments[index + 1]),
+            output: URL(fileURLWithPath: CommandLine.arguments[index + 2]))
+        }
         return
       }
       if let index = CommandLine.arguments.firstIndex(of: "--survey-imported-paragraphs"),
@@ -53,6 +64,13 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
       {
         let output = URL(fileURLWithPath: CommandLine.arguments[index + 1], isDirectory: true)
         Task { await WorkspaceSmoke.run(output: output) }
+        return
+      }
+      if let index = CommandLine.arguments.firstIndex(of: "--test-transparent-image"),
+        CommandLine.arguments.count > index + 1
+      {
+        let output = URL(fileURLWithPath: CommandLine.arguments[index + 1], isDirectory: true)
+        Task { await WorkspaceSmoke.runTransparentImage(output: output) }
         return
       }
       if let index = CommandLine.arguments.firstIndex(of: "--test-relaunch"),
@@ -170,8 +188,10 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
         || CommandLine.arguments.contains("--test-termination-ui")
         || CommandLine.arguments.contains("--test-relaunch")
         || CommandLine.arguments.contains("--test-workspace")
+        || CommandLine.arguments.contains("--test-transparent-image")
         || CommandLine.arguments.contains("--test-imported-paragraphs")
         || CommandLine.arguments.contains("--test-corpus-paragraphs")
+        || CommandLine.arguments.contains("--test-corpus-image")
         || CommandLine.arguments.contains("--test-corpus-access")
         || CommandLine.arguments.contains("--survey-imported-paragraphs")
       {

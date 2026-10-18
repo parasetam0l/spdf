@@ -148,6 +148,7 @@ final class GraphicSelectionOverlayView: NSView {
     // the pointer passes through to selection and rubber-band behavior.
     if editsEnabled, handleAt(point) != nil { return self }
     if viewer?.graphicTargetProvider?(index, values) != nil { return self }
+    if viewer?.graphicRefusalProvider?(index, values) != nil { return self }
     if viewer?.textRunProvider?(index, values) != nil { return nil }
     // Empty area: a drag may rubber-band, a click clears the selection —
     // but only on pages that actually carry graphics. On plain pages the
@@ -186,6 +187,13 @@ final class GraphicSelectionOverlayView: NSView {
       focusForKeyboard()
       return
     }
+    if let (_, index, pagePoint) = pageAndPoint(at: point),
+      let reason = viewer?.graphicRefusalProvider?(
+        index, [Double(pagePoint.x), Double(pagePoint.y)]) {
+      viewer?.reportGraphicUnavailable(pageIndex: index, reason: reason)
+      NSSound.beep()
+      return
+    }
     if let (_, index, _) = pageAndPoint(at: point),
       viewer?.graphicsListProvider?(index).isEmpty == false
     {
@@ -201,10 +209,26 @@ final class GraphicSelectionOverlayView: NSView {
       drag = .rubberBand(start: start, current: point, pageIndex: pageIndex)
     case .move(let start, _):
       drag = .move(start: start, current: point)
+      if editsEnabled, hypot(point.x - start.x, point.y - start.y) > Self.clickTolerance,
+        let delta = pageDelta(from: start, to: point),
+        delta.x.isFinite, delta.y.isFinite,
+        let viewer {
+        viewer.previewGraphicTransform(viewer.selectedGraphics.map {
+          (target: $0, dx: Double(delta.x), dy: Double(delta.y), scaleX: 1.0, scaleY: 1.0)
+        })
+      }
     case .resize(let handle, let start, _, _):
       drag = .resize(
         handle: handle, start: start, current: point,
         uniform: event.modifierFlags.contains(.shift))
+      if editsEnabled, hypot(point.x - start.x, point.y - start.y) > Self.clickTolerance,
+        let group = viewer?.selectedGraphicBounds,
+        let destination = resizedBounds(
+          handle: handle, from: start, to: point,
+          uniform: event.modifierFlags.contains(.shift)) {
+        let mappings = viewer?.graphicResizeMappings(from: group, to: destination) ?? []
+        if !mappings.isEmpty { viewer?.previewGraphicTransform(mappings) }
+      }
     case .none:
       break
     }
@@ -219,6 +243,7 @@ final class GraphicSelectionOverlayView: NSView {
     }
     guard let active = drag else { return }
     let point = convert(event.locationInWindow, from: nil)
+    viewer?.endGraphicPreview()
     switch active {
     case .rubberBand(let start, _, let pageIndex):
       commitRubberBand(from: start, to: point, pageIndex: pageIndex)
@@ -254,7 +279,7 @@ final class GraphicSelectionOverlayView: NSView {
       hypot(delta.x, delta.y) > 0.001, !viewer.selectedGraphics.isEmpty
     else { return }
     viewer.onMoveGraphics?(
-      viewer.selectedGraphics.map { (streamID: $0.streamID, dx: Double(delta.x), dy: Double(delta.y)) })
+      viewer.selectedGraphics.map { (target: $0, dx: Double(delta.x), dy: Double(delta.y)) })
   }
 
   private func resizedBounds(handle: GraphicHandle, from start: NSPoint, to end: NSPoint,
@@ -299,6 +324,7 @@ final class GraphicSelectionOverlayView: NSView {
 
   override func cancelOperation(_ sender: Any?) {
     if drag != nil {
+      viewer?.endGraphicPreview()
       drag = nil; pressGraphic = nil
       needsDisplay = true
     } else {
@@ -330,7 +356,7 @@ final class GraphicSelectionOverlayView: NSView {
     }
     if let (dx, dy) = delta {
       viewer.onMoveGraphics?(
-        viewer.selectedGraphics.map { (streamID: $0.streamID, dx: dx, dy: dy) })
+        viewer.selectedGraphics.map { (target: $0, dx: dx, dy: dy) })
       return
     }
     super.keyDown(with: event)

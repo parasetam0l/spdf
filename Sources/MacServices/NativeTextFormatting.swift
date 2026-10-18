@@ -11,6 +11,15 @@ public enum PageTextFormatChange: Sendable {
   case color([Double])
 }
 
+/// A local insertion plan. Mixed embedded subsets become attributed runs;
+/// unsupported characters never fall back to a substituted system font.
+public struct NativeTextInsertionPlan {
+  public let usesSourceFontFallback: Bool
+  public let fragments: [PageTextFragment]
+  public let attributedText: NSAttributedString?
+  public let issue: String?
+}
+
 /// Canonical point-size attributes survive view zoom and native typing Undo.
 /// AppKit supplies caret/selection/layout; PDF output uses these same spans.
 @MainActor
@@ -64,21 +73,111 @@ public final class NativeTextFormatting {
   public var hasChanges: Bool { fragments() != original }
 
   public func insertionIssue(_ text: String) -> String? {
-    guard let view else { return nil }
-    let format = Self.format(view.typingAttributes, fallback: fallback)
-    let visible = text.unicodeScalars.filter { $0 != "\n" && $0 != "\r" }
-    if let source = format.sourceFont {
-      guard PageTextSourceFont.canWriteInline(String(String.UnicodeScalarView(visible))) else {
-        return "This text needs shaping that inline editing does not yet support. The text was kept."
-      }
-      guard let profile = profiles[source.resource],
-        visible.allSatisfy({ profile.glyphs[String($0)] != nil }) else {
-        return "This embedded font does not contain those characters. Choose another font for the new text."
-      }
-    } else if !StandardTextFont.canEncode(text) {
-      return "This font cannot represent those characters. The text was kept."
+    insertionPlan(text, replacing: view?.selectedRange()
+      ?? NSRange(location: 0, length: 0)).issue
+  }
+
+  /// Resolve each inserted scalar against verified fonts already present in
+  /// this paragraph. A subset that lacks a character is never allowed to
+  /// borrow an unrelated installed font silently.
+  public func insertionPlan(_ text: String, replacing range: NSRange) -> NativeTextInsertionPlan {
+    guard let view else {
+      return .init(usesSourceFontFallback: false, fragments: [], attributedText: nil,
+        issue: "The page text editor is unavailable.")
     }
-    return nil
+    let base = Self.format(view.typingAttributes, fallback: fallback)
+    let visible = text.unicodeScalars.filter { $0 != "\n" && $0 != "\r" }
+    let visibleText = String(String.UnicodeScalarView(visible))
+    guard PageTextSourceFont.canWriteInline(visibleText) else {
+      return .init(usesSourceFontFallback: false, fragments: [], attributedText: nil,
+        issue: "This text needs shaping that inline editing does not yet support. The text was kept.")
+    }
+
+    var current: [(range: NSRange, format: PageTextFormat)] = []
+    if let storage = view.textStorage {
+      storage.enumerateAttributes(in: NSRange(location: 0, length: storage.length)) {
+        attrs, runRange, _ in
+        current.append((runRange, Self.format(attrs, fallback: fallback)))
+      }
+    }
+    let insertion = range.location == NSNotFound ? view.selectedRange().location : range.location
+    var fragments: [PageTextFragment] = []
+
+    func appendFragment(_ value: String, format: PageTextFormat) {
+      if let last = fragments.last, last.format == format {
+        fragments[fragments.count - 1] = .init(text: last.text + value, format: format)
+      } else {
+        fragments.append(.init(text: value, format: format))
+      }
+    }
+
+    var needsFallback = false
+    for scalar in text.unicodeScalars {
+      if scalar == "\n" || scalar == "\r" {
+        appendFragment(String(scalar), format: base)
+      } else if let source = base.sourceFont,
+        profiles[source.resource]?.glyphs[String(scalar)] != nil {
+        appendFragment(String(scalar), format: base)
+      } else if base.sourceFont == nil, StandardTextFont.canEncode(String(scalar)) {
+        appendFragment(String(scalar), format: base)
+      } else if let alternative = sourceFormat(for: scalar, base: base, current: current,
+        insertion: insertion) {
+        needsFallback = true
+        appendFragment(String(scalar), format: alternative)
+      } else {
+        return .init(usesSourceFontFallback: false, fragments: fragments, attributedText: nil,
+          issue: "No font already used by this paragraph can represent “\(String(scalar))”. Choose another font or remove that character.")
+      }
+    }
+    guard needsFallback else {
+      return .init(usesSourceFontFallback: false, fragments: fragments,
+        attributedText: nil, issue: nil)
+    }
+    let attributed = NSMutableAttributedString(string: "")
+    let paragraphStyle = view.typingAttributes[.paragraphStyle]
+    for fragment in fragments {
+      var attrs = attributes(fragment.format, scale: scale)
+      if let paragraphStyle { attrs[.paragraphStyle] = paragraphStyle }
+      attributed.append(NSAttributedString(string: fragment.text, attributes: attrs))
+    }
+    return .init(usesSourceFontFallback: true, fragments: fragments,
+      attributedText: attributed, issue: nil)
+  }
+
+  private func sourceFormat(for scalar: UnicodeScalar, base: PageTextFormat,
+    current: [(range: NSRange, format: PageTextFormat)], insertion: Int) -> PageTextFormat? {
+    let value = String(scalar)
+    let candidates = profiles.compactMap { resource, profile
+      -> (resource: PDFName, source: PageTextSourceFont, distance: Int, order: String)? in
+      guard profile.glyphs[value] != nil, sourceFonts[resource] != nil,
+        PageTextSourceFont.canWriteInline(value) else { return nil }
+      if let baseName = base.sourceFont?.name, profile.source.name != baseName {
+        return nil
+      }
+      let nearest = current.compactMap { entry -> Int? in
+        guard entry.format.sourceFont?.resource == resource else { return nil }
+        let text = (view?.string as NSString?)?.substring(with: entry.range) ?? ""
+        guard text.range(of: value) != nil else { return Int.max }
+        return abs(entry.range.location + (text as NSString).range(of: value).location - insertion)
+      }.min() ?? Int.max
+      return (resource, profile.source, nearest, String(decoding: resource.bytes, as: UTF8.self))
+    }
+    guard !candidates.isEmpty else { return nil }
+    let sorted = candidates.sorted {
+      if $0.distance != $1.distance { return $0.distance < $1.distance }
+      return $0.order < $1.order
+    }
+    // Two different embedded programs with the same style name would make
+    // automatic assignment a guess. Prefer the source used at the caret;
+    // otherwise require an unambiguous candidate.
+    if base.sourceFont == nil {
+      let nearest = sorted[0].distance
+      let tied = sorted.filter { $0.distance == nearest }
+      guard tied.count == 1 else { return nil }
+    }
+    var result = base
+    result.sourceFont = sorted[0].source
+    return result
   }
 
   private static func coalesced(_ fragments: [PageTextFragment]) -> [PageTextFragment] {

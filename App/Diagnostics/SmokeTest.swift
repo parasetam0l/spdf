@@ -1744,10 +1744,10 @@
             overlay.mouseDragged(with: dragged)
             overlay.mouseUp(with: up)
           }
-          // Native images are not selectable graphics: the overlay must
-          // pass the pointer through instead of claiming it.
-          guard overlay.hitTest(dragStart) == nil else {
-            throw PDFError(.malformed, "Native image claimed by graphics overlay")
+          // Supported native images now participate in the canvas selection.
+          // Select mode may select them but must not mutate the document.
+          guard overlay.hitTest(dragStart) != nil else {
+            throw PDFError(.malformed, "Native image was not exposed to the graphics overlay")
           }
           let dragBaseline = try third.data(ofType: "com.adobe.pdf")
           guard imageViewer.activeTool == .select else {
@@ -1761,12 +1761,17 @@
           guard KeyboardAudit.invoke("Image Edit Tool"),
             imageViewer.activeTool == .imageEdit
           else { throw PDFError(.malformed, "Could not arm the image edit tool") }
-          guard overlay.hitTest(dragStart) == nil else {
-            throw PDFError(.malformed, "Native image claimed in image edit mode")
+          guard overlay.hitTest(dragStart) != nil else {
+            throw PDFError(.malformed, "Native image disappeared from image edit mode")
           }
           syntheticDrag()
-          guard try third.data(ofType: "com.adobe.pdf") == dragBaseline else {
-            throw PDFError(.malformed, "Image-edit drag on a native image mutated it")
+          guard try third.data(ofType: "com.adobe.pdf") != dragBaseline,
+            imageViewer.selectedGraphics.count == 1,
+            imageViewer.selectedGraphics[0].imagePlacementIndex != nil,
+            third.undoEdit(),
+            try third.data(ofType: "com.adobe.pdf") == dragBaseline
+          else {
+            throw PDFError(.malformed, "Image-edit drag on a native image was not one undoable move")
           }
           guard KeyboardAudit.invoke("Select Tool"), imageViewer.activeTool == .select else {
             throw PDFError(.malformed, "Could not restore the select tool after dragging")

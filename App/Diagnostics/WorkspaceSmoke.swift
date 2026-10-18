@@ -85,14 +85,27 @@
         NSColor.systemOrange.setFill(); CGRect(x: 80, y: 0, width: 80, height: 80).fill()
         return true
       }
-      guard let bytes = image.tiffRepresentation, document.insertImage(bytes, pageIndex: 0),
-        viewer.selectedGraphics.count == 1 else { throw PDFError(.malformed, "Visible image insertion failed") }
+      guard let bytes = image.tiffRepresentation else {
+        throw PDFError(.malformed, "Image fixture encoding failed")
+      }
+      let preexisting = Set((viewer.graphicsListProvider?(0) ?? []).map(\.identity))
+      guard document.insertImage(bytes, pageIndex: 0) else {
+        throw PDFError(.malformed, "Visible image insertion returned false")
+      }
+      let inserted = viewer.selectedGraphics.filter { !preexisting.contains($0.identity) }
+      guard inserted.count == 1 else {
+        throw PDFError(.malformed,
+          "Visible image insertion selected \(inserted.count) new objects; "
+            + "selected=\(viewer.selectedGraphics.map(\.identity)), preexisting=\(Array(preexisting))")
+      }
       viewer.setGraphicBounds(CGRect(x: 72, y: 100, width: 160, height: 80))
       guard viewer.selectedGraphicBounds == CGRect(x: 72, y: 100, width: 160, height: 80),
         document.insertImage(bytes, pageIndex: 0) else { throw PDFError(.malformed, "Image property selection was lost") }
       viewer.setGraphicBounds(CGRect(x: 300, y: 240, width: 120, height: 60))
       let targets = viewer.graphicsListProvider?(0) ?? []
-      guard targets.count == 2 else { throw PDFError(.malformed, "Second image placement failed") }
+      guard targets.count == preexisting.count + 2 else {
+        throw PDFError(.malformed, "Second image placement failed")
+      }
       func find(_ root: NSView) -> GraphicSelectionOverlayView? {
         if let overlay = root as? GraphicSelectionOverlayView { return overlay }
         return root.subviews.lazy.compactMap { find($0) }.first
@@ -146,9 +159,13 @@
       let grip = try point(group.maxX, group.maxY), destination = try point(group.maxX + 60, group.maxY + 30)
       overlay.mouseDown(with: try mouse(.leftMouseDown, grip))
       overlay.mouseDragged(with: try mouse(.leftMouseDragged, destination))
-      guard viewer.hasPendingGraphicGesture?() == true else { throw PDFError(.malformed, "Image resize preview missing") }
+      guard viewer.hasPendingGraphicGesture?() == true,
+        viewer.isPreviewingGraphic,
+        let previewData = viewer.view.document?.dataRepresentation(),
+        previewData != baseline
+      else { throw PDFError(.malformed, "Image resize preview missing actual transformed image") }
       overlay.mouseUp(with: try mouse(.leftMouseUp, destination))
-      guard let resized = viewer.selectedGraphicBounds,
+      guard !viewer.isPreviewingGraphic, let resized = viewer.selectedGraphicBounds,
         abs(resized.width - group.width - 60) < 0.005, abs(resized.height - group.height - 30) < 0.005 else {
         throw PDFError(.malformed, "Group image resizing lost the shared bounds")
       }
@@ -159,9 +176,13 @@
       }
       overlay.mouseDown(with: try mouse(.leftMouseDown, grip))
       overlay.mouseDragged(with: try mouse(.leftMouseDragged, destination))
+      guard viewer.isPreviewingGraphic else {
+        throw PDFError(.malformed, "Image resize preview was not restored by Escape")
+      }
       try key(53)
       overlay.mouseUp(with: try mouse(.leftMouseUp, destination))
-      guard viewer.hasPendingGraphicGesture?() == false, viewer.selectedGraphics.count == 2,
+      guard !viewer.isPreviewingGraphic,
+        viewer.hasPendingGraphicGesture?() == false, viewer.selectedGraphics.count == 2,
         try document.editSession.bytesForSave() == baseline else {
         throw PDFError(.malformed, "Escape failed to cancel image resize")
       }
@@ -174,11 +195,12 @@
       guard try document.editSession.bytesForSave() == nudged, document.undoEdit(),
         try document.editSession.bytesForSave() == baseline else { throw PDFError(.malformed, "Modified shortcut moved images") }
       try key(51)
-      guard viewer.graphicsListProvider?(0).isEmpty == true, document.undoEdit(),
+      guard Set((viewer.graphicsListProvider?(0) ?? []).map(\.identity)) == preexisting,
+        document.undoEdit(),
         try document.editSession.bytesForSave() == baseline else { throw PDFError(.malformed, "Atomic image Delete/Undo failed") }
       viewer.selectGraphics([viewer.graphicsListProvider!(0)[0]])
       let unrotated = viewer.selectedGraphicBounds!
-      viewer.onRotateGraphic?(viewer.selectedGraphics[0].streamID)
+      viewer.onRotateGraphic?(viewer.selectedGraphics[0])
       guard let turned = viewer.selectedGraphicBounds,
         abs(turned.midX - unrotated.midX) < 0.005, abs(turned.midY - unrotated.midY) < 0.005,
         abs(turned.width - unrotated.height) < 0.005 else {
@@ -278,6 +300,196 @@
         ["id": $0.streamID.number, "rect": $0.rect] as [String: Any]
       }, "checks": "insert, exact properties, safe Select, first-drag move, Shift-selection, shared resize, Escape, keyboard, Delete/Undo, alignment, Save and reopen"],
         options: [.prettyPrinted, .sortedKeys]).write(to: output.appendingPathComponent("image-workflow.json"))
+    }
+
+    /// P48-013: exercise alpha through the native import path, canvas
+    /// resizing, Save/reopen, per-instance replacement and a second Save.
+    /// A colored image beneath the logo lets independent renderers prove that
+    /// transparent pixels reveal page content rather than compositing to white.
+    static func runTransparentImage(output: URL) async {
+      do {
+        try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
+        let previousRecovery = SPDFDocument.recoveryDirectoryOverride
+        defer { SPDFDocument.recoveryDirectoryOverride = previousRecovery }
+        SPDFDocument.recoveryDirectoryOverride = output.appendingPathComponent("Recovery")
+        let controller = NSDocumentController.shared
+        let old = Set(controller.documents.map(ObjectIdentifier.init))
+        controller.newDocument(nil)
+        guard
+          let document = controller.documents.first(where: {
+            !old.contains(ObjectIdentifier($0))
+          }) as? SPDFDocument,
+          let viewer = document.viewer,
+          let window = document.windowControllers.first?.window,
+          let page = viewer.view.document?.page(at: 0)
+        else { throw PDFError(.malformed, "Missing transparent-image workspace") }
+        defer { document.close() }
+        window.makeKeyAndOrderFront(nil)
+        viewer.setZoom(1)
+
+        let blue = try rasterPNG(width: 20, height: 20) { context in
+          context.setFillColor(CGColor(red: 0, green: 0, blue: 1, alpha: 1))
+          context.fill(CGRect(x: 0, y: 0, width: 20, height: 20))
+        }
+        let logo = try rasterPNG(width: 30, height: 10) { context in
+          context.clear(CGRect(x: 0, y: 0, width: 10, height: 10))
+          context.setFillColor(CGColor(red: 1, green: 0, blue: 0, alpha: 0.5))
+          context.fill(CGRect(x: 10, y: 0, width: 10, height: 10))
+          context.setFillColor(CGColor(red: 0, green: 1, blue: 0, alpha: 1))
+          context.fill(CGRect(x: 20, y: 0, width: 10, height: 10))
+        }
+        let replacement = try rasterPNG(width: 30, height: 10) { context in
+          context.clear(CGRect(x: 0, y: 0, width: 10, height: 10))
+          context.setFillColor(CGColor(red: 1, green: 1, blue: 0, alpha: 0.5))
+          context.fill(CGRect(x: 10, y: 0, width: 10, height: 10))
+          context.setFillColor(CGColor(red: 1, green: 0, blue: 1, alpha: 1))
+          context.fill(CGRect(x: 20, y: 0, width: 10, height: 10))
+        }
+
+        guard document.editSession.canEdit, ImageImport.decode(blue) != nil else {
+          throw PDFError(
+            .malformed,
+            "Transparent fixture is not editable (canEdit=\(document.editSession.canEdit), "
+              + "decodable=\(ImageImport.decode(blue) != nil))")
+        }
+        guard document.insertImage(blue, pageIndex: 0), let background = viewer.selectedGraphicBounds else {
+          throw PDFError(.malformed, "Colored background insertion failed")
+        }
+        viewer.setGraphicBounds(CGRect(x: 100, y: 100, width: 412, height: 592))
+        guard document.insertImage(logo, pageIndex: 0), viewer.selectedGraphicBounds != nil else {
+          throw PDFError(.malformed, "Transparent logo insertion failed")
+        }
+        let logoBounds = CGRect(x: 180, y: 260, width: 300, height: 100)
+        viewer.setGraphicBounds(logoBounds)
+        guard let resizedBounds = viewer.selectedGraphicBounds,
+          abs(resizedBounds.width - logoBounds.width) < 0.01,
+          abs(resizedBounds.height - logoBounds.height) < 0.01
+        else { throw PDFError(.malformed, "Transparent logo resize failed") }
+
+        let pageID = document.editSession.pageIDs[0]
+        guard let editedGraph = document.editSession.currentGraph else {
+          throw PDFError(.malformed, "Transparent-image graph disappeared")
+        }
+        let placements = try ImageInventory.placements(in: editedGraph, pageID: pageID)
+        guard placements.count == 2, placements.allSatisfy({ $0.isDirectlyEditable }) else {
+          throw PDFError(.malformed, "Transparent-image inventory did not resolve both placements")
+        }
+        guard let logoPlacement = placements.first(where: {
+          let bounds = $0.bounds
+          return abs(bounds[0] - resizedBounds.minX) < 0.01
+            && abs(bounds[1] - resizedBounds.minY) < 0.01
+            && abs(bounds[2] - resizedBounds.maxX) < 0.01
+            && abs(bounds[3] - resizedBounds.maxY) < 0.01
+        }), case .stream(let logoStream)? = editedGraph.objects[logoPlacement.imageID],
+          case .reference(let maskID)? = logoStream.dictionary[PDFName("SMask")],
+          case .stream(let mask)? = editedGraph.objects[maskID]
+        else { throw PDFError(.malformed, "Inserted logo has no addressable soft mask") }
+        let maskSamples = try PDFFilters.decoded(mask)
+        let rowSegmentsAreExact = maskSamples.count == 300 && (0..<10).allSatisfy { row in
+          let start = row * 30
+          return maskSamples[start..<(start + 10)].allSatisfy { $0 == 0 }
+            && maskSamples[(start + 10)..<(start + 20)].allSatisfy { (120...136).contains($0) }
+            && maskSamples[(start + 20)..<(start + 30)].allSatisfy { $0 == 255 }
+        }
+        guard rowSegmentsAreExact
+        else {
+          throw PDFError(
+            .malformed,
+            "Inserted logo alpha plane changed during import: "
+              + "count=\(maskSamples.count), first row=\(Array(maskSamples.prefix(30)))")
+        }
+
+        let insertedURL = output.appendingPathComponent("transparent-inserted.pdf")
+        try await save(document, to: insertedURL)
+        document.close()
+
+        let reopened = try SPDFDocument(contentsOf: insertedURL, ofType: "com.adobe.pdf")
+        controller.addDocument(reopened)
+        reopened.makeWindowControllers()
+        defer { reopened.close() }
+        guard let again = reopened.viewer, let graph = reopened.editSession.currentGraph,
+          let reopenedPageID = reopened.editSession.pageIDs.first
+        else { throw PDFError(.malformed, "Transparent image did not reopen") }
+        let reopenedPlacements = try ImageInventory.placements(in: graph, pageID: reopenedPageID)
+        guard let index = reopenedPlacements.firstIndex(where: {
+          let bounds = $0.bounds
+          return abs(bounds[0] - resizedBounds.minX) < 0.01
+            && abs(bounds[1] - resizedBounds.minY) < 0.01
+            && abs(bounds[2] - resizedBounds.maxX) < 0.01
+            && abs(bounds[3] - resizedBounds.maxY) < 0.01
+        }), reopened.replaceImage(pageIndex: 0, placementIndex: index, with: replacement, shared: false)
+        else { throw PDFError(.malformed, "Transparent image replacement failed") }
+        _ = again.activateTool(.imageEdit)
+        again.selectGraphics((again.graphicsListProvider?(0) ?? []).filter {
+          abs($0.rect[0] - resizedBounds.minX) < 0.02
+            && abs($0.rect[1] - resizedBounds.minY) < 0.02
+            && abs($0.rect[2] - resizedBounds.maxX) < 0.02
+            && abs($0.rect[3] - resizedBounds.maxY) < 0.02
+        })
+        let finalBounds = CGRect(x: 210, y: 280, width: 260, height: 120)
+        again.setGraphicBounds(finalBounds)
+        guard let actualFinal = again.selectedGraphicBounds,
+          abs(actualFinal.width - finalBounds.width) < 0.01,
+          abs(actualFinal.height - finalBounds.height) < 0.01
+        else { throw PDFError(.malformed, "Replacement image resize failed") }
+        let replacedURL = output.appendingPathComponent("transparent-replaced.pdf")
+        try await save(reopened, to: replacedURL)
+        reopened.close()
+
+        try JSONSerialization.data(withJSONObject: [
+          "status": "passed",
+          "insertedBounds": [logoBounds.minX, logoBounds.minY, logoBounds.maxX, logoBounds.maxY],
+          "replacedBounds": [
+            finalBounds.minX, finalBounds.minY, finalBounds.maxX, finalBounds.maxY,
+          ],
+          "insertedMaskBytes": maskSamples.count,
+          "backgroundBounds": [background.minX, background.minY, background.maxX, background.maxY],
+          "insertedSamples": [
+            "transparent": [0.0, 0.0, 1.0],
+            "halfRedOverBlue": [0.5, 0.0, 0.5],
+            "opaqueGreen": [0.0, 1.0, 0.0],
+          ],
+          "replacedSamples": [
+            "transparent": [0.0, 0.0, 1.0],
+            "halfYellowOverBlue": [0.5, 0.5, 0.5],
+            "opaqueMagenta": [1.0, 0.0, 1.0],
+          ],
+          "pageBounds": [page.bounds(for: .cropBox).minX, page.bounds(for: .cropBox).minY,
+            page.bounds(for: .cropBox).maxX, page.bounds(for: .cropBox).maxY],
+        ], options: [.prettyPrinted, .sortedKeys])
+          .write(to: output.appendingPathComponent("transparent-image.json"))
+        print("sPDF transparent image check passed")
+        exit(0)
+      } catch {
+        FileHandle.standardError.write(Data("Transparent image smoke failed: \(error)\n".utf8))
+        exit(1)
+      }
+    }
+
+    private static func rasterPNG(
+      width: Int, height: Int, draw: (CGContext) -> Void
+    ) throws -> Data {
+      guard
+        let context = CGContext(
+          data: nil, width: width, height: height, bitsPerComponent: 8,
+          bytesPerRow: width * 4, space: CGColorSpaceCreateDeviceRGB(),
+          bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+      else { throw PDFError(.malformed, "Could not create transparent image fixture") }
+      context.clear(CGRect(x: 0, y: 0, width: width, height: height))
+      draw(context)
+      guard let image = context.makeImage(),
+        let data = NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:])
+      else { throw PDFError(.malformed, "Could not encode transparent image fixture") }
+      return data
+    }
+
+    private static func save(_ document: SPDFDocument, to url: URL) async throws {
+      let error: Error? = await withCheckedContinuation { continuation in
+        document.save(to: url, ofType: "com.adobe.pdf", for: .saveAsOperation) {
+          continuation.resume(returning: $0)
+        }
+      }
+      if let error { throw error }
     }
 
     static func run(output: URL) async {
@@ -444,9 +656,16 @@
       let paragraphBounds = paragraphMatch.bounds(for: paragraphPage)
       let paragraphPointer = viewer.view.convert(
         viewer.view.convert(NSPoint(x: paragraphBounds.midX, y: paragraphBounds.midY), from: paragraphPage), to: nil)
+      // SwiftUI can inset the representable inside the PDF view. Exercise the
+      // hit resolver with a deliberate offset so "first point in view space"
+      // regressions cannot select an adjacent block.
+      let overlayFrame = overlay.frame
+      overlay.frame = overlayFrame.offsetBy(dx: 29, dy: 17)
       overlay.mouseDown(with: try mouse(.leftMouseDown, point: paragraphPointer))
       overlay.mouseUp(with: try mouse(.leftMouseUp, point: paragraphPointer))
-      guard let paragraphCanvas = findCanvas(content),
+      let offsetCanvas = findCanvas(content)
+      overlay.frame = overlayFrame
+      guard let paragraphCanvas = offsetCanvas,
         paragraphCanvas.sourceTarget?.paragraph?.originalText.count == paragraphLines.count,
         !viewer.isTypingPageText,
         try document.editSession.bytesForSave() == paragraphBaseline

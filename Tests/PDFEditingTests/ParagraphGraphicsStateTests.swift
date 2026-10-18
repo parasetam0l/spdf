@@ -1,0 +1,140 @@
+import Foundation
+import PDFCore
+import PDFFixtures
+import Testing
+
+@testable import PDFEditing
+
+@Suite("Paragraph graphics eligibility")
+struct ParagraphGraphicsStateTests {
+  private func fixture(_ parts: [String], spaces: [PDFName: PDFValue]? = nil,
+    state: [PDFName: PDFValue]? = nil) throws -> (PDFGraph, PDFObjectID) {
+    let parsed = try PDFParser.parse(PDFFixtures.textWidthsPages())
+    var graph = parsed.graph
+    let id = parsed.pageIDs[0]
+    guard case .dictionary(var page)? = graph.objects[id],
+      case .dictionary(var resources)? = page[PDFName("Resources")] else {
+      throw PDFError(.malformed, "Missing fixture resources")
+    }
+    if let spaces { resources[PDFName("ColorSpace")] = .reference(PDFObjectID(80)); graph.objects[PDFObjectID(80)] = .dictionary(spaces) }
+    if let state { resources[PDFName("ExtGState")] = .dictionary([PDFName("GS"): .reference(PDFObjectID(81))]); graph.objects[PDFObjectID(81)] = .dictionary(state) }
+    page[PDFName("Resources")] = .dictionary(resources)
+    graph.objects[id] = .dictionary(page)
+    graph.objects[PDFObjectID(5)] = .stream(PDFStream(bytes: Data((parts.joined(separator: "\n") + "\n").utf8)))
+    return (graph, id)
+  }
+  private func show(_ text: String, y: Int = 700) -> String {
+    "BT /F1 16 Tf 1 0 0 1 42 \(y) Tm (\(text)) Tj ET"
+  }
+  private func editable(_ graph: PDFGraph, _ id: PDFObjectID) throws -> [Bool] {
+    let runs = try TextRunIndexer.runs(in: PageContent.load(pageID: id, in: graph), graph: graph)
+    let validator = try PageTextRewriteValidator(pageID: id, in: graph)
+    return runs.enumerated().map { index, run in
+      (try? validator.validate(originalText: [index: run.text], fontSize: 16, color: run.fillColor)) != nil
+    }
+  }
+
+  @Test(arguments: ["0 g", "0.2 0.3 0.4 rg"])
+  func deviceColorResetRecoversOnlyFillColor(reset: String) throws {
+    let (graph, id) = try fixture(["/Custom cs 0 0 1 scn", show("AB"), reset, show("CD", y: 678)])
+    #expect(try editable(graph, id) == [false, true])
+    let runs = try TextRunIndexer.runs(in: PageContent.load(pageID: id, in: graph), graph: graph)
+    let command = RewritePageTextCommand(pageID: id, originalText: [1: "CD"],
+      lines: [.init(text: "DC", x: 42, baseline: 678)], fontSize: 16, color: runs[1].fillColor)
+    let edited = try PDFEditingEngine.commit(PDFTransaction([command]), to: graph)
+    let reopened = try PDFParser.parse(PDFWriter.write(edited))
+    let after = try TextRunIndexer.runs(in: PageContent.load(pageID: id, in: reopened.graph), graph: reopened.graph)
+    #expect(after.filter { !$0.text.isEmpty }.map(\.text) == ["AB", "DC"])
+    #expect(after.last?.fillColor == runs[1].fillColor)
+    #expect(edited.objects[PDFObjectID(4)] == graph.objects[PDFObjectID(4)])
+
+    let (alpha, alphaID) = try fixture(["/GS gs /Custom cs", reset, show("AB")],
+      state: [PDFName("ca"): .real(0.5)])
+    #expect(try editable(alpha, alphaID) == [false])
+    let (clip, clipID) = try fixture(["0 0 m 30 0 l 0 30 l h W n /Custom cs", reset, show("AB")])
+    #expect(try editable(clip, clipID) == [false])
+  }
+
+  @Test func colorKnowledgeFollowsGraphicsStateStack() throws {
+    let (unknown, id) = try fixture(["/Custom cs", show("A"), "q 0 g", show("B"), "Q", show("C")])
+    #expect(try editable(unknown, id) == [false, true, false])
+    let (known, other) = try fixture(["0 g", show("A"), "q /Custom cs", show("B"), "Q", show("C")])
+    #expect(try editable(known, other) == [true, false, true])
+  }
+
+  @Test(arguments: ["0 0 g", "2 g", "-1 g", "0 0 rg", "0 0 1.1 rg", "0.5 sc", "0.5 scn"])
+  func malformedOrUnresolvedColorsDoNotRecover(reset: String) throws {
+    let (graph, id) = try fixture(["/Custom cs", reset, show("AB")])
+    #expect(try editable(graph, id) == [false])
+  }
+
+  @Test func deviceDefaultsCannotBypassCustomColorRestrictions() throws {
+    for (name, reset) in [("DefaultGray", "0 g"), ("DefaultRGB", "0 0 0 rg"),
+      ("DefaultRGB", "0 g"), ("DefaultCMYK", "0 0 0 1 k")] {
+      let (graph, id) = try fixture([reset, show("AB")],
+        spaces: [PDFName(name): .reference(PDFObjectID(82))])
+      #expect(try editable(graph, id) == [false])
+    }
+  }
+
+  @Test func opaqueSettingsDoNotClearAnEarlierUnknownGraphicsState() throws {
+    let harmless: [PDFName: PDFValue] = [PDFName("SA"): .boolean(false), PDFName("SM"): .real(0.02),
+      PDFName("OP"): .boolean(false), PDFName("op"): .boolean(false), PDFName("OPM"): .integer(1)]
+    let (graph, id) = try fixture(["/Unknown gs /GS gs 0 g", show("AB")], state: harmless)
+    #expect(try editable(graph, id) == [false])
+    let (malformed, malformedID) = try fixture(["/GS /Extra gs 0 g", show("AB")], state: harmless)
+    #expect(try editable(malformed, malformedID) == [false])
+  }
+
+  @Test func paragraphPreviewAcrossStreamsKeepsSharedContentAndNeighbors() throws {
+    var (graph, id) = try fixture([show("AB")])
+    guard case .dictionary(var page)? = graph.objects[id],
+      case .dictionary(var pages)? = graph.objects[PDFObjectID(2)] else { return }
+    let shared = graph.objects[PDFObjectID(5)]
+    let other = PDFObjectID(90)
+    graph.objects[other] = .dictionary(page)
+    pages[PDFName("Kids")] = .array([.reference(id), .reference(other)])
+    pages[PDFName("Count")] = .integer(2)
+    graph.objects[PDFObjectID(2)] = .dictionary(pages)
+    page[PDFName("Contents")] = .array([.reference(PDFObjectID(5)), .reference(PDFObjectID(6)), .reference(PDFObjectID(7))])
+    graph.objects[id] = .dictionary(page)
+    graph.objects[PDFObjectID(6)] = .stream(PDFStream(bytes: Data((show("CD", y: 678) + "\n").utf8)))
+    graph.objects[PDFObjectID(7)] = .stream(PDFStream(bytes: Data(show("ABCD", y: 600).utf8)))
+    let hidden = try PageTextEditing.hidingParagraph(pageID: id, originalText: [0: "AB", 1: "CD"],
+      standardFontAdvances: [:], in: graph)
+    #expect(hidden.objects[PDFObjectID(5)] == shared)
+    #expect(hidden.objects[other] == graph.objects[other])
+    #expect(hidden.objects[PDFObjectID(7)] == graph.objects[PDFObjectID(7)])
+    #expect(hidden.objects[PDFObjectID(4)] == graph.objects[PDFObjectID(4)])
+    let reopened = try PDFParser.parse(PDFWriter.write(hidden))
+    let content = try PageContent.load(pageID: id, in: reopened.graph)
+    let runs = try TextRunIndexer.runs(in: content, graph: reopened.graph)
+    #expect(runs.map(\.text) == ["AB", "CD", "ABCD"])
+    #expect(runs.map { TextCanvasSupport.renderingMode(at: $0.instructionIndex, in: content) } == [3, 3, 0])
+    let otherContent = try PageContent.load(pageID: other, in: reopened.graph)
+    #expect(try TextRunIndexer.runs(in: otherContent, graph: reopened.graph).map(\.text) == ["AB"])
+    #expect(TextCanvasSupport.renderingMode(at: 3, in: otherContent) == 0)
+
+    let edited = try PDFEditingEngine.commit(PDFTransaction([
+      RewritePageTextCommand(pageID: id, originalText: [0: "AB", 1: "CD"],
+        lines: [.init(text: "DCBA", x: 42, baseline: 700)], fontSize: 16, color: [0, 0, 0])
+    ]), to: graph)
+    #expect(edited.objects[PDFObjectID(5)] == shared)
+    #expect(edited.objects[other] == graph.objects[other])
+    #expect(try TextRunIndexer.runs(in: PageContent.load(pageID: id, in: edited), graph: edited)
+      .filter { !$0.text.isEmpty }.map(\.text) == ["ABCD", "DCBA"])
+  }
+
+  @Test func aTextInstructionCrossingStreamBoundariesRefusesBeforePreview() throws {
+    var (graph, id) = try fixture(["BT /F1 16 Tf 42 700 Td (AB)"])
+    guard case .dictionary(var page)? = graph.objects[id] else { return }
+    graph.objects[PDFObjectID(6)] = .stream(PDFStream(bytes: Data(" Tj ET".utf8)))
+    page[PDFName("Contents")] = .array([.reference(PDFObjectID(5)), .reference(PDFObjectID(6))])
+    graph.objects[id] = .dictionary(page)
+    #expect(try editable(graph, id) == [false])
+    #expect(throws: PDFError.self) {
+      try PageTextEditing.hidingParagraph(pageID: id, originalText: [0: "AB"],
+        standardFontAdvances: [:], in: graph)
+    }
+  }
+}

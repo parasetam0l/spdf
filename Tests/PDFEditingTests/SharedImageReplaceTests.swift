@@ -80,6 +80,42 @@ struct SharedImageReplaceTests {
     #expect(replaced.objects.count == parsed.graph.objects.count + 1)
   }
 
+  @Test func sharedReplacementRotatesInANewSoftMaskForEveryInstance() throws {
+    var graph = try PDFParser.parse(PDFFixtures.imagePages()).graph
+    let page1 = PDFObjectID(3)
+    let page2 = PDFObjectID(4)
+    guard case .stream(let shared)? = graph.objects[PDFObjectID(6)] else {
+      Issue.record("Shared image is missing")
+      return
+    }
+    var dictionary = shared.dictionary
+    dictionary[PDFName("SMask")] = .reference(PDFObjectID(90))
+    graph.objects[PDFObjectID(6)] = .stream(
+      PDFStream(dictionary: dictionary, bytes: shared.bytes))
+    let alpha = Data([0, 64, 128, 255])
+    let replaced = try PDFEditingEngine.commit(
+      PDFTransaction([
+        ReplaceSharedImageCommand(
+          pageID: page1, placementIndex: 0, width: 2, height: 2,
+          rgb8: Data(repeating: 255, count: 12), alpha8: alpha)
+      ]), to: graph)
+
+    let placements = try ImageInventory.placements(in: replaced, pageID: page1)
+      + ImageInventory.placements(in: replaced, pageID: page2)
+    #expect(placements.count == 3)
+    #expect(Set(placements.map(\.imageID)) == [PDFObjectID(6)])
+    guard case .stream(let image)? = replaced.objects[PDFObjectID(6)],
+      case .reference(let maskID)? = image.dictionary[PDFName("SMask")],
+      case .stream(let mask)? = replaced.objects[maskID]
+    else {
+      Issue.record("Shared replacement did not attach its new soft mask")
+      return
+    }
+    #expect(maskID != PDFObjectID(90))
+    #expect(try PDFFilters.decoded(mask) == alpha)
+    #expect(try PDFParser.parse(PDFWriter.write(replaced)).graph == replaced)
+  }
+
   @Test func sharedReplacementRefusesInvalidInput() throws {
     let parsed = try PDFParser.parse(PDFFixtures.imagePages())
     let page1 = parsed.pageIDs[0]

@@ -66,6 +66,47 @@ public enum NativeParagraphEditing {
     return nil
   }
 
+  /// Embedded source runs already verify their codes, glyph IDs and advances.
+  /// Keep their measured geometry even when reader extraction expands a
+  /// ligature or splits a word differently. Standard fonts without verified
+  /// source metrics still need the reader's visible selection bounds.
+  public static func targets(from blocks: [PageTextBlock], pageID: PDFObjectID,
+    graph: PDFGraph, page: PDFPage, pageIndex: Int) -> [PageTextTarget] {
+    let verified = Set(((try? PageTextEditing.sourceRuns(pageID: pageID, in: graph)) ?? [])
+      .filter { $0.format.sourceFont != nil }.map(\.index))
+    let string = (page.string ?? "") as NSString
+    var used = Set<Int>()
+    let aligned: [PageTextTarget] = blocks.compactMap { block in
+      guard let first = block.runIndices.first else { return nil }
+      let needle = block.text.trimmingCharacters(in: .whitespacesAndNewlines)
+      if needle.isEmpty || block.runIndices.allSatisfy(verified.contains) {
+        return PageTextTarget(pageIndex: pageIndex, runIndex: first, rect: block.rect,
+          text: block.text, style: block.style, runIndices: block.runIndices)
+      }
+      var remaining = NSRange(location: 0, length: string.length)
+      var matches: [(NSRange, CGRect)] = []
+      while remaining.length > 0 {
+        let found = string.range(of: needle, range: remaining)
+        guard found.location != NSNotFound else { break }
+        if !used.contains(found.location), let selection = page.selection(for: found) {
+          matches.append((found, selection.bounds(for: page)))
+        }
+        let next = NSMaxRange(found)
+        remaining = NSRange(location: next, length: string.length - next)
+      }
+      let x = (block.rect[0] + block.rect[2]) / 2, y = (block.rect[1] + block.rect[3]) / 2
+      guard let match = matches.min(by: {
+        hypot($0.1.midX - x, $0.1.midY - y) < hypot($1.1.midX - x, $1.1.midY - y)
+      }) else { return nil }
+      used.insert(match.0.location)
+      let rect = match.1
+      return PageTextTarget(pageIndex: pageIndex, runIndex: first,
+        rect: [rect.minX, rect.minY, rect.maxX, rect.maxY], text: block.text,
+        style: block.style, runIndices: block.runIndices)
+    }
+    return targets(from: aligned, pageID: pageID, graph: graph, page: page, pageIndex: pageIndex)
+  }
+
   public static func targets(
     from blocks: [PageTextTarget], pageID: PDFObjectID, graph: PDFGraph, page: PDFPage,
     pageIndex: Int? = nil

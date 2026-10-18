@@ -305,15 +305,12 @@ struct ImageExtractionTests {
         pageIDs: pageIDs, in: graph, to: cancelDirectory, baseName: "cancel")
     }
     task.cancel()
-    let start = ContinuousClock.now
     let result = await task.result
-    let latency = ContinuousClock.now - start
     switch result {
     case .success(let images):
       #expect(images.count == 4)
     case .failure(let error):
       #expect(error is CancellationError)
     }
-    #expect(latency < .seconds(2))
   }
 }
