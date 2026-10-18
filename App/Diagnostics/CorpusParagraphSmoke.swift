@@ -42,7 +42,7 @@
               "status": target == nil ? "refused-by-canvas-targeting" : "selectable-not-edit-qualified"]
             break
           }
-          result["imageTask"] = image ?? ["status": "no-image-in-fixed-page-sample"]
+          result["imageTask"] = image ?? ["status": "no-image-placement-resolved-in-fixed-page-sample"]
           if testSave {
             let original = try document.editSession.bytesForSave()
             let count = reader.pageCount

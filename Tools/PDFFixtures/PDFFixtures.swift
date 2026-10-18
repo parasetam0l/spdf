@@ -175,13 +175,11 @@ public enum PDFFixtures {
     return file
   }
 
-  /// P38-025/P38-028: a one-page document whose object stream is chained via
-  /// `/Extends`, as found in private-corpus documents from Adobe PDF Library
-  /// 17.0 and Acrobat Distiller 6.0. Chained object streams are explicitly
-  /// unsupported, so parsing must refuse with `.unsupported` rather than
-  /// hanging or mis-resolving. The extension target is never resolved
-  /// because the refusal precedes it. Synthetic only; no private bytes.
-  public static func chainedObjectStreamPages() throws -> Data {
+  /// A synthetic object-stream collection. The default deliberately points
+  /// /Extends to a page-content stream, which must refuse as malformed. The
+  /// valid variant points to another object stream and must resolve through
+  /// the xref without inheriting objects from that base stream.
+  public static func chainedObjectStreamPages(validCollection: Bool = false) throws -> Data {
     var file = Data("%PDF-1.7\n".utf8)
     file.append(Data([0x25, 0xE2, 0xE3, 0xCF, 0xD3, 0x0A]))
     var offsets: [Int: Int] = [:]
@@ -231,7 +229,7 @@ public enum PDFFixtures {
         PDFName("Type"): .name(PDFName("ObjStm")),
         PDFName("N"): .integer(Int64(compressedObjects.count)),
         PDFName("First"): .integer(Int64(header.count)),
-        PDFName("Extends"): .reference(PDFObjectID(5)),
+        PDFName("Extends"): .reference(PDFObjectID(validCollection ? 8 : 5)),
         PDFName("Filter"): .name(PDFName("FlateDecode")),
       ], bytes: try PDFFilters.encodeFlate(objectStreamContent))
 
@@ -241,6 +239,12 @@ public enum PDFFixtures {
       bytes: try PDFFilters.encodeFlate(Data(contentText.utf8)))
     beginObject(5, try PDFWriter.serializedValue(.stream(content)))
     beginObject(6, try PDFWriter.serializedValue(.stream(objectStream)))
+    if validCollection {
+      beginObject(8, try PDFWriter.serializedValue(.stream(PDFStream(dictionary: [
+        PDFName("Type"): .name(PDFName("ObjStm")), PDFName("N"): .integer(0),
+        PDFName("First"): .integer(0)
+      ], bytes: Data()))))
+    }
 
     let xrefOffset = file.count
     func field(_ value: Int, width: Int) -> [UInt8] {
@@ -255,8 +259,10 @@ public enum PDFFixtures {
       entryFields[pair.0] = [2, 6, index]
     }
     entryFields[7] = [1, xrefOffset, 0]
+    if validCollection { entryFields[8] = [1, offsets[8]!, 0] }
+    let size = validCollection ? 9 : 8
     var xrefPayload = Data()
-    for number in 0...7 {
+    for number in 0..<size {
       guard let fields = entryFields[number] else { continue }
       xrefPayload.append(contentsOf: field(fields[0], width: 1))
       xrefPayload.append(contentsOf: field(fields[1], width: 4))
@@ -265,9 +271,9 @@ public enum PDFFixtures {
     let xrefStream = PDFStream(
       dictionary: [
         PDFName("Type"): .name(PDFName("XRef")),
-        PDFName("Size"): .integer(8),
+        PDFName("Size"): .integer(Int64(size)),
         PDFName("W"): .array([.integer(1), .integer(4), .integer(2)]),
-        PDFName("Index"): .array([.integer(0), .integer(8)]),
+        PDFName("Index"): .array([.integer(0), .integer(Int64(size))]),
         PDFName("Root"): .reference(PDFObjectID(1)),
         PDFName("Filter"): .name(PDFName("FlateDecode")),
       ], bytes: try PDFFilters.encodeFlate(xrefPayload))

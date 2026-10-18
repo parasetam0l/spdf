@@ -210,18 +210,22 @@ struct HardeningTailTests {
     #expect(reopenedText.count == after.count)
   }
 
-  @Test func chainedObjectStreamsRefuseExplicitly() throws {
-    // P38-025/P38-028: three private-corpus documents (Adobe PDF Library
-    // 17.0, Acrobat Distiller 6.0) use chained object streams (/Extends).
-    // The core refuses them with an explicit bounded error rather than
-    // hanging or mis-resolving. This synthetic generator pins that refusal;
-    // it contains no private bytes.
+  @Test func objectStreamExtensionToContentStreamRefusesAsMalformed() throws {
     do {
       _ = try PDFParser.parse(PDFFixtures.chainedObjectStreamPages())
-      Issue.record("chained object stream parsed without refusal")
+      Issue.record("Invalid object-stream extension parsed without refusal")
     } catch let error as PDFError {
-      #expect(error.kind == .unsupported)
+      #expect(error.kind == .malformed)
+      #expect(error.message.contains("Extends"))
     }
+  }
+
+  @Test func validObjectStreamCollectionResolvesAndRewrites() throws {
+    let parsed = try PDFParser.parse(PDFFixtures.chainedObjectStreamPages(validCollection: true))
+    #expect(parsed.pageCount == 1)
+    let text = try PageTextLayout.build(pageID: parsed.pageIDs[0], in: parsed.graph).clusters.map(\.text).joined()
+    #expect(text.contains("chained-stream fixture"))
+    #expect(try PDFParser.parse(PDFWriter.write(parsed.graph)).graph == parsed.graph)
   }
 
   // MARK: - P38-029/P38-030
