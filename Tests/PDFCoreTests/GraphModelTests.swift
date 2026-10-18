@@ -44,17 +44,17 @@ struct GraphModelTests {
     }
   }
 
-  @Test func chainedObjectStreamsResolveAsUnsupported() {
-    // The stream dictionary parses, but Extends refuses before decoding.
+  @Test func unsupportedObjectStreamFiltersResolveAsUnsupported() {
+    // The stream dictionary parses, but its image codec cannot decode objects.
     let bytes = [UInt8](
-      "%PDF-1.7\n6 0 obj\n<< /Type /ObjStm /N 0 /First 4 /Length 1 /Extends 7 0 R >>\nstream\n \nendstream\nendobj"
+      "%PDF-1.7\n6 0 obj\n<< /Type /ObjStm /N 0 /First 0 /Length 1 /Filter /DCTDecode >>\nstream\n \nendstream\nendobj"
         .utf8)
     var resolver = PDFObjectLoader(
       bytes: bytes,
       entries: [5: .compressed(stream: 6, index: 0), 6: .ordinary(offset: 9, generation: 0)],
       limits: PDFLimits())
     if case .unsupported(let message) = resolver.resolve(number: 5) {
-      #expect(message.contains("Chained"))
+      #expect(!message.isEmpty)
     } else {
       Issue.record("expected unsupported, got \(resolver.resolve(number: 5))")
     }

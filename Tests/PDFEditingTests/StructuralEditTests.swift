@@ -101,6 +101,7 @@ struct StructuralEditTests {
     }
     #expect(page[PDFName("MediaBox")] == .array([.integer(0), .integer(0), .integer(300), .integer(400)]))
     #expect(page[PDFName("Parent")] != nil)
+    #expect(page[PDFName("Resources")] == .dictionary([:]))
     try inserted.validate()
   }
 

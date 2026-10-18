@@ -296,6 +296,33 @@
       try PDFWriter.write(spacingGraph).write(to: spacingSource)
       try await CorpusParagraphSmoke.checks(source: spacingSource, output: spacingOutput,
         matching: "This imported paragraph")
+      let leadingOutput = output.appendingPathComponent("LeadingWhitespace")
+      try FileManager.default.createDirectory(at: leadingOutput, withIntermediateDirectories: true)
+      var leadingGraph = listParsed.graph
+      leadingGraph.objects[PDFObjectID(5)] = .stream(PDFStream(bytes: Data()))
+      let leadingText = String(repeating: " ", count: 20) + "This imported paragraph"
+      leadingGraph = try PDFEditingEngine.commit(PDFTransaction([
+        AddPageTextLinesCommand(pageID: listPage,
+          lines: [.init(text: leadingText, x: 42, baseline: 700,
+            segments: [.init(text: leadingText, x: 42, format: format)])],
+          box: .init(x: 42, firstBaseline: 700, width: 500, lineSpacing: 22, wraps: false))
+      ]), to: leadingGraph)
+      for (id, value) in leadingGraph.objects {
+        if case .stream(let stream) = value {
+          var dictionary = stream.dictionary
+          for key in ["SPDFTextVersion", "SPDFTextBox", "SPDFTextLines"] { dictionary[PDFName(key)] = nil }
+          leadingGraph.objects[id] = .stream(PDFStream(dictionary: dictionary, bytes: stream.bytes))
+        }
+      }
+      let leadingSource = leadingOutput.appendingPathComponent("source.pdf")
+      // Also cover the native destination verification after the session
+      // removes an unused positional hint. The canonical graph keeps it for
+      // Undo, while the output and the destination check use the same policy.
+      let hintID = PDFObjectID((leadingGraph.objects.keys.map(\.number).max() ?? 0) + 1)
+      leadingGraph.objects[hintID] = .dictionary([PDFName("Linearized"): .integer(1)])
+      try PDFWriter.serialize(leadingGraph).write(to: leadingSource)
+      try await CorpusParagraphSmoke.checks(source: leadingSource, output: leadingOutput,
+        matching: "This imported paragraph")
       try JSONSerialization.data(withJSONObject: ["status": "passed", "font": "DejaVuSans",
         "sourceRuns": paragraph.originalText.count, "savedLines": lines.count,
         "savedWidth": expectedBox.width, "nativeText": expectedText,

@@ -750,4 +750,46 @@ struct ImportedParagraphInteropTests {
     #expect(target.paragraph?.fragments.contains { $0.text == " " } == false)
   }
 
+  @Test @MainActor func leadingWhitespaceKeepsTheVisibleOriginAndSavedGlyphs() throws {
+    var (graph, pageID) = try fixture(composite: false)
+    let spaces = String(repeating: " ", count: 20)
+    graph.objects[PDFObjectID(5)] = .stream(PDFStream(bytes: Data("""
+      BT /F1 16 Tf 1 0 0 1 42 700 Tm (\(spaces)ABC ABC) Tj ET
+      """.utf8)))
+    let profile = try #require(PageTextEditing.fontProfiles(pageID: pageID, in: graph)[PDFName("F1")])
+    let visibleX = 42 + Double(spaces.count) * profile.glyphs[" "]!.width * 16 / 1000
+    let target = try #require(targets(graph, pageID: pageID).first { $0.paragraph != nil })
+    let paragraph = try #require(target.paragraph)
+    #expect(target.text == "ABC ABC")
+    #expect(abs(target.rect[0] - visibleX) < 0.00001)
+    let format = try #require(paragraph.fragments.first?.format)
+    let edited = try PDFEditingEngine.commit(PDFTransaction([
+      RewritePageTextCommand(pageID: pageID, originalText: paragraph.originalText,
+        lines: [.init(text: "CBA ABC", x: target.rect[0], baseline: 700,
+          segments: [.init(text: "CBA ABC", x: target.rect[0], format: format)])],
+        fontSize: 16, color: [0,0,0], box: .init(x: target.rect[0], firstBaseline: 700,
+          width: target.rect[2] - target.rect[0], lineSpacing: paragraph.lineSpacing, wraps: false))
+    ]), to: graph)
+    let reader = try #require(PDFDocument(data: PDFWriter.write(edited)))
+    let page = try #require(reader.page(at: 0))
+    let selection = try #require(reader.findString("CBA", withOptions: []).first)
+    #expect(abs(selection.bounds(for: page).minX - visibleX) < 0.01)
+    let reopened = try #require(targets(edited, pageID: pageID).first { $0.paragraph != nil })
+    #expect(abs(reopened.rect[0] - visibleX) < 0.01)
+    #expect(reopened.text == "CBA ABC")
+  }
+
+  @Test @MainActor func offsetImportedLinesStaySeparateUntilIndentationIsRepresentable() throws {
+    var (graph, pageID) = try fixture(composite: false)
+    graph.objects[PDFObjectID(5)] = .stream(PDFStream(bytes: Data("""
+      BT /F1 16 Tf 1 0 0 1 42 700 Tm (ABC ABC ABC ABC ABC ABC) Tj ET
+      BT /F1 16 Tf 1 0 0 1 42.48 678 Tm (ABC ABC ABC ABC ABC ABC) Tj ET
+      """.utf8)))
+    let selected = try targets(graph, pageID: pageID).filter { $0.paragraph != nil }
+    #expect(selected.count == 2)
+    #expect(selected.allSatisfy { $0.paragraph?.wraps == false })
+    #expect(selected.map { $0.rect[0] }.sorted() == [42,42.48])
+    #expect(selected.allSatisfy { $0.runIndices.count == 1 })
+  }
+
 }

@@ -21,4 +21,6 @@ The native app currently limits source snapshots to 256 MiB. Parsing, stream dec
 
 Untouched documents retain their original bytes. Eligible edits to classic cross-reference files use incremental saves. Sources using cross-reference streams use a verified full rewrite when edited, so the saved document remains readable in Apple's renderer. Unsupported signatures and protection states retain their separate save restrictions.
 
+Object-stream collections are accepted with checked references and bounded, acyclic links. Editing a linearized PDF saves a normal PDF with stale, unreferenced fast-web-view hints removed; the original file is preserved until Save. Referenced hints, signatures and protection keep their separate restrictions.
+
 Signed releases, clean installation, and Sparkle update behavior require live verification in addition to automated tests.

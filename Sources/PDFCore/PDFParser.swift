@@ -829,9 +829,9 @@ struct PDFObjectLoader {
     else {
       throw PDFError(.malformed, "Compressed objects must be stored in an object stream")
     }
-    guard stream.dictionary[PDFName("Extends")] == nil else {
-      throw PDFError(.unsupported, "Chained object streams are not supported yet")
-    }
+    // /Extends describes a semantic collection, not inherited object bytes.
+    // The xref entry still selects this stream's own object/index. Validate
+    // collection references and cycles after loading the complete graph.
     let decoded = [UInt8](try PDFFilters.decoded(stream, limits: limits))
     let objectStream = try PDFObjectStream(
       decoded: decoded, dictionary: stream.dictionary, limits: limits)
@@ -1045,6 +1045,50 @@ enum PDFGraphValidation {
     }
     for value in graph.objects.values { try visit(value, depth: 0) }
     try visit(.dictionary(graph.trailer), depth: 0)
+    try validateObjectStreamCollections(in: graph, limits: limits)
+  }
+
+  private static func validateObjectStreamCollections(in graph: PDFGraph, limits: PDFLimits) throws {
+    var parents: [PDFObjectID: PDFObjectID] = [:]
+    for (id, value) in graph.objects {
+      guard case .stream(let stream) = value,
+        stream.dictionary[PDFName("Type")] == .name(PDFName("ObjStm")),
+        let extends = stream.dictionary[PDFName("Extends")] else { continue }
+      guard case .reference(let parent) = extends,
+        case .stream(let base)? = graph.objects[parent],
+        base.dictionary[PDFName("Type")] == .name(PDFName("ObjStm")) else {
+        throw PDFError(.malformed, "An object stream's Extends must reference another object stream")
+      }
+      parents[id] = parent
+    }
+    // Iterative and memoized: even a hostile collection cannot recurse or
+    // repeatedly walk the same long suffix. Shared bases are valid.
+    var depths: [PDFObjectID: Int] = [:]
+    for start in parents.keys.sorted() {
+      try Task.checkCancellation()
+      var path: [PDFObjectID] = []
+      var visited = Set<PDFObjectID>()
+      var current = start
+      while depths[current] == nil {
+        guard visited.insert(current).inserted else {
+          throw PDFError(.malformed, "Object stream collection contains a cycle")
+        }
+        guard path.count <= limits.nesting else {
+          throw PDFError(.limitExceeded, "Object stream collection exceeds the nesting limit")
+        }
+        path.append(current)
+        guard let parent = parents[current] else { depths[current] = 0; break }
+        current = parent
+      }
+      var depth = depths[current]!
+      for id in path.reversed() where depths[id] == nil {
+        depth += 1
+        guard depth <= limits.nesting else {
+          throw PDFError(.limitExceeded, "Object stream collection exceeds the nesting limit")
+        }
+        depths[id] = depth
+      }
+    }
   }
 
   static func pages(in graph: PDFGraph, limits: PDFLimits) throws -> [PDFObjectID] {

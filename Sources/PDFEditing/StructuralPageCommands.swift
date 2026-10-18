@@ -210,6 +210,7 @@ public struct InsertBlankPageCommand: PDFEditCommand, Equatable, Sendable {
     editor.graph.objects[newID] = .dictionary([
       PDFName("Type"): .name(PDFName("Page")),
       PDFName("Parent"): .reference(parent),
+      PDFName("Resources"): .dictionary([:]),
       PDFName("MediaBox"): .array([
         .integer(0), .integer(0), .integer(width), .integer(height),
       ]),

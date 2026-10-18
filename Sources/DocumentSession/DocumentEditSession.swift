@@ -160,6 +160,17 @@ public final class DocumentEditSession: @unchecked Sendable {
   public var pageIDs: [PDFObjectID] { lock.withLock { pages } }
   public var currentGraph: PDFGraph? { lock.withLock { current } }
 
+  /// Match the explicit normalization in bytesForSave without mutating the
+  /// canonical graph or weakening the destination's full graph comparison.
+  /// Untouched copies still verify against their original graph and bytes.
+  public var graphForSaveVerification: PDFGraph? {
+    lock.withLock {
+      guard let current else { return nil }
+      let plan = PDFWriter.plan(current: current, original: original, baseAvailable: parsedBase != nil)
+      return plan.mode == .originalBytes ? current : PDFWriter.droppingLinearization(current).graph
+    }
+  }
+
   /// P09-018: the save mode chosen before any output bytes are produced.
   public var savePlan: PDFSavePlan {
     lock.withLock {
@@ -515,23 +526,30 @@ public final class DocumentEditSession: @unchecked Sendable {
       // Re-saving without new edits reproduces the saved revision bytes
       // instead of appending an empty revision.
       if !graphIsDirty, let savedBytes { return savedBytes }
+      // Editing invalidates positional fast-web-view hints. The native
+      // session explicitly chooses a normal PDF, dropping only unreferenced
+      // linearization dictionaries. Keep the canonical graph for exact Undo;
+      // signatures, protection and referenced hints retain writer refusals.
+      let normalized = PDFWriter.droppingLinearization(currentGraph)
+      let saveGraph = normalized.graph
       let output: Data
-      if plan.mode == .incrementalUpdate, let base = parsedBase {
+      if plan.mode == .incrementalUpdate, let base = parsedBase,
+        !(normalized.dropped && PDFWriter.droppingLinearization(base.graph).dropped) {
         do {
-          output = try PDFWriter.incrementalUpdate(from: base, to: currentGraph, limits: limits)
+          output = try PDFWriter.incrementalUpdate(from: base, to: saveGraph, limits: limits)
         } catch let error as PDFError where error.kind == .unsupported {
-          // Signed/linearized/otherwise ineligible bases fall back to a
-          // full rewrite, which applies the same refusals.
-          output = try PDFWriter.write(currentGraph, limits: limits)
+          // Other ineligible bases use a full rewrite with the same
+          // signature/protection and structural eligibility checks.
+          output = try PDFWriter.write(saveGraph, limits: limits)
         }
       } else {
-        output = try PDFWriter.write(currentGraph, limits: limits)
+        output = try PDFWriter.write(saveGraph, limits: limits)
       }
       let reparsed = try PDFParser.parse(output, limits: limits)
       // /Size is derived per save mode: an incremental revision covers freed
       // object numbers while a full rewrite covers only live objects, so the
       // declared count may legitimately differ from the in-memory graph.
-      var expected = currentGraph
+      var expected = saveGraph
       if let savedSize = reparsed.graph.trailer[PDFName("Size")] {
         expected.trailer[PDFName("Size")] = savedSize
       }

@@ -271,7 +271,8 @@ public enum NativeParagraphEditing {
     struct Line {
       var spans: [Span]
       var fragments: [PageTextFragment] = []
-      var x: Double { spans[0].x }
+      var leadingAdvance: Double = 0
+      var x: Double { spans[0].x + leadingAdvance }
       var y: Double { spans[0].source.baseline }
       var width: Double { spans.last!.x + spans.last!.width - x }
       var text: String { fragments.map(\.text).joined().trimmingCharacters(in: .whitespaces) }
@@ -310,23 +311,23 @@ public enum NativeParagraphEditing {
       }
       spans += candidate
     }
-    spans.sort { abs($0.source.baseline - $1.source.baseline) > 0.25
+    spans.sort { abs($0.source.baseline - $1.source.baseline) > 0.02
       ? $0.source.baseline > $1.source.baseline : $0.x < $1.x }
     var lines: [Line] = []
     for span in spans {
       if let last = lines.last, let previous = last.spans.last,
-        abs(last.y - span.source.baseline) < 0.25,
+        abs(last.y - span.source.baseline) < 0.02,
         abs(span.x - previous.x - previous.width) <= max(0.75, span.source.format.size * 0.3) {
         lines[lines.count - 1].spans.append(span)
       } else { lines.append(Line(spans: [span])) }
     }
     for index in lines.indices {
       let spans = lines[index].spans
-      func spaceWidth(_ format: PageTextFormat) -> Double? {
+      func spaceWidth(_ format: PageTextFormat, text: String = " ") -> Double? {
         if let source = format.sourceFont {
-          return profiles[source.resource]?.glyphs[" "].map { $0.width * format.size / 1_000 }
+          return profiles[source.resource]?.glyphs[text].map { $0.width * format.size / 1_000 }
         }
-        return standardAdvance(" ", family: format.font.rawValue, size: format.size)
+        return standardAdvance(text, family: format.font.rawValue, size: format.size)
       }
       let gaps = zip(spans, spans.dropFirst()).map { $1.x - $0.x - $0.width }
       let wordGaps = gaps.indices.map { index -> Bool in
@@ -358,6 +359,16 @@ public enum NativeParagraphEditing {
         }
         fragments += pieces
       }
+      // Whitespace can position a visible heading far from its text-show
+      // origin. Trimming it must advance the editable box by the same PDF
+      // distance, otherwise merely selecting the text makes it jump left.
+      var leading = 0.0
+      while let first = fragments.first, first.text.allSatisfy(\.isWhitespace),
+        let advance = spaceWidth(first.format, text: first.text) {
+        leading += advance + first.format.characterSpacing
+        fragments.removeFirst()
+      }
+      lines[index].leadingAdvance = leading
       lines[index].fragments = fragments
     }
     var result: [PageTextTarget] = []
@@ -371,7 +382,9 @@ public enum NativeParagraphEditing {
         let line = lines[next]
         // Other columns can interleave at every baseline. They are neither
         // members nor a reason to stop following this column's prose.
-        if abs(line.x - first.x) > 2 {
+        // The current paragraph model has one left edge. Do not silently
+        // straighten indented lines while reconstructing an imported box.
+        if abs(line.x - first.x) > 0.02 {
           if line.x + line.width < first.x - 2 || line.x > first.x + first.width + 2 { continue }
           if line.y < members.last!.y - 0.25 { break }
           continue
@@ -418,7 +431,7 @@ public enum NativeParagraphEditing {
         let spacing = members.count > 1 ? first.y - members[1].y : initial.size * 1.2
         guard let layout = nativeLayout(fragments, embedded: embedded, profiles: profiles, width: width, spacing: spacing),
           layout.text == members.map(\.text),
-          zip(layout.baselines, members).allSatisfy({ abs($0.0 - (first.y - $0.1.y)) < 0.5 }) else { return nil }
+          zip(layout.baselines, members).allSatisfy({ abs($0.0 - (first.y - $0.1.y)) < 0.02 }) else { return nil }
         let original = Dictionary(uniqueKeysWithValues: all.map { ($0.source.index, $0.source.text) })
         var advances: [Int: Double] = [:]
         for span in all where span.source.format.sourceFont == nil {

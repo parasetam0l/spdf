@@ -328,7 +328,7 @@ final class SPDFDocument: NSDocument {
       }
       return
     }
-    let expected = try editSession.currentGraph ?? PDFParser.parse(data).graph
+    let expected = try editSession.graphForSaveVerification ?? PDFParser.parse(data).graph
     try VerifiedFileWriter.write(data, to: url, expectedGraph: expected)
   }
 
@@ -418,7 +418,7 @@ final class SPDFDocument: NSDocument {
               pageID: self.editSession.pageIDs[target.pageIndex], runIndex: run, in: preview)
           }
         }
-        return try PDFWriter.write(preview)
+        return try PDFWriter.write(preview, droppingLinearization: true)
       } catch { return nil }
     }
     viewer.onTextBlockCommit = { [weak self] target, text, style, dx, dy, lines, box in

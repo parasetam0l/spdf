@@ -10,6 +10,88 @@
   /// reports stay outside source; CI uses the distributable fixture suite.
   @MainActor
   enum CorpusParagraphSmoke {
+    /// Report actual document/canvas access, including view-only files and
+    /// native images that the canvas cannot safely manipulate. Never turn a
+    /// refusal into a successful image-edit count. Optional structure Save
+    /// checks exercise the native transaction path without requiring text.
+    static func access(source: URL, output: URL, testSave: Bool) async {
+      do {
+        try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
+        let bytes = try Data(contentsOf: source)
+        let prior = SPDFDocument.recoveryDirectoryOverride
+        defer { SPDFDocument.recoveryDirectoryOverride = prior }
+        SPDFDocument.recoveryDirectoryOverride = output.appendingPathComponent("Recovery")
+        let document = try SPDFDocument(contentsOf: source, ofType: "com.adobe.pdf")
+        NSDocumentController.shared.addDocument(document)
+        document.makeWindowControllers()
+        defer { document.close() }
+        guard let viewer = document.viewer, let reader = viewer.view.document else {
+          throw PDFError(.malformed, "Native document did not open")
+        }
+        var result: [String: Any] = ["nativeOpen": true, "readerPages": reader.pageCount,
+          "canEdit": document.editSession.canEdit, "structureSave": "not-requested"]
+        if let graph = document.editSession.currentGraph {
+          var image: [String: Any]?
+          for index in 0..<min(3, document.editSession.pageIDs.count) {
+            let id = document.editSession.pageIDs[index]
+            guard let placement = try ImageInventory.placements(in: graph, pageID: id).first else { continue }
+            let bounds = placement.bounds
+            let target = viewer.graphicTargetProvider?(index,
+              [(bounds[0] + bounds[2]) / 2, (bounds[1] + bounds[3]) / 2])
+            image = ["page": index, "placementIndex": 0,
+              "status": target == nil ? "refused-by-canvas-targeting" : "selectable-not-edit-qualified"]
+            break
+          }
+          result["imageTask"] = image ?? ["status": "no-image-in-fixed-page-sample"]
+          if testSave {
+            let original = try document.editSession.bytesForSave()
+            let count = reader.pageCount
+            viewer.view.goToFirstPage(nil)
+            document.insertBlankPageAfterCurrent()
+            guard document.editSession.pageIDs.count == count + 1 else {
+              throw PDFError(.malformed, "Native blank-page insertion failed")
+            }
+            let edited = try document.editSession.bytesForSave()
+            document.undoEdit()
+            guard try document.editSession.bytesForSave() == original else {
+              throw PDFError(.malformed, "Native structure Undo changed source bytes")
+            }
+            document.redoEdit()
+            guard try document.editSession.bytesForSave() == edited else {
+              throw PDFError(.malformed, "Native structure Redo changed edited bytes")
+            }
+            let saved = output.appendingPathComponent("saved.pdf")
+            let error: Error? = await withCheckedContinuation { continuation in
+              document.save(to: saved, ofType: "com.adobe.pdf", for: .saveAsOperation) { continuation.resume(returning: $0) }
+            }
+            if let error { throw error }
+            document.close()
+            let reopened = try SPDFDocument(contentsOf: saved, ofType: "com.adobe.pdf")
+            NSDocumentController.shared.addDocument(reopened)
+            reopened.makeWindowControllers()
+            defer { reopened.close() }
+            guard reopened.editSession.canEdit, reopened.editSession.pageIDs.count == count + 1,
+              reopened.viewer?.view.document?.pageCount == count + 1, !reopened.isDocumentEdited else {
+              throw PDFError(.malformed, "Native structure Save/reopen lost editing access or pages")
+            }
+            result["structureSave"] = "passed"
+            result["insertedPageIndex"] = 1
+          }
+        } else {
+          result["imageTask"] = ["status": "document-editing-unavailable"]
+          if testSave { throw PDFError(.unsupported, "Document is view-only") }
+        }
+        guard try Data(contentsOf: source) == bytes else { throw PDFError(.malformed, "Source file changed") }
+        result["sourceFileUnchanged"] = true
+        try JSONSerialization.data(withJSONObject: result, options: [.prettyPrinted, .sortedKeys])
+          .write(to: output.appendingPathComponent("access.json"))
+      } catch {
+        FileHandle.standardError.write(Data("Corpus access check failed: \(error)\n".utf8))
+        exit(1)
+      }
+      exit(0)
+    }
+
     static func run(source: URL, output: URL, matching: String? = nil) async {
       do {
         try await checks(source: source, output: output, matching: matching)
@@ -175,7 +257,12 @@
         let text = canvas.textView.string as NSString
         let range = text.range(of: word, options: .backwards)
         canvas.textView.setSelectedRange(range)
-        canvas.textView.insertText(String(word.reversed()), replacementRange: range)
+        let replacement = String(word.reversed())
+        canvas.textView.insertText(replacement, replacementRange: range)
+        guard canvas.textView.string == text.replacingCharacters(in: range, with: replacement),
+          replacement != word else {
+          throw PDFError(.unsupported, "Native corpus typing refused the requested replacement: \(viewer.pageTextFormattingIssue ?? "unchanged text")")
+        }
       } else {
         canvas.textView.setSelectedRange(NSRange(location: (canvas.textView.string as NSString).length, length: 0))
         canvas.textView.insertText(" " + word, replacementRange: canvas.textView.selectedRange())

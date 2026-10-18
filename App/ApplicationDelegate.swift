@@ -20,6 +20,13 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
       return
     }
     #if DEBUG
+      if let index = CommandLine.arguments.firstIndex(of: "--test-corpus-access"),
+        CommandLine.arguments.count > index + 2 {
+        Task { await CorpusParagraphSmoke.access(source: URL(fileURLWithPath: CommandLine.arguments[index + 1]),
+          output: URL(fileURLWithPath: CommandLine.arguments[index + 2]),
+          testSave: CommandLine.arguments.contains("--test-structure-save")) }
+        return
+      }
       if let index = CommandLine.arguments.firstIndex(of: "--test-corpus-paragraphs"),
         CommandLine.arguments.count > index + 2 {
         let matchIndex = CommandLine.arguments.firstIndex(of: "--text-prefix")
@@ -165,6 +172,7 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
         || CommandLine.arguments.contains("--test-workspace")
         || CommandLine.arguments.contains("--test-imported-paragraphs")
         || CommandLine.arguments.contains("--test-corpus-paragraphs")
+        || CommandLine.arguments.contains("--test-corpus-access")
         || CommandLine.arguments.contains("--survey-imported-paragraphs")
       {
         sender.reply(toOpenOrPrint: .success)

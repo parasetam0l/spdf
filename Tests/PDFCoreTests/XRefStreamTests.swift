@@ -112,18 +112,54 @@ struct XRefStreamTests {
     #expect(throws: PDFError.self) { _ = try loader.load(number: 2) }
   }
 
-  @Test func chainedObjectStreamsAreExplicitlyUnsupported() throws {
+  @Test func objectStreamCollectionDoesNotChangeXRefObjectResolution() throws {
     let data = try minimalObjectStreamFile(extendsSelf: true)
     let bytes = Array(data)
     let offset = try startxrefOffset(of: data)
     let (entries, _) = try PDFParser.crossReference(in: bytes, at: offset, limits: PDFLimits())
     var loader = PDFObjectLoader(bytes: bytes, entries: entries, limits: PDFLimits())
-    do {
-      _ = try loader.load(number: 2)
-      Issue.record("Object stream with /Extends was resolved")
-    } catch let error as PDFError {
-      #expect(error.kind == .unsupported)
+    // Resolution is local to the stream selected by the xref, even with
+    // collection metadata. Full-graph validation separately rejects this
+    // fixture's intentionally cyclic collection.
+    #expect(try loader.load(number: 2).value == .dictionary([PDFName("X"): .integer(1)]))
+  }
+
+  @Test func objectStreamCollectionsRoundTripAndRejectInvalidRelationships() throws {
+    var graph = try PDFParser.parse(PDFFixtures.onePage()).graph
+    func stream(parent: PDFValue? = nil) -> PDFValue {
+      var dictionary: [PDFName: PDFValue] = [PDFName("Type"): .name(PDFName("ObjStm")),
+        PDFName("N"): .integer(0), PDFName("First"): .integer(0), PDFName("Length"): .integer(0)]
+      dictionary[PDFName("Extends")] = parent
+      return .stream(PDFStream(dictionary: dictionary, bytes: Data()))
     }
+    graph.objects[PDFObjectID(20)] = stream()
+    graph.objects[PDFObjectID(21)] = stream(parent: .reference(PDFObjectID(20)))
+    graph.objects[PDFObjectID(22)] = stream(parent: .reference(PDFObjectID(20)))
+    graph.objects[PDFObjectID(23)] = stream(parent: .reference(PDFObjectID(21)))
+    let bytes = try PDFWriter.writeCompressed(graph)
+    let reopened = try PDFParser.parse(bytes)
+    for id in 20...23 { #expect(reopened.graph.objects[PDFObjectID(id)] == graph.objects[PDFObjectID(id)]) }
+    #expect(try PDFParser.parse(PDFWriter.write(reopened.graph)).pageIDs == reopened.pageIDs)
+    // Include full parse via serialize, which deliberately skips eligibility
+    // checks, so corrupt input cannot be hidden by a writer-side rejection.
+    for parent in [PDFValue.reference(PDFObjectID(23)), .reference(PDFObjectID(1)),
+      .reference(PDFObjectID(999)), .integer(20)] {
+      var invalid = graph
+      invalid.objects[PDFObjectID(20)] = stream(parent: parent)
+      let invalidBytes = try PDFWriter.serialize(invalid)
+      do {
+        _ = try PDFParser.parse(invalidBytes)
+        Issue.record("Invalid object stream collection parsed")
+      } catch let error as PDFError { #expect(error.kind == .malformed) }
+    }
+    // Count links, including cached suffixes, and accept the exact bound.
+    for id in 24...25 { graph.objects[PDFObjectID(id)] = stream(parent: .reference(PDFObjectID(id - 1))) }
+    try PDFGraphValidation.validateReferences(in: graph, limits: PDFLimits(nesting: 4))
+    for id in 26...28 { graph.objects[PDFObjectID(id)] = stream(parent: .reference(PDFObjectID(id - 1))) }
+    do {
+      try PDFGraphValidation.validateReferences(in: graph, limits: PDFLimits(nesting: 4))
+      Issue.record("Excessive object stream collection depth accepted")
+    } catch let error as PDFError { #expect(error.kind == .limitExceeded) }
   }
 
   @Test func unsupportedXRefStreamFiltersFailExplicitly() throws {
