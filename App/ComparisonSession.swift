@@ -39,12 +39,13 @@ final class ComparisonSession: ObservableObject {
 
   init(
     left: (graph: PDFGraph, source: Data), right: (graph: PDFGraph, source: Data),
-    options: PDFComparisonOptions = PDFComparisonOptions()
+    options: PDFComparisonOptions = PDFComparisonOptions(), limits: PDFLimits = PDFLimits()
   ) throws {
     self.left = left
     self.right = right
     self.options = options
-    let result = try PDFComparison.compare(left: left, right: right, options: options)
+    let result = try PDFComparison.compare(
+      left: left, right: right, options: options, limits: limits)
     self.result = result
     self.mapping = result.pageMapping
     guard let leftDocument = PDFDocument(data: left.source),

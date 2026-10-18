@@ -7,10 +7,29 @@ import PDFKit
 import SwiftUI
 import UniformTypeIdentifiers
 
+private enum SPDFDocumentResourcePolicy {
+  // The NSDocument URL path already accepts this bound; keep parsing, editing
+  // and save verification consistent without widening PDFCore's default.
+  static let maximumPDFBytes = 256 * 1_024 * 1_024
+  static let parsingLimits = PDFLimits(fileBytes: maximumPDFBytes)
+
+  static func readPDFData(at url: URL) throws -> Data {
+    let values = try url.resourceValues(forKeys: [.fileSizeKey])
+    guard let size = values.fileSize, size <= maximumPDFBytes else {
+      throw PDFError(.limitExceeded, "This file exceeds the current 256 MiB opening limit")
+    }
+    let data = try Data(contentsOf: url)
+    guard data.count <= maximumPDFBytes else {
+      throw PDFError(.limitExceeded, "This file exceeds the current 256 MiB opening limit")
+    }
+    return data
+  }
+}
+
 @objc(SPDFDocument)
 final class SPDFDocument: NSDocument {
   nonisolated let sourceStore = SourceStore()
-  let editSession = DocumentEditSession()
+  let editSession = DocumentEditSession(limits: SPDFDocumentResourcePolicy.parsingLimits)
   let commentsModel = CommentsModel()
   let formsModel = FormsModel()
   let signaturesModel = SignaturesModel()
@@ -78,7 +97,7 @@ final class SPDFDocument: NSDocument {
 
   nonisolated override func read(from url: URL, ofType typeName: String) throws {
     let values = try url.resourceValues(forKeys: [.fileSizeKey])
-    guard let size = values.fileSize, size <= 256 * 1_024 * 1_024 else {
+    guard let size = values.fileSize, size <= SPDFDocumentResourcePolicy.maximumPDFBytes else {
       throw PDFError(.limitExceeded, "This file exceeds the current 256 MiB opening limit")
     }
     // P10-014: coordinate the read so cloud-backed files materialize
@@ -99,12 +118,18 @@ final class SPDFDocument: NSDocument {
     }
     if let coordinatorError { throw coordinatorError }
     if let readError { throw readError }
+    guard snapshot.count <= SPDFDocumentResourcePolicy.maximumPDFBytes else {
+      throw PDFError(.limitExceeded, "This file exceeds the current 256 MiB opening limit")
+    }
     try sourceStore.load(snapshot)
     if let source = sourceStore.snapshot() { editSession.load(source) }
     sourceFingerprint = SourceFingerprint.capture(of: url)
   }
 
   nonisolated override func read(from data: Data, ofType typeName: String) throws {
+    guard data.count <= SPDFDocumentResourcePolicy.maximumPDFBytes else {
+      throw PDFError(.limitExceeded, "This file exceeds the current 256 MiB opening limit")
+    }
     try sourceStore.load(data)
     if let source = sourceStore.snapshot() { editSession.load(source) }
   }
@@ -328,8 +353,12 @@ final class SPDFDocument: NSDocument {
       }
       return
     }
-    let expected = try editSession.graphForSaveVerification ?? PDFParser.parse(data).graph
-    try VerifiedFileWriter.write(data, to: url, expectedGraph: expected)
+    let expected =
+      try editSession.graphForSaveVerification
+      ?? PDFParser.parse(data, limits: SPDFDocumentResourcePolicy.parsingLimits).graph
+    try VerifiedFileWriter.write(
+      data, to: url, expectedGraph: expected,
+      limits: SPDFDocumentResourcePolicy.parsingLimits)
   }
 
   /// P10-012: whether the destination changed on disk since it was loaded.
@@ -570,7 +599,10 @@ final class SPDFDocument: NSDocument {
       unlockCoreSession(with: stored)
     }
     inspectionTask = Task { [weak self] in
-      self?.coreInspection = try? await PDFInspector().inspect(source)
+      self?.coreInspection =
+        try? await PDFInspector(
+          limits: SPDFDocumentResourcePolicy.parsingLimits
+        ).inspect(source)
     }
   }
 
@@ -851,10 +883,11 @@ final class SPDFDocument: NSDocument {
     guard let source = sourceStore.snapshot(), let graph = editSession.currentGraph else {
       throw PDFError(.malformed, "The document has no editable graph")
     }
-    let otherData = try Data(contentsOf: url)
-    let other = try PDFParser.parse(otherData)
+    let otherData = try SPDFDocumentResourcePolicy.readPDFData(at: url)
+    let other = try PDFParser.parse(otherData, limits: SPDFDocumentResourcePolicy.parsingLimits)
     return try PDFComparison.compare(
-      left: (graph, source.data), right: (other.graph, otherData))
+      left: (graph, source.data), right: (other.graph, otherData),
+      limits: SPDFDocumentResourcePolicy.parsingLimits)
   }
 
   /// P32-002: the open comparison workspace, when any.
@@ -871,10 +904,11 @@ final class SPDFDocument: NSDocument {
     guard let source = sourceStore.snapshot(), let graph = editSession.currentGraph else {
       throw PDFError(.malformed, "The document has no editable graph")
     }
-    let otherData = try Data(contentsOf: url)
-    let other = try PDFParser.parse(otherData)
+    let otherData = try SPDFDocumentResourcePolicy.readPDFData(at: url)
+    let other = try PDFParser.parse(otherData, limits: SPDFDocumentResourcePolicy.parsingLimits)
     let session = try ComparisonSession(
-      left: (graph, source.data), right: (other.graph, otherData))
+      left: (graph, source.data), right: (other.graph, otherData),
+      limits: SPDFDocumentResourcePolicy.parsingLimits)
     let window = NSWindow(
       contentRect: NSRect(x: 0, y: 0, width: 1_100, height: 760),
       styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered,
@@ -944,10 +978,12 @@ final class SPDFDocument: NSDocument {
     }
     let sourceBytes = (try? editSession.bytesForSave().count) ?? 0
     let (_, data, report) = try PDFOptimizer.lossless(
-      graph, options: options, sourceBytes: sourceBytes)
+      graph, options: options, sourceBytes: sourceBytes,
+      limits: SPDFDocumentResourcePolicy.parsingLimits)
     guard report.isImprovement else { return report }
     try VerifiedFileWriter.write(data, to: url) { written in
-      let reparsed = try PDFParser.parse(written)
+      let reparsed = try PDFParser.parse(
+        written, limits: SPDFDocumentResourcePolicy.parsingLimits)
       guard reparsed.pageCount == editSession.pageIDs.count else {
         throw PDFError(.malformed, "Optimized output failed verification")
       }
@@ -963,7 +999,8 @@ final class SPDFDocument: NSDocument {
     let preview: (graph: PDFGraph, data: Data, report: PDFOptimizationReport)
     do {
       preview = try PDFOptimizer.lossless(
-        graph, options: PDFOptimizationOptions(), sourceBytes: sourceBytes)
+        graph, options: PDFOptimizationOptions(), sourceBytes: sourceBytes,
+        limits: SPDFDocumentResourcePolicy.parsingLimits)
     } catch {
       presentError(error)
       return
@@ -990,7 +1027,8 @@ final class SPDFDocument: NSDocument {
     let report: PDFOptimizationReport
     do {
       let result = try PDFOptimizer.lossless(
-        graph, options: options, sourceBytes: sourceBytes)
+        graph, options: options, sourceBytes: sourceBytes,
+        limits: SPDFDocumentResourcePolicy.parsingLimits)
       data = result.data
       report = result.report
     } catch {
@@ -1006,7 +1044,8 @@ final class SPDFDocument: NSDocument {
       guard response == .OK, let url = panel.url, let self else { return }
       do {
         try VerifiedFileWriter.write(data, to: url) { written in
-          let reparsed = try PDFParser.parse(written)
+          let reparsed = try PDFParser.parse(
+            written, limits: SPDFDocumentResourcePolicy.parsingLimits)
           guard reparsed.pageCount == self.editSession.pageIDs.count else {
             throw PDFError(.malformed, "Optimized output failed verification")
           }
@@ -1030,16 +1069,22 @@ final class SPDFDocument: NSDocument {
   func signDocument(to url: URL, identity: SecIdentity, options: PDFSigningOptions) throws {
     let data: Data
     if !editSession.isDirty, let source = sourceStore.snapshot() {
-      let parsed = try PDFParser.parse(source.data)
-      data = try PDFSigningWriter.signIncremental(parsed, identity: identity, options: options)
+      let parsed = try PDFParser.parse(
+        source.data, limits: SPDFDocumentResourcePolicy.parsingLimits)
+      data = try PDFSigningWriter.signIncremental(
+        parsed, identity: identity, options: options,
+        limits: SPDFDocumentResourcePolicy.parsingLimits)
     } else {
       guard let graph = editSession.currentGraph else {
         throw PDFError(.malformed, "The document has no editable graph")
       }
-      data = try PDFSigningWriter.sign(graph, identity: identity, options: options)
+      data = try PDFSigningWriter.sign(
+        graph, identity: identity, options: options,
+        limits: SPDFDocumentResourcePolicy.parsingLimits)
     }
     try VerifiedFileWriter.write(data, to: url) { written in
-      let parsed = try PDFParser.parse(written)
+      let parsed = try PDFParser.parse(
+        written, limits: SPDFDocumentResourcePolicy.parsingLimits)
       let signatures = try PDFSignatureInventory.signatures(in: parsed.graph)
       guard !signatures.isEmpty else {
         throw PDFError(.malformed, "The signed copy has no signature")
@@ -1172,8 +1217,10 @@ final class SPDFDocument: NSDocument {
     guard let graph = editSession.currentGraph else {
       throw PDFError(.malformed, "The document has no editable graph")
     }
-    let data = try PDFWriter.write(graph)
-    try VerifiedFileWriter.write(data, to: url, expectedGraph: graph)
+    let data = try PDFWriter.write(graph, limits: SPDFDocumentResourcePolicy.parsingLimits)
+    try VerifiedFileWriter.write(
+      data, to: url, expectedGraph: graph,
+      limits: SPDFDocumentResourcePolicy.parsingLimits)
   }
 
   func saveSanitizedCopy() {
@@ -1210,7 +1257,8 @@ final class SPDFDocument: NSDocument {
       encryption: PDFEncryptionOptions(
         userPassword: userPassword, ownerPassword: ownerPassword,
         permissions: permissions, encryptMetadata: encryptMetadata,
-        unencryptedEmbeddedFiles: unencryptedEmbeddedFiles))
+        unencryptedEmbeddedFiles: unencryptedEmbeddedFiles),
+      limits: SPDFDocumentResourcePolicy.parsingLimits)
     // The exported file cannot be reparsed without the password, so the
     // verification compares the decrypted objects against the session graph
     // (stream lengths are normalized on both sides).
@@ -1220,7 +1268,8 @@ final class SPDFDocument: NSDocument {
       return .stream(stream)
     }
     try VerifiedFileWriter.write(data, to: url) { written in
-      let reparsed = try PDFParser.parse(written, password: userPassword)
+      let reparsed = try PDFParser.parse(
+        written, password: userPassword, limits: SPDFDocumentResourcePolicy.parsingLimits)
       guard reparsed.graph.trailer[PDFName("Encrypt")] != nil,
         reparsed.graph.objects.count == graph.objects.count + 1,
         reparsed.pageIDs == editSession.pageIDs
@@ -3305,9 +3354,13 @@ final class SPDFDocument: NSDocument {
     panel.allowsMultipleSelection = false
     panel.message = "Choose the document whose pages you want to import."
     guard panel.runModal() == .OK, let url = panel.url,
-      let data = try? Data(contentsOf: url)
+      let data = try? SPDFDocumentResourcePolicy.readPDFData(at: url)
     else { return }
-    guard let parsed = try? PDFParser.parse(data), !parsed.pageIDs.isEmpty else {
+    guard
+      let parsed = try? PDFParser.parse(
+        data, limits: SPDFDocumentResourcePolicy.parsingLimits),
+      !parsed.pageIDs.isEmpty
+    else {
       presentError(PDFError(.malformed, "The chosen document has no pages to import"))
       return
     }

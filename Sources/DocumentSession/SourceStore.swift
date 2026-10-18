@@ -25,10 +25,14 @@ public final class SourceStore: @unchecked Sendable {
 
 /// Serializes the initial inspection parser away from UI state.
 public actor PDFInspector {
-  public init() {}
+  private let limits: PDFLimits
+
+  public init(limits: PDFLimits = PDFLimits()) {
+    self.limits = limits
+  }
 
   public func inspect(_ source: PDFSource) throws -> CoreInspection {
-    let parsed = try PDFParser.parse(source.data)
+    let parsed = try PDFParser.parse(source.data, limits: limits)
     return CoreInspection(
       version: parsed.graph.version, objects: parsed.graph.objects.count, pages: parsed.pageCount)
   }
