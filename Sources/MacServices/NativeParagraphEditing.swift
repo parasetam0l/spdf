@@ -20,9 +20,37 @@ public struct PageTextParagraph: Sendable, Equatable {
 /// native wrapping. A nearby label, heading or column is not enough evidence.
 @MainActor
 public enum NativeParagraphEditing {
+  /// Chooses the paragraph target nearest the pointer when line-sized
+  /// candidates overlap. A paragraph still wins over legacy run targets.
+  public static func preferredHitTarget(from candidates: [PageTextTarget],
+    at pagePoint: [Double]) -> PageTextTarget? {
+    let paragraphs = candidates.filter { $0.paragraph != nil }
+    guard pagePoint.count == 2, pagePoint.allSatisfy(\.isFinite) else {
+      return paragraphs.first ?? candidates.first
+    }
+    return paragraphs.min(by: { lhs, rhs in
+      func distance(_ target: PageTextTarget) -> Double {
+        guard target.rect.count == 4, target.rect.allSatisfy(\.isFinite) else {
+          return .infinity
+        }
+        return hypot(pagePoint[0] - (target.rect[0] + target.rect[2]) / 2,
+          pagePoint[1] - (target.rect[1] + target.rect[3]) / 2)
+      }
+      let lhsDistance = distance(lhs), rhsDistance = distance(rhs)
+      if abs(lhsDistance - rhsDistance) > 0.01 { return lhsDistance < rhsDistance }
+      if lhs.runIndices.count != rhs.runIndices.count {
+        return lhs.runIndices.count > rhs.runIndices.count
+      }
+      if lhs.text.utf16.count != rhs.text.utf16.count {
+        return lhs.text.utf16.count > rhs.text.utf16.count
+      }
+      return lhs.paragraph?.wraps == true && rhs.paragraph?.wraps == false
+    }) ?? candidates.first
+  }
+
   public static func fonts(profiles: [PDFName: PageTextFontProfile]) -> [PDFName: NSFont] {
     profiles.compactMapValues { profile in
-      guard let program = profile.previewProgram,
+      guard let program = profile.previewProgram ?? CFFPreviewFont.program(profile),
         let provider = CGDataProvider(data: program as CFData),
         let graphics = CGFont(provider) else { return nil }
       return CTFontCreateWithGraphicsFont(graphics, 1_000, nil, nil) as NSFont

@@ -1365,12 +1365,7 @@ final class SPDFDocument: NSDocument {
     }
     if textBlockCache[pageIndex] == nil { rebuildTargets() }
     let candidates = matches()
-    // A perfectly reconstructed paragraph wins over legacy one-run fallback
-    // targets that may share the same painted position.
-    if let paragraph = candidates.first(where: { $0.paragraph != nil }) {
-      return paragraph
-    }
-    return candidates.first
+    return NativeParagraphEditing.preferredHitTarget(from: candidates, at: pagePoint)
   }
 
   /// P24-014: toggle a checkbox using its actual on-state name.

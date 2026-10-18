@@ -32,6 +32,17 @@ enum GlyphNames {
     return nil
   }
 
+  static func name(for text: String) -> String? {
+    guard let scalar = text.unicodeScalars.first, text.unicodeScalars.count == 1 else {
+      return nil
+    }
+    if let name = reverseTable[text] { return name }
+    if scalar.value < 128, CharacterSet.alphanumerics.contains(scalar) {
+      return String(scalar)
+    }
+    return nil
+  }
+
   private static let table: [String: String] = [
     "space": " ", "exclam": "!", "quotedbl": "\"", "numbersign": "#", "dollar": "$",
     "percent": "%", "ampersand": "&", "quotesingle": "'", "quoteright": "\u{2019}",
@@ -51,7 +62,23 @@ enum GlyphNames {
     "euro": "\u{20AC}", "sterling": "\u{00A3}", "yen": "\u{00A5}", "cent": "\u{00A2}",
     "section": "\u{00A7}", "paragraph": "\u{00B6}", "dagger": "\u{2020}", "daggerdbl": "\u{2021}",
     "copyright": "\u{00A9}", "registered": "\u{00AE}", "trademark": "\u{2122}",
+    "dotlessi": "\u{0131}", "dotlessj": "\u{0237}",
+    "acircumflex": "\u{00E2}", "Acircumflex": "\u{00C2}",
+    "Ccedilla": "\u{00C7}",
+    "Odieresis": "\u{00D6}", "odieresis": "\u{00F6}",
+    "Udieresis": "\u{00DC}", "udieresis": "\u{00FC}",
+    "Gbreve": "\u{011E}", "gbreve": "\u{011F}",
+    "Scedilla": "\u{015E}", "scedilla": "\u{015F}",
+    "Idotaccent": "\u{0130}",
   ]
+
+  private static let reverseTable: [String: String] = {
+    var result: [String: String] = [:]
+    for (name, text) in table where result[text] == nil {
+      result[text] = name
+    }
+    return result
+  }()
 }
 
 /// P14-001/P14-004: a simple (single-byte) font resolved from a page
@@ -176,6 +203,29 @@ struct SimpleFont: Equatable {
       }
     }
     return result
+  }
+
+  /// The glyph name used by the simple font's encoding, independent of its
+  /// ToUnicode extraction map. CFF Type 1C programs are indexed by names, so
+  /// their preview mapping must follow the PDF encoding rather than guess from
+  /// the Unicode text layer.
+  func glyphName(for code: UInt8) -> String? {
+    if let name = differenceNames[code] { return name }
+    let text: String?
+    switch baseEncoding {
+    case .winAnsi:
+      text = String(bytes: [code], encoding: .windowsCP1252)
+    case .macRoman:
+      text = PDFMacRoman.characters[code].map(String.init)
+    case .standardASCII:
+      if code == 0x27 { text = "\u{2019}" }
+      else if code == 0x60 { text = "\u{2018}" }
+      else if (0x20...0x7E).contains(code) { text = String(UnicodeScalar(code)) }
+      else { text = nil }
+    case .unsupportedName:
+      text = nil
+    }
+    return text.flatMap(GlyphNames.name(for:))
   }
 
   /// Encode replacement text with existing glyphs, or nil when any character

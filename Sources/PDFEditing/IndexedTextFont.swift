@@ -1,4 +1,5 @@
 import Foundation
+import CoreGraphics
 import PDFCore
 
 /// The page's existing font resource. Reusing it never embeds a replacement
@@ -129,7 +130,8 @@ struct IndexedTextFont {
       where text.unicodeScalars.count == 1 && encoding[text] == nil { encoding[text] = code }
     return Self(simple: simple, resource: resource, fontID: fontID, baseFont: name,
       mapping: mappings, encoding: encoding, widths: widths, defaultWidth: fallback, gids: gids,
-      program: stream(descriptor?[PDFName("FontFile2")]))
+      program: stream(descriptor?[PDFName("FontFile2")])
+        ?? stream(descriptor?[PDFName("FontFile3")]))
   }
 
   private static func number(_ value: PDFValue) -> Double? {
@@ -175,31 +177,52 @@ struct IndexedTextFont {
     return total * horizontalScale / 100
   }
   var profile: PageTextFontProfile? {
-    guard let program, let inspector = try? TrueTypeInspector.inspect(program, requireUnicodeMap: false) else { return nil }
-    var glyphs: [String: PageTextFontProfile.Glyph] = [:]
-    let candidates = simple == nil ? mapping.keys.sorted() : Array(0...255)
-    for code in candidates {
-      let codes = simple == nil ? [UInt8(code >> 8), UInt8(code & 255)] : [UInt8(code)]
-      guard let glyph = self.glyphs(codes)?.first, glyph.text.unicodeScalars.count == 1,
-        glyph.text != "\u{FFFD}", let width = glyph.width, width.isFinite, width >= 0,
-        encode(glyph.text) == codes else { continue }
-      let gid: Int?
-      if simple != nil {
-        gid = glyph.text.unicodeScalars.first.flatMap {
-          inspector.unicodeToGlyph[Int($0.value)]
-        } ?? inspector.platform1CodeToGlyph[code]
-      }
-      else if let gids {
-        guard code * 2 + 1 < gids.count else { continue }
-        gid = Int(gids[code * 2]) * 256 + Int(gids[code * 2 + 1])
-      } else { gid = code }
-      guard let gid, gid > 0, gid < inspector.glyphCount,
-        let advance = inspector.advances[gid],
-        abs(Double(advance) * 1_000 / Double(inspector.unitsPerEm) - width) <= 1.1 else { continue }
-      glyphs[glyph.text] = .init(id: gid, width: width, codes: codes)
-    }
+    guard let program else { return nil }
     let parts = baseFont.split(separator: "+", maxSplits: 1)
     let name = parts.count == 2 && parts[0].count == 6 ? String(parts[1]) : baseFont
+    var glyphs: [String: PageTextFontProfile.Glyph] = [:]
+    let candidates = simple == nil ? mapping.keys.sorted() : Array(0...255)
+    if let inspector = try? TrueTypeInspector.inspect(program, requireUnicodeMap: false) {
+      for code in candidates {
+        let codes = simple == nil ? [UInt8(code >> 8), UInt8(code & 255)] : [UInt8(code)]
+        guard let glyph = self.glyphs(codes)?.first, glyph.text.unicodeScalars.count == 1,
+          glyph.text != "\u{FFFD}", let width = glyph.width, width.isFinite, width >= 0,
+          encode(glyph.text) == codes else { continue }
+        let gid: Int?
+        if simple != nil {
+          gid = glyph.text.unicodeScalars.first.flatMap {
+            inspector.unicodeToGlyph[Int($0.value)]
+          } ?? inspector.platform1CodeToGlyph[code]
+        }
+        else if let gids {
+          guard code * 2 + 1 < gids.count else { continue }
+          gid = Int(gids[code * 2]) * 256 + Int(gids[code * 2 + 1])
+        } else { gid = code }
+        guard let gid, gid > 0, gid < inspector.glyphCount,
+          let advance = inspector.advances[gid],
+          abs(Double(advance) * 1_000 / Double(inspector.unitsPerEm) - width) <= 1.1 else { continue }
+        glyphs[glyph.text] = .init(id: gid, width: width, codes: codes)
+      }
+    } else if simple != nil,
+      let provider = CGDataProvider(data: program as CFData),
+      let font = CGFont(provider), font.unitsPerEm > 0 {
+      for code in 0...255 {
+        let codes = [UInt8(code)]
+        guard let glyph = self.glyphs(codes)?.first, glyph.text.unicodeScalars.count == 1,
+          glyph.text != "\u{FFFD}", let width = glyph.width, width.isFinite, width >= 0,
+          encode(glyph.text) == codes,
+          let glyphName = simple?.glyphName(for: UInt8(code))
+            ?? GlyphNames.name(for: glyph.text) else { continue }
+        let gid = font.getGlyphWithGlyphName(name: glyphName as CFString)
+        var advance: Int32 = 0
+        guard gid > 0,
+          font.getGlyphAdvances(glyphs: [gid], count: 1, advances: &advance),
+          abs(Double(advance) * 1_000 / Double(font.unitsPerEm) - width) <= 1.1
+        else { continue }
+        glyphs[glyph.text] = .init(id: Int(gid), width: width, codes: codes)
+      }
+    }
+    guard !glyphs.isEmpty else { return nil }
     return .init(source: .init(resource: resource, name: name), program: program, glyphs: glyphs)
   }
 }

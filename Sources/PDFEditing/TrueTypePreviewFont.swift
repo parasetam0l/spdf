@@ -14,7 +14,10 @@ enum TrueTypePreviewFont {
   static func program(_ original: Data, glyphs: [String: PageTextFontProfile.Glyph]) throws -> Data {
     let bytes = [UInt8](original)
     let inspector = try TrueTypeInspector.inspect(original, requireUnicodeMap: false)
-    guard !inspector.isCFF, [0x0001_0000, 0x7472_7565].contains(try TrueTypeInspector.u32(bytes, at: 0)) else {
+    let signature = try TrueTypeInspector.u32(bytes, at: 0)
+    let isTrueType = !inspector.isCFF && [0x0001_0000, 0x7472_7565].contains(signature)
+    let isOpenTypeCFF = inspector.isCFF && signature == 0x4F54544F
+    guard isTrueType || isOpenTypeCFF else {
       throw PDFError(.unsupported, "This embedded font has no native preview mapping")
     }
     let mappings = glyphs.compactMap { text, glyph -> (Int, Int)? in

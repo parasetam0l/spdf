@@ -379,10 +379,6 @@
         if case .reference(let id) = value { return id }; return nil
       }
       let fontObjects = PDFGraphTraversal.reachable(from: fontRoots, in: graph).order
-      // The diagnostic edits the final word. Keep the pointer anchor stable
-      // when the whole target is a short positioned-word line.
-      let phrase = target.text.split(whereSeparator: \.isWhitespace).first.map(String.init)
-        ?? String(target.text.prefix(18))
       func find<T: NSView>(_ type: T.Type, in view: NSView) -> T? {
         if let found = view as? T { return found }
         return view.subviews.lazy.compactMap { find(type, in: $0) }.first
@@ -397,18 +393,14 @@
         viewer.setZoom(1)
         _ = viewer.activateTool(.textEdit)
         try await Task.sleep(for: .milliseconds(100))
-        guard let match = viewer.view.document?.findString(phrase, withOptions: [])
-          .filter({ $0.pages.contains(page) }).min(by: {
-            let a = $0.bounds(for: page), b = $1.bounds(for: page)
-            return hypot(a.minX - target.rect[0], a.maxY - target.rect[3])
-              < hypot(b.minX - target.rect[0], b.maxY - target.rect[3])
-          }), let overlay = find(PageEditOverlayView.self, in: content) else {
+        guard let overlay = find(PageEditOverlayView.self, in: content) else {
           throw PDFError(.malformed, "Missing corpus pointer target")
         }
-        let bounds = match.bounds(for: page)
+        let pagePoint = NSPoint(x: (target.rect[0] + target.rect[2]) / 2,
+          y: (target.rect[1] + target.rect[3]) / 2)
         // Use the actual app's resolver before dispatching pointer events.
         // A refusal must fail the diagnostic rather than block in a modal.
-        let hit = viewer.textRunProvider?(pageIndex, [bounds.midX, bounds.midY])
+        let hit = viewer.textRunProvider?(pageIndex, [pagePoint.x, pagePoint.y])
         let hitPreview = hit.flatMap { viewer.onTextBlockPreview?($0) }
         let hitSources = (try? PageTextEditing.sourceRuns(pageID: pageID, in: graph)) ?? []
         let hitBlocks = (try? PageTextEditing.blocks(pageID: pageID, in: graph)) ?? []
@@ -437,13 +429,13 @@
           "hitBlocks": blockDescription(hit?.runIndices ?? []),
           "hitIsParagraph": hit?.paragraph != nil,
           "hitPreviewAvailable": hitPreview != nil,
-          "point": [bounds.midX, bounds.midY]
+          "point": [pagePoint.x, pagePoint.y]
         ], options: [.prettyPrinted, .sortedKeys]).write(to: output.appendingPathComponent("hit-target.json"))
         guard let hit, hit.paragraph != nil, hitPreview != nil else {
           throw PDFError(.unsupported, "The actual paragraph hit or its preview is unavailable")
         }
-        let point = viewer.view.convert(NSPoint(x: bounds.midX, y: bounds.midY), from: page)
-        let pointer = viewer.view.convert(point, to: nil)
+        let viewPoint = viewer.view.convert(pagePoint, from: page)
+        let pointer = viewer.view.convert(viewPoint, to: nil)
         for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
           guard let event = NSEvent.mouseEvent(with: type, location: pointer, modifierFlags: [],
             timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,

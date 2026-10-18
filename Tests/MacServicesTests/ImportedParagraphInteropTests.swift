@@ -1,7 +1,7 @@
 import AppKit
 import CoreText
 import Foundation
-import MacServices
+@testable import MacServices
 import PDFCore
 @testable import PDFEditing
 import PDFFixtures
@@ -10,6 +10,25 @@ import Testing
 
 @Suite("Imported paragraph editing")
 struct ImportedParagraphInteropTests {
+  @Test @MainActor func overlappingParagraphHitsPreferTheNearestParagraph() {
+    let partial = PageTextTarget(pageIndex: 0, runIndex: 4,
+      rect: [0, 0, 120, 20], text: "first source line", runIndices: [4, 5],
+      paragraph: .init(originalText: [4: "first source line"], lineSpacing: 20,
+        firstBaseline: 12, standardFontAdvances: [:], fragments: [], wraps: false))
+    let complete = PageTextTarget(pageIndex: 0, runIndex: 4,
+      rect: [0, 0, 180, 42], text: "first source line second source line", runIndices: [4, 5, 6, 7],
+      paragraph: .init(originalText: [4: "first source line", 6: "second source line"],
+        lineSpacing: 20, firstBaseline: 32, standardFontAdvances: [:], fragments: [], wraps: true))
+    let fallback = PageTextTarget(pageIndex: 0, runIndex: 4,
+      rect: [0, 0, 100, 20], text: "legacy run", runIndices: [4])
+
+    #expect(NativeParagraphEditing.preferredHitTarget(from: [partial, fallback, complete],
+      at: [90, 21]) == complete)
+    #expect(NativeParagraphEditing.preferredHitTarget(from: [partial, fallback, complete],
+      at: [60, 10]) == partial)
+    #expect(NativeParagraphEditing.preferredHitTarget(from: [fallback], at: [60, 10]) == fallback)
+  }
+
   private func fixture(composite: Bool, adjusted: Bool = false) throws -> (PDFGraph, PDFObjectID) {
     let parsed = try PDFParser.parse(PDFFixtures.fontEmbeddedPages())
     let pageID = parsed.pageIDs[0]
@@ -112,6 +131,76 @@ struct ImportedParagraphInteropTests {
           lines: [missing], fontSize: 16, color: [0, 0, 0]).validate(in: graph)
       }
     }
+  }
+
+  @Test @MainActor func rawType1CParagraphPreviewsAndRewritesWithItsOriginalFont() throws {
+    #expect(GlyphNames.name(for: "0") == "zero")
+    #expect(GlyphNames.name(for: "-") == "hyphen")
+    #expect(GlyphNames.name(for: "A") == "A")
+    var (graph, pageID) = try fixture(composite: false)
+    let openType = try #require(Data(base64Encoded: FontFixtureData.cffProgramBase64))
+    let openTypeInfo = try TrueTypeInspector.inspect(openType)
+    let cffTable = try #require(openTypeInfo.tables["CFF "])
+    let bytes = [UInt8](openType)
+    let rawCFF = Data(bytes[cffTable.offset..<cffTable.offset + cffTable.length])
+    let cffFont = try #require(CGFont(CGDataProvider(data: rawCFF as CFData)!))
+
+    guard case .dictionary(var simpleFont)? = graph.objects[PDFObjectID(4)],
+      case .dictionary(var descriptor)? = graph.objects[PDFObjectID(6)]
+    else { Issue.record("Simple CFF fixture font is missing"); return }
+    guard case .array(var widths)? = simpleFont[PDFName("Widths")] else {
+      Issue.record("Simple CFF fixture widths are missing"); return
+    }
+    for (code, name) in [(32, "space"), (65, "A"), (66, "B"), (67, "C")] {
+      let glyph = cffFont.getGlyphWithGlyphName(name: name as CFString)
+      var advance: Int32 = 0
+      #expect(glyph > 0)
+      #expect(cffFont.getGlyphAdvances(glyphs: [glyph], count: 1, advances: &advance))
+      widths[code - 32] = .integer(Int64((Double(advance) * 1_000
+        / Double(cffFont.unitsPerEm)).rounded()))
+    }
+    simpleFont[PDFName("Widths")] = .array(widths)
+    simpleFont[PDFName("Subtype")] = .name(PDFName("Type1"))
+    descriptor[PDFName("FontFile2")] = nil
+    descriptor[PDFName("FontFile3")] = .reference(PDFObjectID(7))
+    graph.objects[PDFObjectID(4)] = .dictionary(simpleFont)
+    graph.objects[PDFObjectID(6)] = .dictionary(descriptor)
+    graph.objects[PDFObjectID(7)] = .stream(PDFStream(
+      dictionary: [PDFName("Subtype"): .name(PDFName("Type1C"))], bytes: rawCFF))
+
+    let profile = try #require(PageTextEditing.fontProfiles(pageID: pageID, in: graph)[PDFName("F1")])
+    let aGlyph = cffFont.getGlyphWithGlyphName(name: "A" as CFString)
+    var aAdvance: Int32 = 0
+    #expect(cffFont.getGlyphAdvances(glyphs: [aGlyph], count: 1, advances: &aAdvance))
+    #expect(profile.glyphs["A"]?.width == Double(aAdvance) * 1_000 / Double(cffFont.unitsPerEm))
+    #expect(profile.previewProgram == nil)
+    let previewFont = try #require(NativeParagraphEditing.fonts(profiles: [PDFName("F1"): profile])[PDFName("F1")])
+    let nativeFont = previewFont as CTFont
+    var characters: [UniChar] = [65, 66, 67]
+    var nativeGlyphs = Array(repeating: CGGlyph(0), count: characters.count)
+    #expect(CTFontGetGlyphsForCharacters(nativeFont, &characters, &nativeGlyphs, characters.count))
+    #expect(nativeGlyphs == [
+      CGGlyph(try #require(profile.glyphs["A"]?.id)),
+      CGGlyph(try #require(profile.glyphs["B"]?.id)),
+      CGGlyph(try #require(profile.glyphs["C"]?.id)),
+    ])
+
+    let target = try #require(targets(graph, pageID: pageID).first { $0.paragraph?.originalText.count == 2 })
+    let paragraph = try #require(target.paragraph)
+    let edited = try PDFEditingEngine.commit(PDFTransaction([
+      RewritePageTextCommand(pageID: pageID, originalText: paragraph.originalText,
+        lines: [.init(text: "CBA ABC", x: target.rect[0], baseline: paragraph.firstBaseline,
+          segments: [.init(text: "CBA ABC", x: target.rect[0], format: paragraph.fragments[0].format)])],
+        fontSize: paragraph.fragments[0].format.size,
+        color: paragraph.fragments[0].format.color,
+        box: .init(x: target.rect[0], firstBaseline: paragraph.firstBaseline,
+          width: target.rect[2] - target.rect[0], lineSpacing: paragraph.lineSpacing))
+    ]), to: graph)
+    #expect(edited.objects[PDFObjectID(7)] == graph.objects[PDFObjectID(7)])
+    let saved = try PDFWriter.write(edited)
+    #expect(PDFDocument(data: saved)?.string?.contains("CBA ABC") == true)
+    let reopened = try targets(PDFParser.parse(saved).graph, pageID: pageID)
+    #expect(reopened.first { $0.paragraph != nil }?.text == "CBA ABC")
   }
 
   @Test @MainActor func macRomanSubsetParagraphReopensWithoutSubstitution() throws {
