@@ -32,7 +32,8 @@ final class PageTextColorPanelController: NSObject {
     self.viewer = viewer
     let rgb = viewer.pageTextStyle.color
     let panel = NSColorPanel.shared
-    panel.color = NSColor(srgbRed: rgb[0], green: rgb[1], blue: rgb[2], alpha: 1)
+    panel.color = NSColor(
+      srgbRed: rgb[0], green: rgb[1], blue: rgb[2], alpha: viewer.pageTextStyle.opacity)
     panel.showsAlpha = false
     panel.isContinuous = true
     panel.setTarget(self)
@@ -264,7 +265,8 @@ final class InlinePageTextCanvas: NSView, NSTextViewDelegate {
       ? rect.maxY - pointSize * 0.8 : rect.minY - resolvedFont.descender)
     style = PageTextStyle(
       fontFamily: family, fontSize: pointSize,
-      color: input?.fillColor ?? viewer.pageTextStyle.color)
+      color: input?.fillColor ?? viewer.pageTextStyle.color,
+      opacity: input?.opacity ?? viewer.pageTextStyle.opacity)
     originalStyle = style
     super.init(frame: viewer.view.bounds)
     autoresizingMask = [.width, .height]
@@ -589,7 +591,8 @@ final class InlinePageTextCanvas: NSView, NSTextViewDelegate {
         descriptor: font.fontDescriptor,
         size: font.pointSize * (style.fontSize / originalStyle.fontSize) * scale) ?? font
     let color = NSColor(
-      srgbRed: style.color[0], green: style.color[1], blue: style.color[2], alpha: 1)
+      srgbRed: style.color[0], green: style.color[1], blue: style.color[2],
+      alpha: style.opacity)
     let selected = textView.selectedRange()
     if let formatting {
       formatting.render(scale: scale,
@@ -702,7 +705,8 @@ final class InlinePageTextCanvas: NSView, NSTextViewDelegate {
   private func publishFormattingSelection() {
     guard let selection = formatting?.selection(isTyping: isTyping), let viewer else { return }
     style = PageTextStyle(fontFamily: selection.format.fontName,
-      fontSize: selection.format.size, color: selection.format.color)
+      fontSize: selection.format.size, color: selection.format.color,
+      opacity: selection.format.opacity)
     if viewer.pageTextStyle != style { viewer.pageTextStyle = style }
     if viewer.pageTextMixedFormatting != selection.mixed { viewer.pageTextMixedFormatting = selection.mixed }
     if viewer.pageTextSelectionScope != selection.scope { viewer.pageTextSelectionScope = selection.scope }

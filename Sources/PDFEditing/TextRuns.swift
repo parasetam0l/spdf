@@ -19,6 +19,7 @@ struct TextRun {
   let leading: Double
   let rise: Double
   let fillColor: [Double]
+  let fillAlpha: Double
   let matrix: [Double]
   /// Graphics transform at this show; kept separate from the text matrix.
   let ctm: [Double]
@@ -45,6 +46,7 @@ enum TextRunIndexer {
     var rise = 0.0
     /// P19-010: the current non-stroking color, so reflow can preserve it.
     var fillColor = [0.0, 0.0, 0.0]
+    var fillAlpha = 1.0
     var ctm = [1.0, 0, 0, 1, 0, 0]
   }
 
@@ -97,7 +99,7 @@ enum TextRunIndexer {
           fontResource: font.resource, fontID: font.fontID, fontSize: state.fontSize,
           charSpacing: state.charSpacing, wordSpacing: state.wordSpacing,
           horizontalScale: state.horizontalScale, leading: state.leading, rise: state.rise,
-          fillColor: state.fillColor,
+          fillColor: state.fillColor, fillAlpha: state.fillAlpha,
           matrix: matrix, ctm: state.ctm, baselineX: matrix[4], baselineY: matrix[5],
           textSpaceOffset: textSpaceOffset, hasKnownOffset: hasKnownOffset))
     }
@@ -171,6 +173,22 @@ enum TextRunIndexer {
           let (c, m, y, k) = (values[0], values[1], values[2], values[3])
           state.fillColor = [(1 - c) * (1 - k), (1 - m) * (1 - k), (1 - y) * (1 - k)]
         }
+      case "gs":
+        guard case .name(let name)? = instruction.operands.first?.value,
+          case .dictionary(let resources)? = FontValue.resolve(
+            page[PDFName("Resources")], in: graph),
+          case .dictionary(let states)? = FontValue.resolve(
+            resources[PDFName("ExtGState")], in: graph),
+          case .dictionary(let stateDictionary)? = FontValue.resolve(states[name], in: graph)
+        else { break }
+        let alpha: Double?
+        switch stateDictionary[PDFName("ca")] {
+        case .integer(let value)?: alpha = Double(value)
+        case .real(let value)?: alpha = value
+        default: alpha = nil
+        }
+        guard let alpha, alpha.isFinite, (0...1).contains(alpha) else { break }
+        state.fillAlpha = alpha
       case "Td", "TD":
         guard let tx = number(instruction.operands.first),
           let ty = number(instruction.operands.count > 1 ? instruction.operands[1] : nil)

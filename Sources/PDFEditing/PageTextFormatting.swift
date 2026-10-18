@@ -86,18 +86,21 @@ public struct PageTextFormat: Sendable, Equatable {
   public var fontName: String { sourceFont?.name ?? font.rawValue }
   public var size: Double
   public var color: [Double]
+  public var opacity: Double
   public init(font: StandardTextFont = .helvetica, size: Double = 12, color: [Double] = [0, 0, 0],
-    sourceFont: PageTextSourceFont? = nil, characterSpacing: Double = 0) {
+    sourceFont: PageTextSourceFont? = nil, characterSpacing: Double = 0, opacity: Double = 1) {
     self.font = font
     self.sourceFont = sourceFont
     self.characterSpacing = characterSpacing
     self.size = size
     self.color = color
+    self.opacity = opacity
   }
   public var isValid: Bool {
     size.isFinite && (2...144).contains(size) && characterSpacing.isFinite
       && abs(characterSpacing) <= 144 && color.count == 3
       && color.allSatisfy { $0.isFinite && (0...1).contains($0) }
+      && opacity.isFinite && (0...1).contains(opacity)
   }
 }
 
@@ -258,13 +261,28 @@ enum PageTextLineWriter {
   static func append(
     _ lines: [PageTextLine], box: PageTextBox?, pageID: PDFObjectID,
     defaultFont: IndexedTextFont?, defaultSize: Double, defaultColor: [Double],
-    clippingRect: [Double]? = nil, in graph: inout PDFGraph
+    defaultOpacity: Double = 1, clippingRect: [Double]? = nil, in graph: inout PDFGraph
   ) throws {
     try validate(lines, box: box)
     try validateFonts(lines, pageID: pageID, in: graph)
+    guard defaultOpacity.isFinite, (0...1).contains(defaultOpacity) else {
+      throw PDFError(.malformed, "Invalid paragraph opacity")
+    }
     // q/Q does not save the current path. Discard any unpainted source
     // path before constructing our own clip, or it could enlarge that clip.
     var bytes = Array("q\nn\n".utf8)
+    var opacityNames: [Double: PDFName] = [:]
+    func registerOpacity(_ opacity: Double) throws -> PDFName? {
+      guard opacity < 0.999 else { return nil }
+      guard opacity.isFinite, (0...1).contains(opacity) else {
+        throw PDFError(.malformed, "Invalid paragraph opacity")
+      }
+      if let existing = opacityNames[opacity] { return existing }
+      guard let name = try AddedContent.registerOpacity(
+        opacity, pageID: pageID, in: &graph) else { return nil }
+      opacityNames[opacity] = name
+      return name
+    }
     if let rect = clippingRect {
       guard rect.count == 4, rect.allSatisfy(\.isFinite), rect[2] > rect[0], rect[3] > rect[1] else {
         throw PDFError(.malformed, "Invalid paragraph clipping region")
@@ -281,7 +299,8 @@ enum PageTextLineWriter {
       {
         try emit(
           codes, x: line.x, baseline: line.baseline, resource: font.resource,
-          size: defaultSize, color: defaultColor, to: &bytes)
+          size: defaultSize, color: defaultColor,
+          opacityName: try registerOpacity(defaultOpacity), to: &bytes)
         count = 1
       } else {
         for segment in line.segments where !segment.text.isEmpty {
@@ -297,7 +316,8 @@ enum PageTextLineWriter {
           try emit(
             codes, x: segment.x, baseline: line.baseline, resource: resource,
             size: segment.format.size, color: segment.format.color,
-            spacing: segment.format.characterSpacing, to: &bytes)
+            spacing: segment.format.characterSpacing,
+            opacityName: try registerOpacity(segment.format.opacity), to: &bytes)
           count += 1
         }
       }
@@ -345,8 +365,12 @@ enum PageTextLineWriter {
 
   private static func emit(
     _ codes: [UInt8], x: Double, baseline: Double, resource: PDFName,
-    size: Double, color: [Double], spacing: Double = 0, to bytes: inout [UInt8]
+    size: Double, color: [Double], spacing: Double = 0, opacityName: PDFName? = nil,
+    to bytes: inout [UInt8]
   ) throws {
+    if let opacityName {
+      bytes += Array("/\(String(decoding: opacityName.bytes, as: UTF8.self)) gs\n".utf8)
+    }
     bytes += Array("\(AnnotationSupport.number(spacing)) Tc\n".utf8)
     bytes += Array(try PDFWriter.serializedValue(.name(resource)))
     bytes += Array(" \(AnnotationSupport.number(size)) Tf\n".utf8)

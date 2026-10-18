@@ -147,11 +147,12 @@ public enum PageTextEditing {
       guard glyphs.count == run.text.unicodeScalars.count,
         glyphs.flatMap(\.codes) == run.rawCodes else { return nil }
       return .init(size: run.fontSize, color: run.fillColor, sourceFont: profile.source,
-        characterSpacing: run.charSpacing)
+        characterSpacing: run.charSpacing, opacity: run.fillAlpha)
     }
     let standard = standard ?? standardResources(pageID: pageID, in: graph)
     guard let face = StandardTextFont(rawValue: family), standard.contains(run.fontResource) else { return nil }
-    return .init(font: face, size: run.fontSize, color: run.fillColor, characterSpacing: run.charSpacing)
+    return .init(font: face, size: run.fontSize, color: run.fillColor,
+      characterSpacing: run.charSpacing, opacity: run.fillAlpha)
   }
   private static func standardResources(pageID: PDFObjectID, in graph: PDFGraph) -> Set<PDFName> {
     guard let content = try? PageContent.load(pageID: pageID, in: graph),

@@ -339,7 +339,8 @@ public final class NativeTextFormatting {
     attributes[.paragraphStyle] = paragraph
     view.typingAttributes = attributes
     view.insertionPointColor = NSColor(
-      srgbRed: typing.color[0], green: typing.color[1], blue: typing.color[2], alpha: 1)
+      srgbRed: typing.color[0], green: typing.color[1], blue: typing.color[2],
+      alpha: typing.opacity)
   }
 
   private func attributes(_ format: PageTextFormat, scale: Double) -> [NSAttributedString
@@ -354,12 +355,13 @@ public final class NativeTextFormatting {
     return [
       Self.key: Self.dictionary(format), .font: font, .kern: format.characterSpacing * scale, .ligature: 0,
       .foregroundColor: NSColor(
-        srgbRed: format.color[0], green: format.color[1], blue: format.color[2], alpha: 1),
+        srgbRed: format.color[0], green: format.color[1], blue: format.color[2],
+        alpha: format.opacity),
     ]
   }
   private static func dictionary(_ format: PageTextFormat) -> NSDictionary {
     var result: [String: Any] = ["font": format.font.rawValue, "size": format.size,
-      "color": format.color, "spacing": format.characterSpacing]
+      "color": format.color, "spacing": format.characterSpacing, "opacity": format.opacity]
     if let source = format.sourceFont {
       result["resource"] = String(decoding: source.resource.bytes, as: UTF8.self)
       result["sourceName"] = source.name
@@ -378,6 +380,7 @@ public final class NativeTextFormatting {
       source = .init(resource: PDFName(resource), name: name)
     } else { source = nil }
     return .init(font: font, size: size, color: color, sourceFont: source,
-      characterSpacing: dictionary["spacing"] as? Double ?? 0)
+      characterSpacing: dictionary["spacing"] as? Double ?? 0,
+      opacity: dictionary["opacity"] as? Double ?? 1)
   }
 }

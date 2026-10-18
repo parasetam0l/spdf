@@ -15,6 +15,18 @@ private final class FormatTestTextView: NSTextView {
 
 @Suite("Native character formatting and saved PDF text")
 struct TextFormattingInteropTests {
+  @Test @MainActor func nativePreviewRetainsConstantTextOpacity() throws {
+    let view = FormatTestTextView(frame: .zero)
+    let format = PageTextFormat(size: 16, opacity: 0.5)
+    let formatting = NativeTextFormatting(
+      view: view, fragments: [.init(text: "Half", format: format)], initial: format)
+    formatting.render(scale: 1, minimumLineSpacing: 19)
+    let color = try #require(
+      view.textStorage?.attribute(
+        .foregroundColor, at: 0, effectiveRange: nil) as? NSColor)
+    #expect(abs(color.alphaComponent - 0.5) < 0.001)
+  }
+
   @Test @MainActor func mixedEmbeddedSubsetsResolvePerCharacterWithoutSubstitution() throws {
     let program = try #require(Data(base64Encoded: FontFixtureData.subsetProgramBase64))
     let inspector = try TrueTypeInspector.inspect(program, requireUnicodeMap: false)

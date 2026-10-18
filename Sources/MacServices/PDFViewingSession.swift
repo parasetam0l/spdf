@@ -59,12 +59,17 @@ public struct PageTextStyle: Sendable, Equatable {
   public var fontFamily: String
   public var fontSize: Double
   public var color: [Double]
+  public var opacity: Double
 
-  public init(fontFamily: String = "Helvetica", fontSize: Double = 12, color: [Double] = [0, 0, 0])
+  public init(
+    fontFamily: String = "Helvetica", fontSize: Double = 12,
+    color: [Double] = [0, 0, 0], opacity: Double = 1
+  )
   {
     self.fontFamily = fontFamily
     self.fontSize = fontSize
     self.color = color
+    self.opacity = opacity
   }
 }
 

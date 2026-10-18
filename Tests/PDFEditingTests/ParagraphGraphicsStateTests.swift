@@ -48,9 +48,23 @@ struct ParagraphGraphicsStateTests {
     #expect(after.last?.fillColor == runs[1].fillColor)
     #expect(edited.objects[PDFObjectID(4)] == graph.objects[PDFObjectID(4)])
 
-    let (alpha, alphaID) = try fixture(["/GS gs /Custom cs", reset, show("AB")],
+    let (alpha, alphaID) = try fixture(["/GS gs", show("AB")],
       state: [PDFName("ca"): .real(0.5)])
-    #expect(try editable(alpha, alphaID) == [false])
+    #expect(try editable(alpha, alphaID) == [true])
+    let alphaRun = try #require(
+      TextRunIndexer.runs(in: PageContent.load(pageID: alphaID, in: alpha), graph: alpha).first)
+    #expect(abs(alphaRun.fillAlpha - 0.5) < 0.0001)
+    let alphaEdit = try PDFEditingEngine.commit(PDFTransaction([
+      RewritePageTextCommand(
+        pageID: alphaID, originalText: [0: alphaRun.text],
+        lines: [.init(text: "CD", x: 42, baseline: 700)],
+        fontSize: 16, color: alphaRun.fillColor)
+    ]), to: alpha)
+    let alphaReopened = try PDFParser.parse(PDFWriter.write(alphaEdit))
+    let alphaRuns = try TextRunIndexer.runs(
+      in: PageContent.load(pageID: alphaID, in: alphaReopened.graph),
+      graph: alphaReopened.graph)
+    #expect(abs((alphaRuns.last?.fillAlpha ?? 0) - 0.5) < 0.0001)
     let (clip, clipID) = try fixture(["0 0 m 30 0 l 0 30 l h W n /Custom cs", reset, show("AB")])
     #expect(try editable(clip, clipID) == [false])
   }

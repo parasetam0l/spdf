@@ -329,7 +329,10 @@ struct WorkspaceTextInspector: View {
     let rgb = viewer.pageTextStyle.color
     return NSImage(size: NSSize(width: 24, height: 16), flipped: false) { rect in
       let path = NSBezierPath(roundedRect: rect.insetBy(dx: 0.5, dy: 0.5), xRadius: 3, yRadius: 3)
-      NSColor(srgbRed: rgb[0], green: rgb[1], blue: rgb[2], alpha: 1).setFill()
+      NSColor(
+        srgbRed: rgb[0], green: rgb[1], blue: rgb[2],
+        alpha: viewer.pageTextStyle.opacity
+      ).setFill()
       path.fill()
       NSColor.separatorColor.setStroke()
       path.lineWidth = 1

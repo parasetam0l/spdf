@@ -31,11 +31,14 @@ public struct TextInputStyle: Sendable, Equatable {
   /// Fill color as RGB components in 0...1 (gray and CMYK already folded to
   /// RGB by the run indexer; default black).
   public let fillColor: [Double]
+  /// Nonstroking constant alpha from the run's ExtGState.
+  public let opacity: Double
 
-  public init(fontFamily: String?, fontSize: Double, fillColor: [Double]) {
+  public init(fontFamily: String?, fontSize: Double, fillColor: [Double], opacity: Double = 1) {
     self.fontFamily = fontFamily
     self.fontSize = fontSize
     self.fillColor = fillColor
+    self.opacity = opacity
   }
 }
 
@@ -191,7 +194,9 @@ public enum TextEditTargeting {
         }
       }
     }
-    return TextInputStyle(fontFamily: family, fontSize: run.fontSize, fillColor: run.fillColor)
+    return TextInputStyle(
+      fontFamily: family, fontSize: run.fontSize, fillColor: run.fillColor,
+      opacity: run.fillAlpha)
   }
 
   static func union(_ bounds: [[Double]]) -> [Double]? {

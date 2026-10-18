@@ -97,7 +97,7 @@ fileprivate struct ParagraphRewriteAnalysis {
     }
     func ordinaryGraphicsState(
       _ instruction: ContentInstruction
-    ) -> (safe: Bool, overprint: Bool)? {
+    ) -> (safe: Bool, overprint: Bool, alpha: Double)? {
       guard instruction.operands.count == 1,
         case .name(let name)? = instruction.operands.first?.value,
         case .dictionary(let resources)? = FontValue.resolve(page[PDFName("Resources")], in: graph),
@@ -105,6 +105,7 @@ fileprivate struct ParagraphRewriteAnalysis {
         case .dictionary(let state)? = FontValue.resolve(states[name], in: graph),
         !state.isEmpty else { return nil }
       var overprint = false
+      var fillAlpha = 1.0
       let safe = state.allSatisfy { key, value in
         switch (key, FontValue.resolve(value, in: graph)) {
         case (PDFName("Type"), .name(PDFName("ExtGState"))?),
@@ -112,9 +113,17 @@ fileprivate struct ParagraphRewriteAnalysis {
           (PDFName("AIS"), .boolean(_)?),
           (PDFName("SMask"), .name(PDFName("None"))?),
           (PDFName("OPM"), .integer(0)?), (PDFName("OPM"), .integer(1)?),
-          (PDFName("SA"), .boolean(_)?),
-          (PDFName("ca"), .integer(1)?), (PDFName("CA"), .integer(1)?),
-          (PDFName("ca"), .real(1)?), (PDFName("CA"), .real(1)?): return true
+          (PDFName("SA"), .boolean(_)?): return true
+        case (PDFName("CA"), .integer(let n)?): return (0...1).contains(n)
+        case (PDFName("CA"), .real(let n)?): return n.isFinite && (0...1).contains(n)
+        case (PDFName("ca"), .integer(let n)?):
+          guard (0...1).contains(n) else { return false }
+          fillAlpha = Double(n)
+          return true
+        case (PDFName("ca"), .real(let n)?):
+          guard n.isFinite, (0...1).contains(n) else { return false }
+          fillAlpha = n
+          return true
         case (PDFName("OP"), .boolean(_)?): return true
         case (PDFName("op"), .boolean(let enabled)?):
           overprint = overprint || enabled
@@ -124,7 +133,7 @@ fileprivate struct ParagraphRewriteAnalysis {
         default: return false
         }
       }
-      return safe ? (true, overprint) : nil
+      return safe ? (true, overprint, fillAlpha) : nil
     }
     guard content.segments.allSatisfy(\.isEditable),
       Set(content.segments.map(\.objectID)).count == content.segments.count else {
@@ -195,7 +204,7 @@ fileprivate struct ParagraphRewriteAnalysis {
     }
     var stack: [(
       unsafe: Bool, unsafeReason: String?, unknownFill: Bool, unknownFillReason: String?,
-      overprint: Bool, mode: Int, ctm: [Double], clip: [Double]?
+      overprint: Bool, fillAlpha: Double, mode: Int, ctm: [Double], clip: [Double]?
     )] = []
     var ctm = [1.0, 0, 0, 1, 0, 0]
     var clip: [Double]?
@@ -212,6 +221,7 @@ fileprivate struct ParagraphRewriteAnalysis {
       unknownFill ? "Unknown initial fill color" : nil
     var mode = 0
     var overprint = false
+    var fillAlpha = 1.0
     var inText = false
     var textClipping = false
     var safe = Set<Int>()
@@ -224,7 +234,8 @@ fileprivate struct ParagraphRewriteAnalysis {
       switch instruction.operatorName {
       case "q":
         stack.append((
-          unsafe, unsafeReason, unknownFill, unknownFillReason, overprint, mode, ctm, clip
+          unsafe, unsafeReason, unknownFill, unknownFillReason, overprint, fillAlpha,
+          mode, ctm, clip
         ))
       case "Q":
         guard let state = stack.popLast() else { throw PDFError(.unsupported, "Unbalanced page graphics state") }
@@ -234,6 +245,7 @@ fileprivate struct ParagraphRewriteAnalysis {
         unknownFill = state.unknownFill
         unknownFillReason = state.unknownFillReason
         overprint = state.overprint
+        fillAlpha = state.fillAlpha
         mode = state.mode; ctm = state.ctm; clip = state.clip
       case "cm":
         if numbers.count == 6, numbers.allSatisfy(\.isFinite) {
@@ -295,6 +307,7 @@ fileprivate struct ParagraphRewriteAnalysis {
       case "gs":
         if let state = ordinaryGraphicsState(instruction) {
           overprint = state.overprint
+          fillAlpha = state.alpha
         } else {
           unsafe = true
           unsafeReason = "Unsupported or unknown ExtGState"
@@ -518,7 +531,9 @@ public struct RewritePageTextCommand: PDFEditCommand, Equatable, Sendable {
       }
     }
     try PageTextLineWriter.append(lines, box: box, pageID: pageID, defaultFont: context.font,
-      defaultSize: fontSize, defaultColor: color, clippingRect: context.clip, in: &result)
+      defaultSize: fontSize, defaultColor: color,
+      defaultOpacity: context.runs.first?.fillAlpha ?? 1,
+      clippingRect: context.clip, in: &result)
     return result
   }
 
