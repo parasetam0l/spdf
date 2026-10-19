@@ -20,6 +20,31 @@ public struct PageTextParagraph: Sendable, Equatable {
 /// native wrapping. A nearby label, heading or column is not enough evidence.
 @MainActor
 public enum NativeParagraphEditing {
+  /// Returns the text-bearing range of a visual line. TextKit includes the
+  /// separator space that caused a soft wrap in the preceding line's range;
+  /// that separator should not be serialized as trailing PDF text. Explicit
+  /// paragraph breaks keep any whitespace entered before the break.
+  public static func lineContentRange(_ range: NSRange, in text: NSString,
+    hasHardBreak: Bool) -> NSRange {
+    var end = NSMaxRange(range)
+    guard range.location >= 0, range.length >= 0, end <= text.length else { return range }
+    while end > range.location {
+      let unit = text.character(at: end - 1)
+      guard unit == 0x0A || unit == 0x0D else { break }
+      end -= 1
+    }
+    if !hasHardBreak {
+      while end > range.location {
+        let unit = text.character(at: end - 1)
+        guard let scalar = UnicodeScalar(unit),
+          CharacterSet.whitespaces.contains(scalar)
+        else { break }
+        end -= 1
+      }
+    }
+    return NSRange(location: range.location, length: end - range.location)
+  }
+
   /// Chooses the paragraph target nearest the pointer when line-sized
   /// candidates overlap. A paragraph still wins over legacy run targets.
   public static func preferredHitTarget(from candidates: [PageTextTarget],

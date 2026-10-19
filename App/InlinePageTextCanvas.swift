@@ -848,17 +848,21 @@ final class InlinePageTextCanvas: NSView, NSTextViewDelegate {
     manager.enumerateLineFragments(forGlyphRange: NSRange(location: 0, length: manager.numberOfGlyphs)) {
       [self] rect, _, _, glyphs, _ in
       let range = manager.characterRange(forGlyphRange: glyphs, actualGlyphRange: nil)
-      let value = text.substring(with: range).trimmingCharacters(in: .newlines)
+      let rawLine = text.substring(with: range)
+      let hard = rawLine.hasSuffix("\n") || rawLine.hasSuffix("\r")
+      let contentRange = NativeParagraphEditing.lineContentRange(
+        range, in: text, hasHardBreak: hard)
+      let value = text.substring(with: contentRange)
       let location = manager.location(forGlyphAt: glyphs.location)
       let native = textView.convert(
         NSPoint(x: rect.minX + location.x, y: rect.minY + location.y), to: viewer.view)
       let point = viewer.view.convert(native, to: page)
       var segments: [PageTextSegment] = []
       if let formatting {
-        var offset = range.location
-        for fragment in formatting.fragments(in: range) {
+        var offset = contentRange.location
+        for fragment in formatting.fragments(in: contentRange) {
           let raw = fragment.text as NSString
-          let cleaned = fragment.text.trimmingCharacters(in: .newlines)
+          let cleaned = fragment.text
           if !cleaned.isEmpty {
             let glyph = manager.glyphIndexForCharacter(at: offset)
             let origin = manager.location(forGlyphAt: glyph)
@@ -869,7 +873,6 @@ final class InlinePageTextCanvas: NSView, NSTextViewDelegate {
           offset += raw.length
         }
       }
-      let hard = text.substring(with: range).hasSuffix("\n") || text.substring(with: range).hasSuffix("\r")
       let breakFormat = hard ? formatting?.fragments(in:
         NSRange(location: NSMaxRange(range) - 1, length: 1)).first?.format : nil
       lines.append(PageTextLine(text: value, x: point.x, baseline: point.y,

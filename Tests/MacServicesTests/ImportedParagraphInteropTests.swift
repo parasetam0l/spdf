@@ -29,6 +29,19 @@ struct ImportedParagraphInteropTests {
     #expect(NativeParagraphEditing.preferredHitTarget(from: [fallback], at: [60, 10]) == fallback)
   }
 
+  @Test @MainActor func softWrapLineRangeDropsOnlyTrailingSeparatorWhitespace() {
+    let text = NSString(string: " alpha \t\r\nbeta")
+    let softRange = NSRange(location: 0, length: 8)
+    let softContent = NativeParagraphEditing.lineContentRange(
+      softRange, in: text, hasHardBreak: false)
+    #expect(text.substring(with: softContent) == " alpha")
+
+    let hardRange = NSRange(location: 0, length: 10)
+    let hardContent = NativeParagraphEditing.lineContentRange(
+      hardRange, in: text, hasHardBreak: true)
+    #expect(text.substring(with: hardContent) == " alpha \t")
+  }
+
   private func fixture(composite: Bool, adjusted: Bool = false) throws -> (PDFGraph, PDFObjectID) {
     let parsed = try PDFParser.parse(PDFFixtures.fontEmbeddedPages())
     let pageID = parsed.pageIDs[0]
