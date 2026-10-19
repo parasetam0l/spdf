@@ -132,7 +132,36 @@ public enum ProvisionedFontStore {
     guard size.isFinite, size > 0,
       let descriptors = CTFontManagerCreateFontDescriptorsFromData(program as CFData)
         as? [CTFontDescriptor], let descriptor = descriptors.first else { return nil }
-    return CTFontCreateWithFontDescriptor(descriptor, size, nil)
+    let font = CTFontCreateWithFontDescriptor(descriptor, size, nil)
+    guard let inspector = try? TrueTypeInspector.inspect(program, requireUnicodeMap: false) else {
+      return nil
+    }
+    guard inspector.tables["fvar"] != nil else { return font }
+
+    // The PDF subsetter writes the source program's base glyf/hmtx tables and
+    // drops variation tables. Measure the variable font at those same default
+    // axis values, rather than inheriting a named instance such as Noto Sans
+    // Thin from CoreText's first descriptor.
+    guard let axes = CTFontCopyVariationAxes(font) as? [[CFString: Any]], !axes.isEmpty else {
+      return nil
+    }
+    var defaults: [NSNumber: NSNumber] = [:]
+    for axis in axes {
+      guard let identifier = axis[kCTFontVariationAxisIdentifierKey] as? NSNumber,
+        let value = axis[kCTFontVariationAxisDefaultValueKey] as? NSNumber
+      else { return nil }
+      defaults[identifier] = value
+    }
+    guard defaults.count == axes.count else { return nil }
+    let attributes = [kCTFontVariationAttribute as String: defaults] as CFDictionary
+    let defaultDescriptor = CTFontDescriptorCreateCopyWithAttributes(descriptor, attributes)
+    let defaultFont = CTFontCreateWithFontDescriptor(defaultDescriptor, size, nil)
+    guard let current = CTFontCopyVariation(defaultFont) as? [NSNumber: NSNumber] else { return nil }
+    guard defaults.allSatisfy({ identifier, value in
+      guard let active = current[identifier] else { return true }
+      return active.doubleValue == value.doubleValue
+    }) else { return nil }
+    return defaultFont
   }
 
   private static func digest(_ data: Data) -> String {

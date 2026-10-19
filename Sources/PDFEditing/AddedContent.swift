@@ -407,8 +407,12 @@ public enum AddedContent {
     descriptor[PDFName("FontFile2")] = PDFValue.reference(fileID)
     graph.objects[fontID] = .dictionary(fontDictionary)
     graph.objects[descriptorID] = .dictionary(descriptor)
-    graph.objects[fileID] = .stream(written.fontFile)
-    graph.objects[cmapID] = .stream(written.toUnicode)
+    var fontFile = written.fontFile
+    fontFile.dictionary[PDFName("Length")] = .integer(Int64(fontFile.bytes.count))
+    graph.objects[fileID] = .stream(fontFile)
+    var toUnicode = written.toUnicode
+    toUnicode.dictionary[PDFName("Length")] = .integer(Int64(toUnicode.bytes.count))
+    graph.objects[cmapID] = .stream(toUnicode)
     try addResources(
       [name: .reference(fontID)], kind: "Font", pageID: pageID, in: &graph,
       resourceOwner: resourceOwner)

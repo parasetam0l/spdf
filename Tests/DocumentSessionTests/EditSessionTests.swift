@@ -367,6 +367,32 @@ struct EditSessionTests {
     #expect(try session.bytesForSave() == edited)
   }
 
+  @Test func customFontParagraphRewriteSavesIncrementally() throws {
+    let original = try PDFFixtures.importedParagraphPages()
+    let session = DocumentEditSession()
+    session.load(try PDFSource(data: original))
+    let pageID = try #require(session.pageIDs.first)
+    let program = try #require(Data(base64Encoded: FontFixtureData.subsetProgramBase64))
+    let custom = CustomTextFont(program: program, familyName: "DejaVuSans")
+    let format = PageTextFormat(size: 16, customFont: custom)
+    let line = PageTextLine(text: "ABC", x: 42, baseline: 700,
+      segments: [PageTextSegment(text: "ABC", x: 42, format: format)])
+    let box = PageTextBox(x: 42, firstBaseline: 700, width: 330, lineSpacing: 22,
+      wraps: false)
+    try session.apply(PDFTransaction([
+      RewritePageTextCommand(pageID: pageID,
+        originalText: [1: "This imported paragraph keeps its"], lines: [line],
+        fontSize: 16, color: [0, 0, 0], box: box)
+    ]))
+
+    let saved = try session.bytesForSave()
+    #expect(saved.starts(with: original))
+    let parsed = try PDFParser.parse(saved)
+    let pageContent = try PageContent.load(pageID: pageID, in: parsed.graph)
+    let runs = try TextRunIndexer.runs(in: pageContent, graph: parsed.graph)
+    #expect(runs.contains { $0.text == "ABC" })
+  }
+
   @Test func structuralEditsRefreshPageListAndUndoExactly() throws {
     let original = try PDFFixtures.threePages()
     let session = DocumentEditSession()
