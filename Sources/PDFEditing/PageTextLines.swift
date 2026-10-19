@@ -583,9 +583,13 @@ public struct RewritePageTextCommand: PDFEditCommand, Equatable, Sendable {
     for line in lines {
       var spans: [(minX: Double, maxX: Double, size: Double)] = []
       if line.segments.isEmpty {
-        if let measured = bounds(
-          of: line.text, font: defaultFont, size: defaultFontSize, spacing: 0)
-        {
+        if !line.text.isEmpty {
+          guard let measured = bounds(
+            of: line.text, font: defaultFont, size: defaultFontSize, spacing: 0)
+          else {
+            throw PDFError(.unsupported,
+              "Cannot safely check this edit against nearby text because output glyph widths are unavailable")
+          }
           spans.append((line.x + measured.min, line.x + measured.max, defaultFontSize))
         }
       } else {
@@ -594,8 +598,8 @@ public struct RewritePageTextCommand: PDFEditCommand, Equatable, Sendable {
             let measured = bounds(of: segment.text, font: segmentFont,
               size: segment.format.size, spacing: segment.format.characterSpacing)
           else {
-            spans.removeAll()
-            break
+            throw PDFError(.unsupported,
+              "Cannot safely check this edit against nearby text because output glyph widths are unavailable")
           }
           spans.append((segment.x + measured.min, segment.x + measured.max, segment.format.size))
         }
