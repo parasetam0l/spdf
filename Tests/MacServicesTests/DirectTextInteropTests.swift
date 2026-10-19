@@ -108,6 +108,42 @@ struct DirectTextInteropTests {
     #expect(throws: PDFError.self) { try repeatedCommand.validate(in: repeated) }
   }
 
+  @Test @MainActor func paragraphRewriteMeasuresAStandardFontAddedByFormatting() throws {
+    let originalText = "Original paragraph"
+    let (original, pageID) = try graph(content: """
+      BT /SPDFText 16 Tf 42 700 Td (\(originalText)) Tj ET
+      BT /SPDFText 16 Tf 42 660 Td (Independent neighbor) Tj ET
+      """)
+    let regular = PageTextFormat(font: .helvetica, size: 16)
+    let emphasized = PageTextFormat(
+      font: .timesBoldItalic, size: 18, color: [0.8, 0.1, 0.2])
+    let standardAdvance = try #require(
+      NativeParagraphEditing.standardAdvance(originalText, family: "Helvetica", size: 16))
+    let replacement = PageTextLine(text: "Keep these words.", x: 42, baseline: 700,
+      segments: [
+        .init(text: "Keep ", x: 42, format: regular),
+        .init(text: "these words.", x: 80, format: emphasized),
+      ])
+    let command = RewritePageTextCommand(pageID: pageID, originalText: [0: originalText],
+      lines: [replacement], fontSize: 16, color: [0, 0, 0],
+      standardFontAdvances: [0: standardAdvance])
+    let edited = try PDFEditingEngine.commit(PDFTransaction([command]), to: original)
+    let reader = try #require(PDFDocument(data: PDFWriter.write(edited)))
+    #expect(reader.string?.contains("Keep these words.") == true)
+    #expect(reader.string?.contains("Independent neighbor") == true)
+
+    let collision = RewritePageTextCommand(pageID: pageID, originalText: [0: originalText],
+      lines: [PageTextLine(text: replacement.text, x: 42, baseline: 660,
+        segments: replacement.segments)], fontSize: 16, color: [0, 0, 0],
+      standardFontAdvances: [0: standardAdvance])
+    do {
+      try collision.validate(in: original)
+      Issue.record("A formatted paragraph overlapped an independent text block")
+    } catch let error as PDFError {
+      #expect(error.message.contains("overlap another text block"))
+    }
+  }
+
   @Test @MainActor func nativeParagraphGroupingRequiresAFullWrappingRoundTrip() throws {
     let font = try #require(NSFont(name: "Helvetica", size: 16))
     let text = "A natural paragraph can be edited directly on the page with automatic wrapping and predictable saved line positions."

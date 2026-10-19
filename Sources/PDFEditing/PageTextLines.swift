@@ -522,43 +522,67 @@ public struct RewritePageTextCommand: PDFEditCommand, Equatable, Sendable {
       throw PDFError(.malformed, "Missing text page")
     }
 
-    func bounds(of text: String, font: IndexedTextFont, size: Double, spacing: Double)
+    var standardFontsByName: [String: CTFont] = [:]
+    func standardFont(named name: String) -> CTFont {
+      if let font = standardFontsByName[name] { return font }
+      let font = CTFontCreateWithName(name as CFString, 1_000, nil)
+      standardFontsByName[name] = font
+      return font
+    }
+
+    func standardWidths(of text: String, family: String) -> [Double]? {
+      guard Self.standardFonts.contains(family), StandardTextFont(rawValue: family) != nil,
+        StandardTextFont.canEncode(text)
+      else { return nil }
+      let characters = Array(text.utf16)
+      guard characters.count == text.unicodeScalars.count else { return nil }
+      let font = standardFont(named: family)
+      var glyphs = [CGGlyph](repeating: 0, count: characters.count)
+      guard CTFontGetGlyphsForCharacters(font, characters, &glyphs, characters.count),
+        glyphs.allSatisfy({ $0 != 0 }) else { return nil }
+      var advances = [CGSize](repeating: .zero, count: glyphs.count)
+      _ = CTFontGetAdvancesForGlyphs(font, .horizontal, glyphs, &advances, glyphs.count)
+      guard advances.allSatisfy({ $0.width.isFinite && $0.width >= 0 }) else { return nil }
+      return advances.map { $0.width.rounded() }
+    }
+
+    func bounds(of text: String, font: IndexedTextFont?, standardFamily: String? = nil,
+      size: Double, spacing: Double)
       -> (min: Double, max: Double)?
     {
-      guard size.isFinite, size > 0, spacing.isFinite,
-        let codes = font.encode(text), let glyphs = font.glyphs(codes), !glyphs.isEmpty
-      else { return text.isEmpty ? (0, 0) : nil }
-      let standardFamily = font.baseFont.split(separator: "+", maxSplits: 1).last.map(String.init)
-      let isCanonicalStandard = analysis.runs.indices.contains { index in
-        analysis.standardIndices.contains(index) && analysis.runs[index].fontResource == font.resource
-      }
-      let standardWidths: [Double]?
-      if glyphs.contains(where: { $0.width == nil }), isCanonicalStandard,
-        let standardFamily, Self.standardFonts.contains(standardFamily)
-      {
-        let characters = glyphs.flatMap { Array($0.text.utf16) }
-        guard characters.count == glyphs.count else { return nil }
-        let standardFont = CTFontCreateWithName(standardFamily as CFString, 1_000, nil)
-        var standardGlyphs = [CGGlyph](repeating: 0, count: characters.count)
-        guard CTFontGetGlyphsForCharacters(
-          standardFont, characters, &standardGlyphs, characters.count) else { return nil }
-        var standardAdvances = [CGSize](repeating: .zero, count: standardGlyphs.count)
-        let totalAdvance = CTFontGetAdvancesForGlyphs(
-          standardFont, .horizontal, standardGlyphs, &standardAdvances, standardGlyphs.count)
-        guard totalAdvance.isFinite, standardAdvances.allSatisfy({ $0.width.isFinite }) else {
+      guard size.isFinite, size > 0, spacing.isFinite else { return nil }
+      if text.isEmpty { return (0, 0) }
+      let widths: [Double]
+      if let font {
+        guard let codes = font.encode(text), let glyphs = font.glyphs(codes), !glyphs.isEmpty else {
           return nil
         }
-        standardWidths = standardAdvances.map { $0.width.rounded() }
+        if glyphs.contains(where: { $0.width == nil }) {
+          let family = font.baseFont.split(separator: "+", maxSplits: 1).last.map(String.init)
+          let isCanonicalStandard = analysis.runs.indices.contains { index in
+            analysis.standardIndices.contains(index) && analysis.runs[index].fontResource == font.resource
+          }
+          guard isCanonicalStandard, let family, Self.standardFonts.contains(family) else {
+            return nil
+          }
+          let glyphText = glyphs.map(\.text).joined()
+          guard let measured = standardWidths(of: glyphText, family: family),
+            measured.count == glyphs.count else { return nil }
+          widths = measured
+        } else {
+          widths = glyphs.compactMap(\.width)
+        }
+      } else if let standardFamily, let measured = standardWidths(of: text, family: standardFamily) {
+        widths = measured
       } else {
-        standardWidths = nil
+        return nil
       }
+      guard !widths.isEmpty else { return nil }
       var pen = 0.0
       var minimum = 0.0
       var maximum = 0.0
-      for (index, glyph) in glyphs.enumerated() {
-        guard let width = glyph.width ?? standardWidths?[index], width.isFinite, width >= 0 else {
-          return nil
-        }
+      for width in widths {
+        guard width.isFinite, width >= 0 else { return nil }
         let glyphEnd = pen + width * size / 1_000
         minimum = min(minimum, min(pen, glyphEnd))
         maximum = max(maximum, max(pen, glyphEnd))
@@ -570,14 +594,8 @@ public struct RewritePageTextCommand: PDFEditCommand, Equatable, Sendable {
     }
 
     func font(for format: PageTextFormat) -> IndexedTextFont? {
-      if let source = format.sourceFont {
-        return IndexedTextFont.resolve(resource: source.resource, page: page, in: graph)
-      }
-      return analysis.fonts.values.first {
-        $0.baseFont == format.font.rawValue
-          || $0.baseFont.split(separator: "+", maxSplits: 1).last.map(String.init)
-            == format.font.rawValue
-      }
+      guard let source = format.sourceFont else { return nil }
+      return IndexedTextFont.resolve(resource: source.resource, page: page, in: graph)
     }
 
     func measuredBounds(for glyph: TextCluster) -> (bounds: [Double], hasAdvance: Bool)? {
@@ -596,15 +614,15 @@ public struct RewritePageTextCommand: PDFEditCommand, Equatable, Sendable {
         run.charSpacing.isFinite, run.wordSpacing.isFinite,
         run.horizontalScale.isFinite
       else { return (glyph.bounds, false) }
-      let standardFont = CTFontCreateWithName(family as CFString, 1_000, nil)
+      let coreTextFont = standardFont(named: family)
       var standardGlyphs = [CGGlyph](repeating: 0, count: characters.count)
       guard CTFontGetGlyphsForCharacters(
-        standardFont, characters, &standardGlyphs, characters.count) else {
+        coreTextFont, characters, &standardGlyphs, characters.count) else {
         return (glyph.bounds, false)
       }
       var advances = [CGSize](repeating: .zero, count: standardGlyphs.count)
       let totalAdvance = CTFontGetAdvancesForGlyphs(
-        standardFont, .horizontal, standardGlyphs, &advances, standardGlyphs.count)
+        coreTextFont, .horizontal, standardGlyphs, &advances, standardGlyphs.count)
       guard totalAdvance.isFinite, let width = advances.first?.width,
         width.isFinite, width >= 0 else { return (glyph.bounds, false) }
       let spacing = run.charSpacing + (glyph.code == 32 ? run.wordSpacing : 0)
@@ -649,8 +667,10 @@ public struct RewritePageTextCommand: PDFEditCommand, Equatable, Sendable {
         }
       } else {
         for segment in line.segments where !segment.text.isEmpty {
-          guard let segmentFont = font(for: segment.format),
-            let measured = bounds(of: segment.text, font: segmentFont,
+          let segmentFont = font(for: segment.format)
+          let standardFamily = segment.format.sourceFont == nil ? segment.format.font.rawValue : nil
+          guard let measured = bounds(of: segment.text, font: segmentFont,
+              standardFamily: standardFamily,
               size: segment.format.size, spacing: segment.format.characterSpacing)
           else {
             throw PDFError(.unsupported,
