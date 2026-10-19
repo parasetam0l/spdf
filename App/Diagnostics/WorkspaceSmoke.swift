@@ -41,6 +41,10 @@
   /// Regressions for blank authoring, AppKit sizing and retained window closure.
   @MainActor
   enum WorkspaceSmoke {
+    private static func checkpoint(_ name: String) {
+      FileHandle.standardError.write(Data("[workspace] \(name)\n".utf8))
+    }
+
     private static func checkCommandScroll(_ viewer: PDFViewingSession, window: NSWindow) async throws {
       let originalScale = viewer.view.scaleFactor
       let originalPage = viewer.pageNumber
@@ -73,7 +77,9 @@
     private static func checkGraphicWorkflow(output: URL) async throws {
       let controller = NSDocumentController.shared
       let old = Set(controller.documents.map(ObjectIdentifier.init))
+      checkpoint("creating image workflow document")
       controller.newDocument(nil)
+      checkpoint("image workflow document created")
       guard let document = controller.documents.first(where: { !old.contains(ObjectIdentifier($0)) }) as? SPDFDocument,
         let viewer = document.viewer, let window = document.windowControllers.first?.window,
         let content = window.contentView else { throw PDFError(.malformed, "Missing image workspace") }
@@ -106,6 +112,7 @@
       guard targets.count == preexisting.count + 2 else {
         throw PDFError(.malformed, "Second image placement failed")
       }
+      checkpoint("image placements inserted")
       func find(_ root: NSView) -> GraphicSelectionOverlayView? {
         if let overlay = root as? GraphicSelectionOverlayView { return overlay }
         return root.subviews.lazy.compactMap { find($0) }.first
@@ -198,6 +205,7 @@
       guard Set((viewer.graphicsListProvider?(0) ?? []).map(\.identity)) == preexisting,
         document.undoEdit(),
         try document.editSession.bytesForSave() == baseline else { throw PDFError(.malformed, "Atomic image Delete/Undo failed") }
+      checkpoint("image movement and resize checks passed")
       viewer.selectGraphics([viewer.graphicsListProvider!(0)[0]])
       let unrotated = viewer.selectedGraphicBounds!
       viewer.onRotateGraphic?(viewer.selectedGraphics[0])
@@ -226,6 +234,7 @@
         document.save(to: saved, ofType: "com.adobe.pdf", for: .saveAsOperation) { continuation.resume(returning: $0) }
       }
       if let error { throw error }
+      checkpoint("image workflow save returned")
       let expected = viewer.selectedGraphics
       let sourceBytes = try Data(contentsOf: saved)
       document.close()
@@ -234,6 +243,7 @@
       defer { reopened.close() }
       guard reopened.viewer?.graphicsListProvider?(0) == expected,
         PDFDocument(data: sourceBytes)?.pageCount == 1 else { throw PDFError(.malformed, "Saved image geometry changed after reopening") }
+      checkpoint("image workflow reopen passed")
       guard let again = reopened.viewer else { throw PDFError(.malformed, "Missing reopened image viewer") }
       _ = again.activateTool(.imageEdit)
       again.selectGraphics(again.graphicsListProvider!(0))
@@ -296,6 +306,7 @@
         !propertyDocument.isDocumentEdited else {
         throw PDFError(.malformed, "One Save omitted the numeric property draft or left a second unsaved edit")
       }
+      checkpoint("image property save passed")
       try JSONSerialization.data(withJSONObject: ["status": "passed", "objects": expected.map {
         ["id": $0.streamID.number, "rect": $0.rect] as [String: Any]
       }, "checks": "insert, exact properties, safe Select, first-drag move, Shift-selection, shared resize, Escape, keyboard, Delete/Undo, alignment, Save and reopen"],
@@ -510,7 +521,9 @@
     static func checks(output: URL) async throws -> [String: Any] {
       let controller = NSDocumentController.shared
       let previous = Set(controller.documents.map(ObjectIdentifier.init))
+      checkpoint("creating blank workspace document")
       controller.newDocument(nil)
+      checkpoint("blank workspace document created")
       guard
         let document = controller.documents.first(where: {
           !previous.contains(ObjectIdentifier($0))
@@ -546,6 +559,7 @@
       guard viewer.view.document?.string?.contains("Workspace authoring regression") == true else {
         throw PDFError(.malformed, "Redo did not restore visible text")
       }
+      checkpoint("blank authoring save and undo passed")
 
       // Clicking selects a block without putting a caret into it. A selected
       // block can move, cancel and enter native marked-text input independently.
@@ -638,6 +652,7 @@
       else {
         throw PDFError(.malformed, "Native composition cancellation changed the document")
       }
+      checkpoint("selection and IME workflow passed")
 
       let paragraphText = "A natural paragraph can be edited directly on the page with automatic wrapping and predictable saved line positions."
       guard let paragraphFont = NSFont(name: "Helvetica", size: 16) else {
@@ -714,6 +729,7 @@
       guard try document.editSession.bytesForSave() == paragraphEdited else {
         throw PDFError(.malformed, "Paragraph Redo did not restore the exact edited layout")
       }
+      checkpoint("paragraph edit and undo passed")
       guard let repeatPage = viewer.view.document?.page(at: 0),
         let repeatSelection = viewer.view.document?.findString(
           expectedLines[0].text.trimmingCharacters(in: .whitespaces), withOptions: []).first
@@ -859,6 +875,7 @@
         throw PDFError(.malformed, "Whole-box formatting shortcut or Turkish layout failed")
       }
       savedCanvas.cancel()
+      checkpoint("character formatting passed")
 
       window.setContentSize(NSSize(width: 960, height: 650))
       try await Task.sleep(for: .milliseconds(150))
@@ -971,7 +988,9 @@
         KeyboardAudit.find("Check for Updates…") != nil
       else { throw PDFError(.malformed, "Settings/menu structure regression") }
       settings.close()
+      checkpoint("workspace sizing and settings passed")
       try await checkGraphicWorkflow(output: output)
+      checkpoint("image workflow passed")
       return [
         "graphicWorkflow": "insert, properties, preview, selection, shared resize, cancel, keyboard, delete, alignment, save/reopen",
         "directTextSelection":
