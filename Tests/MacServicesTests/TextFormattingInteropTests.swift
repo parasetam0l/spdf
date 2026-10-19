@@ -68,6 +68,45 @@ struct TextFormattingInteropTests {
     #expect(refused.attributedText == nil)
   }
 
+  @Test @MainActor func embeddedParagraphFontsAreSelectableOnlyForCoveredText() throws {
+    let program = try #require(Data(base64Encoded: FontFixtureData.subsetProgramBase64))
+    let inspector = try TrueTypeInspector.inspect(program, requireUnicodeMap: false)
+    let first = PageTextSourceFont(resource: PDFName("TT1"), name: "DejaVuSans")
+    let second = PageTextSourceFont(resource: PDFName("TT2"), name: "DejaVuSans")
+    let glyphA = PageTextFontProfile.Glyph(
+      id: inspector.unicodeToGlyph[0x41]!, width: 700, codes: [0x41])
+    let glyphB = PageTextFontProfile.Glyph(
+      id: inspector.unicodeToGlyph[0x42]!, width: 700, codes: [0x42])
+    let firstProfile = PageTextFontProfile(
+      source: first, program: program, glyphs: ["A": glyphA, "B": glyphB])
+    let secondProfile = PageTextFontProfile(source: second, program: program, glyphs: ["A": glyphA])
+    let original = PageTextFormat(size: 16, sourceFont: first)
+    let view = FormatTestTextView(frame: .zero)
+    let formatting = NativeTextFormatting(
+      view: view,
+      fragments: [
+        .init(text: "AB", format: original),
+        .init(text: "A", format: PageTextFormat(size: 16, sourceFont: second)),
+      ], initial: original,
+      profiles: [first.resource: firstProfile, second.resource: secondProfile])
+    formatting.render(scale: 1, minimumLineSpacing: 19)
+
+    view.setSelectedRange(NSRange(location: 0, length: 2))
+    #expect(formatting.availableSourceFonts(isTyping: true) == [first])
+    let before = formatting.fragments()
+    #expect(formatting.apply(.sourceFont(second), isTyping: true) != nil)
+    #expect(formatting.fragments() == before)
+
+    view.setSelectedRange(NSRange(location: 0, length: 1))
+    #expect(formatting.availableSourceFonts(isTyping: true) == [first, second])
+    #expect(formatting.apply(.sourceFont(second), isTyping: true) == nil)
+    #expect(formatting.fragments() == [
+      .init(text: "A", format: PageTextFormat(size: 16, sourceFont: second)),
+      .init(text: "B", format: original),
+      .init(text: "A", format: PageTextFormat(size: 16, sourceFont: second)),
+    ])
+  }
+
   @Test @MainActor func selectedWordsKeepIndependentStylesAndFormattingUndo() throws {
     let view = FormatTestTextView(frame: .zero)
     view.history.groupsByEvent = false
@@ -201,6 +240,30 @@ struct TextFormattingInteropTests {
     #expect(try AuthoredPageTextBoxes.read(pageID: pageID, in: updated).count == 1)
     #expect(
       PDFDocument(data: try PDFWriter.write(updated))?.string?.contains("Next paragraph.") == true)
+  }
+
+  @Test func selectedEmbeddedFontCanBeReusedInSavedParagraph() throws {
+    let parsed = try PDFParser.parse(BlankPDF.data())
+    let pageID = parsed.pageIDs[0]
+    let program = try #require(Data(base64Encoded: FontFixtureData.subsetProgramBase64))
+    let embedded = try PDFEditingEngine.commit(PDFTransaction([
+      AddTextObjectCommand(pageID: pageID, rect: [48, 680, 200, 710], text: "AB",
+        customFont: CustomTextFont(program: program, familyName: "DejaVuSans"))
+    ]), to: parsed.graph)
+    let profiles = try PageTextEditing.fontProfiles(pageID: pageID, in: embedded)
+    let profile = try #require(profiles.values.first { $0.glyphs["B"] != nil })
+    let format = PageTextFormat(size: 14, sourceFont: profile.source)
+    let box = PageTextBox(x: 48, firstBaseline: 640, width: 200, lineSpacing: 18, wraps: false)
+    let line = PageTextLine(text: "B", x: 48, baseline: 640,
+      segments: [.init(text: "B", x: 48, format: format)])
+    let edited = try PDFEditingEngine.commit(PDFTransaction([
+      AddPageTextLinesCommand(pageID: pageID, lines: [line], box: box)
+    ]), to: embedded)
+    let reopened = try PDFParser.parse(PDFWriter.write(edited))
+    let record = try #require(AuthoredPageTextBoxes.read(pageID: pageID, in: reopened.graph).first)
+
+    #expect(record.fragments == [.init(text: "B", format: format)])
+    #expect(record.fragments.first?.format.sourceFont == profile.source)
   }
 
   @Test @MainActor func authoredWrappedLinesReconstructSoftSeparators() throws {

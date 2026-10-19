@@ -709,6 +709,10 @@ final class InlinePageTextCanvas: NSView, NSTextViewDelegate {
       opacity: selection.format.opacity)
     if viewer.pageTextStyle != style { viewer.pageTextStyle = style }
     if viewer.pageTextMixedFormatting != selection.mixed { viewer.pageTextMixedFormatting = selection.mixed }
+    let availableFonts = formatting?.availableSourceFonts(isTyping: isTyping) ?? []
+    if viewer.pageTextAvailableSourceFonts != availableFonts {
+      viewer.pageTextAvailableSourceFonts = availableFonts
+    }
     if viewer.pageTextSelectionScope != selection.scope { viewer.pageTextSelectionScope = selection.scope }
     viewer.canChangePageTextTraits = !selection.usesSourceFont
   }
@@ -807,6 +811,7 @@ final class InlinePageTextCanvas: NSView, NSTextViewDelegate {
     viewer?.pageTextWidthApplier = nil
     viewer?.pageTextFormattingApplier = nil
     viewer?.pageTextMixedFormatting = []
+    viewer?.pageTextAvailableSourceFonts = []
     viewer?.pageTextFormattingIssue = nil
     viewer?.canFormatPageText = false
     viewer?.canChangePageTextTraits = true
