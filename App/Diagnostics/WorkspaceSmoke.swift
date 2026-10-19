@@ -743,13 +743,16 @@
         viewer.view.convert(NSPoint(x: repeatBounds.midX, y: repeatBounds.midY), from: repeatPage), to: nil)
       overlay.mouseDown(with: try mouse(.leftMouseDown, point: repeatPointer))
       overlay.mouseUp(with: try mouse(.leftMouseUp, point: repeatPointer))
+      checkpoint("character formatting box reselected")
       guard let formatted = findCanvas(content) else {
         throw PDFError(.malformed, "Missing character-formatting canvas")
       }
       formatted.beginTyping()
+      checkpoint("character formatting typing started")
       let styledText = "\nKeep these words in a different style. The rest of this paragraph keeps its own font and wraps naturally.\n\nNext paragraph keeps its blank line."
       formatted.textView.insertText(styledText, replacementRange:
         NSRange(location: 0, length: (formatted.textView.string as NSString).length))
+      checkpoint("character formatting text inserted")
       // This diagnostic runs inside one asynchronous launch task rather than
       // separate AppKit input events. Explicitly delimit its format actions.
       formatted.textView.breakUndoCoalescing()
@@ -759,6 +762,7 @@
       formatted.textView.typingUndo.groupsByEvent = false
       formatted.setTextWidth(287.125)
       formatted.textView.setSelectedRange((styledText as NSString).range(of: "these words"))
+      checkpoint("character formatting selection set")
       func formatKey(_ key: String, code: UInt16) throws -> NSEvent {
         guard let event = NSEvent.keyEvent(with: .keyDown, location: .zero,
           modifierFlags: .command, timestamp: ProcessInfo.processInfo.systemUptime,
@@ -771,9 +775,11 @@
         formatted.textView.performKeyEquivalent(with: try formatKey("i", code: 34)) else {
         throw PDFError(.malformed, "Native formatting shortcuts were not handled")
       }
+      checkpoint("character formatting shortcuts passed")
       viewer.pageTextFormattingApplier?(.family(.times))
       viewer.pageTextFormattingApplier?(.size(18))
       viewer.pageTextFormattingApplier?(.color([0.8, 0.1, 0.2]))
+      checkpoint("character formatting inspector styles applied")
       func emphasizedSegments() -> [PageTextSegment] {
         formatted.pageLines().flatMap(\.segments).filter { $0.text.contains("these words") }
       }
@@ -783,6 +789,7 @@
         viewer.pageTextSelectionScope == "Selected characters" else {
         throw PDFError(.malformed, "Selected-word formatting lost its traits or scope")
       }
+      checkpoint("character formatting selected-word verification passed")
       formatted.textView.typingUndo.undo()
       guard emphasizedSegments().first?.format.color == [0, 0, 0] else {
         throw PDFError(.malformed, "Native formatting Undo did not restore color independently")
@@ -791,8 +798,10 @@
       guard emphasizedSegments().first?.format == emphasized.format else {
         throw PDFError(.malformed, "Native formatting Redo did not restore all traits")
       }
+      checkpoint("character formatting typing undo and redo passed")
       formatted.textView.setSelectedRange((styledText as NSString).range(of: "\n\n"))
       viewer.pageTextFormattingApplier?(.size(26))
+      checkpoint("character formatting blank paragraph styled")
       let styledLines = formatted.pageLines()
       let styledBox = formatted.pageBox()
       guard styledLines.contains(where: { $0.text.isEmpty && $0.endsParagraph }),
@@ -811,9 +820,11 @@
         }
       ], options: [.prettyPrinted, .sortedKeys])
         .write(to: output.appendingPathComponent("formatting-native-lines.json"))
+      checkpoint("character formatting layout verified; committing")
       guard formatted.commit() else {
         throw PDFError(.malformed, "Formatted paragraph did not commit")
       }
+      checkpoint("character formatting commit returned")
       let styledBytes = try document.editSession.bytesForSave()
       try styledBytes.write(to: output.appendingPathComponent("formatting-after.pdf"))
       let styledParsed = try PDFParser.parse(styledBytes)
@@ -827,10 +838,12 @@
         throw PDFError(.malformed, "Saved formatted box lost text, styles, breaks or exact width")
       }
       document.undoEdit()
+      checkpoint("character formatting document undo returned")
       guard try document.editSession.bytesForSave() == paragraphEdited else {
         throw PDFError(.malformed, "Document Undo lost the complete unformatted paragraph")
       }
       document.redoEdit()
+      checkpoint("character formatting document redo returned")
       guard try document.editSession.bytesForSave() == styledBytes else {
         throw PDFError(.malformed, "Document Redo changed the formatted PDF bytes")
       }
@@ -843,6 +856,7 @@
         NSPoint(x: styledBounds.midX, y: styledBounds.midY), from: styledLivePage), to: nil)
       overlay.mouseDown(with: try mouse(.leftMouseDown, point: styledPointer))
       overlay.mouseUp(with: try mouse(.leftMouseUp, point: styledPointer))
+      checkpoint("character formatting saved box reselected")
       guard let savedCanvas = findCanvas(content), !viewer.hasPendingPageTextChanges,
         viewer.pageTextMixedFormatting.contains("size") else {
         throw PDFError(.malformed, "Reselecting a styled box changed it or lost mixed formatting")
@@ -861,6 +875,7 @@
       inspector.contentView = NSHostingView(rootView: WorkspaceTextInspector(viewer: viewer))
       inspector.makeKeyAndOrderFront(nil)
       try await Task.sleep(for: .milliseconds(150))
+      checkpoint("character formatting inspector opened")
       guard !viewer.hasPendingPageTextChanges,
         savedCanvas.pageLines().flatMap(\.segments).contains(where: {
           $0.text == "these words" && $0.format == emphasized.format
@@ -874,6 +889,7 @@
         savedCanvas.performKeyEquivalent(with: try formatKey("ı", code: 34)) else {
         throw PDFError(.malformed, "Whole-box formatting shortcut or Turkish layout failed")
       }
+      checkpoint("character formatting keyboard workflow passed")
       savedCanvas.cancel()
       checkpoint("character formatting passed")
 
