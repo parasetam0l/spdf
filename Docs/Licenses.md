@@ -11,6 +11,6 @@ First-party source and original synthetic assets are licensed under the [MIT Lic
 
 Test fixtures and development tools are not packaged into the application. Their provenance is recorded in `Tests/Fixtures/Manifest.md`.
 
-The app does not bundle downloaded Google Fonts. Font provisioning uses official endpoints only on user action, shows the applicable license, and installs into the user's font directory. Fonts embedded in a user's document retain their own rights and restrictions.
+The app does not bundle downloaded Google Fonts. Font provisioning uses official endpoints only on user action, shows the applicable license, and installs into the user's font directory after the user accepts it. Only unchanged app-installed TrueType files with embedding permission are offered for inline PDF editing; selected glyphs are embedded as subsets. Fonts embedded in a user's document retain their own rights and restrictions.
 
 Third-party materials retain their original terms; the project's MIT license does not replace them.
