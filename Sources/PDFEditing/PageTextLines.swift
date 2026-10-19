@@ -492,7 +492,107 @@ public struct RewritePageTextCommand: PDFEditCommand, Equatable, Sendable {
       throw PDFError(.unsupported, "The PDF font cannot encode the replacement characters")
     }
     let clip = try analysis.clippingRect(for: originalText.keys.sorted())
+    try Self.validateNoTextCollisions(
+      lines, selectedRunIndices: Set(originalText.keys), pageID: pageID,
+      graph: graph, analysis: analysis, defaultFont: font, defaultFontSize: fontSize)
     return (content, selected, font, advances, clip)
+  }
+
+  /// Refuse a replacement when its measured text box would cover text outside
+  /// the selected runs. Reconstructed paragraph blocks can contain both
+  /// selected and unselected runs, so collision checks operate at glyph level.
+  private static func validateNoTextCollisions(
+    _ lines: [PageTextLine], selectedRunIndices: Set<Int>, pageID: PDFObjectID,
+    graph: PDFGraph, analysis: ParagraphRewriteAnalysis, defaultFont: IndexedTextFont,
+    defaultFontSize: Double
+  ) throws {
+    guard !lines.isEmpty else { return }
+    let layout: PageTextLayout
+    do {
+      layout = try PageTextLayout.build(in: analysis.content, graph: graph)
+    } catch {
+      throw PDFError(.unsupported, "Cannot check the edited paragraph against nearby text")
+    }
+    let independentGlyphs = layout.clusters.filter {
+      !selectedRunIndices.contains($0.runIndex)
+    }
+    guard !independentGlyphs.isEmpty else { return }
+    guard case .dictionary(let page)? = graph.objects[pageID] else {
+      throw PDFError(.malformed, "Missing text page")
+    }
+
+    func bounds(of text: String, font: IndexedTextFont, size: Double, spacing: Double)
+      -> (min: Double, max: Double)?
+    {
+      guard size.isFinite, size > 0, spacing.isFinite,
+        let codes = font.encode(text), let glyphs = font.glyphs(codes), !glyphs.isEmpty
+      else { return text.isEmpty ? (0, 0) : nil }
+      var pen = 0.0
+      var minimum = 0.0
+      var maximum = 0.0
+      for glyph in glyphs {
+        guard let width = glyph.width, width.isFinite, width >= 0 else { return nil }
+        let glyphEnd = pen + width * size / 1_000
+        minimum = min(minimum, min(pen, glyphEnd))
+        maximum = max(maximum, max(pen, glyphEnd))
+        pen = glyphEnd + spacing
+        minimum = min(minimum, pen)
+        maximum = max(maximum, pen)
+      }
+      return (minimum, maximum)
+    }
+
+    func font(for format: PageTextFormat) -> IndexedTextFont? {
+      if let source = format.sourceFont {
+        return IndexedTextFont.resolve(resource: source.resource, page: page, in: graph)
+      }
+      return analysis.fonts.values.first {
+        $0.baseFont == format.font.rawValue
+          || $0.baseFont.split(separator: "+", maxSplits: 1).last.map(String.init)
+            == format.font.rawValue
+      }
+    }
+
+    for line in lines {
+      var spans: [(minX: Double, maxX: Double, size: Double)] = []
+      if line.segments.isEmpty {
+        if let measured = bounds(
+          of: line.text, font: defaultFont, size: defaultFontSize, spacing: 0)
+        {
+          spans.append((line.x + measured.min, line.x + measured.max, defaultFontSize))
+        } else if !line.text.isEmpty {
+          throw PDFError(.unsupported,
+            "Cannot safely check this edit against nearby text because glyph widths are unavailable")
+        }
+      } else {
+        for segment in line.segments where !segment.text.isEmpty {
+          guard let segmentFont = font(for: segment.format),
+            let measured = bounds(of: segment.text, font: segmentFont,
+              size: segment.format.size, spacing: segment.format.characterSpacing)
+          else {
+            throw PDFError(.unsupported,
+              "Cannot safely check this edit against nearby text because glyph widths are unavailable")
+          }
+          spans.append((segment.x + measured.min, segment.x + measured.max, segment.format.size))
+        }
+      }
+      guard let minX = spans.map(\.minX).min(), let maxX = spans.map(\.maxX).max(),
+        let size = spans.map(\.size).max(), maxX > minX else { continue }
+      let editedBounds = [minX, line.baseline - size * 0.2, maxX, line.baseline + size * 0.85]
+      for glyph in independentGlyphs {
+        let other = glyph.bounds
+        guard other.count == 4, other.allSatisfy(\.isFinite) else { continue }
+        let overlapX = min(editedBounds[2], other[2]) - max(editedBounds[0], other[0])
+        let overlapY = min(editedBounds[3], other[3]) - max(editedBounds[1], other[1])
+        if glyph.advance == nil, overlapY > 0.5 {
+          throw PDFError(.unsupported,
+            "Cannot safely check this edit against nearby text because glyph widths are unavailable")
+        }
+        guard overlapX > 0.5, overlapY > 0.5 else { continue }
+        throw PDFError(.unsupported,
+          "This edit would overlap another text block. Shorten the text or choose a wider area.")
+      }
+    }
   }
 
   public func apply(to graph: PDFGraph) throws -> PDFGraph {
