@@ -203,6 +203,26 @@ struct TextFormattingInteropTests {
       PDFDocument(data: try PDFWriter.write(updated))?.string?.contains("Next paragraph.") == true)
   }
 
+  @Test @MainActor func authoredWrappedLinesReconstructSoftSeparators() throws {
+    let parsed = try PDFParser.parse(BlankPDF.data())
+    let pageID = parsed.pageIDs[0]
+    let format = PageTextFormat(size: 16)
+    let lines = [
+      PageTextLine(text: "First visual line", x: 48, baseline: 700,
+        segments: [.init(text: "First visual line", x: 48, format: format)]),
+      PageTextLine(text: "second wrapped line", x: 48, baseline: 676,
+        segments: [.init(text: "second wrapped line", x: 48, format: format)]),
+    ]
+    let box = PageTextBox(x: 48, firstBaseline: 700, width: 200, lineSpacing: 24, wraps: true)
+    let graph = try PDFEditingEngine.commit(PDFTransaction([
+      AddPageTextLinesCommand(pageID: pageID, lines: lines, box: box)
+    ]), to: parsed.graph)
+    let reopened = try PDFParser.parse(PDFWriter.write(graph))
+    let record = try #require(AuthoredPageTextBoxes.read(pageID: pageID, in: reopened.graph).first)
+
+    #expect(record.fragments.map(\.text).joined() == "First visual line second wrapped line")
+  }
+
   @Test @MainActor func standardFontWriterKeepsCombinedTraitsForAllFamilies() throws {
     for family: AddedTextStyle.Family in [.helvetica, .times, .courier] {
       let parsed = try PDFParser.parse(BlankPDF.data())

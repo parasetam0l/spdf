@@ -155,12 +155,20 @@ public struct AuthoredPageTextBox: Sendable {
   public var fragments: [PageTextFragment] {
     var result: [PageTextFragment] = []
     let fallback = lines.lazy.flatMap(\.segments).first?.format
-    for line in lines {
+    for (index, line) in lines.enumerated() {
       result += line.segments.map { PageTextFragment(text: $0.text, format: $0.format) }
       if line.endsParagraph,
         let format = line.breakFormat ?? line.segments.last?.format ?? fallback
       {
         result.append(.init(text: "\n", format: format))
+      } else if box.wraps, index + 1 < lines.count, !line.text.hasSuffix("-"),
+        line.text.last?.isWhitespace != true,
+        let format = line.segments.last?.format ?? fallback
+      {
+        // A soft line break is a layout boundary, not a paragraph boundary.
+        // Keep its separator in the editable string even though the PDF line
+        // itself must not end in serialized whitespace.
+        result.append(.init(text: " ", format: format))
       }
     }
     return result
