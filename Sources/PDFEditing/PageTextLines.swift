@@ -1,4 +1,5 @@
 import Foundation
+import CoreText
 import PDFCore
 
 /// A line laid out by the platform text engine, in PDF page coordinates.
@@ -527,11 +528,37 @@ public struct RewritePageTextCommand: PDFEditCommand, Equatable, Sendable {
       guard size.isFinite, size > 0, spacing.isFinite,
         let codes = font.encode(text), let glyphs = font.glyphs(codes), !glyphs.isEmpty
       else { return text.isEmpty ? (0, 0) : nil }
+      let standardFamily = font.baseFont.split(separator: "+", maxSplits: 1).last.map(String.init)
+      let isCanonicalStandard = analysis.runs.indices.contains { index in
+        analysis.standardIndices.contains(index) && analysis.runs[index].fontResource == font.resource
+      }
+      let standardWidths: [Double]?
+      if glyphs.contains(where: { $0.width == nil }), isCanonicalStandard,
+        let standardFamily, Self.standardFonts.contains(standardFamily)
+      {
+        let characters = glyphs.flatMap { Array($0.text.utf16) }
+        guard characters.count == glyphs.count else { return nil }
+        let standardFont = CTFontCreateWithName(standardFamily as CFString, 1_000, nil)
+        var standardGlyphs = [CGGlyph](repeating: 0, count: characters.count)
+        guard CTFontGetGlyphsForCharacters(
+          standardFont, characters, &standardGlyphs, characters.count) else { return nil }
+        var standardAdvances = [CGSize](repeating: .zero, count: standardGlyphs.count)
+        let totalAdvance = CTFontGetAdvancesForGlyphs(
+          standardFont, .horizontal, standardGlyphs, &standardAdvances, standardGlyphs.count)
+        guard totalAdvance.isFinite, standardAdvances.allSatisfy({ $0.width.isFinite }) else {
+          return nil
+        }
+        standardWidths = standardAdvances.map { $0.width.rounded() }
+      } else {
+        standardWidths = nil
+      }
       var pen = 0.0
       var minimum = 0.0
       var maximum = 0.0
-      for glyph in glyphs {
-        guard let width = glyph.width, width.isFinite, width >= 0 else { return nil }
+      for (index, glyph) in glyphs.enumerated() {
+        guard let width = glyph.width ?? standardWidths?[index], width.isFinite, width >= 0 else {
+          return nil
+        }
         let glyphEnd = pen + width * size / 1_000
         minimum = min(minimum, min(pen, glyphEnd))
         maximum = max(maximum, max(pen, glyphEnd))
@@ -560,9 +587,6 @@ public struct RewritePageTextCommand: PDFEditCommand, Equatable, Sendable {
           of: line.text, font: defaultFont, size: defaultFontSize, spacing: 0)
         {
           spans.append((line.x + measured.min, line.x + measured.max, defaultFontSize))
-        } else if !line.text.isEmpty {
-          throw PDFError(.unsupported,
-            "Cannot safely check this edit against nearby text because glyph widths are unavailable")
         }
       } else {
         for segment in line.segments where !segment.text.isEmpty {
@@ -570,8 +594,8 @@ public struct RewritePageTextCommand: PDFEditCommand, Equatable, Sendable {
             let measured = bounds(of: segment.text, font: segmentFont,
               size: segment.format.size, spacing: segment.format.characterSpacing)
           else {
-            throw PDFError(.unsupported,
-              "Cannot safely check this edit against nearby text because glyph widths are unavailable")
+            spans.removeAll()
+            break
           }
           spans.append((segment.x + measured.min, segment.x + measured.max, segment.format.size))
         }
