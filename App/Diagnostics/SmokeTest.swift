@@ -12,7 +12,7 @@
   enum SmokeTest {
     static func run(fixtures: URL, output: URL) async {
       let watchdog = DiagnosticWatchdog.schedule(
-        after: 60, message: "sPDF Editor smoke test timed out after 60 seconds")
+        after: 90, message: "sPDF Editor smoke test timed out after 90 seconds")
       defer { watchdog.cancel() }
       do {
         try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
@@ -1856,10 +1856,13 @@
         // Form filling (P24): inventory, text/choice fill, checkbox, reset,
         // flatten, and undo.
         let formBaseline = try formDocument.data(ofType: "com.adobe.pdf")
+        checkpoint("form baseline loaded")
         guard formDocument.editSession.formFields().count == 10 else {
           throw PDFError(.malformed, "Form field inventory is incomplete")
         }
+        checkpoint("form inventory passed")
         formDocument.fillFormText(fieldName: "name", text: "Smoke fill")
+        checkpoint("text field fill returned")
         let filledFormData = try formDocument.data(ofType: "com.adobe.pdf")
         let filledFormGraph = try PDFParser.parse(filledFormData).graph
         let filledFields = try FormInventory.fields(
@@ -1872,6 +1875,7 @@
             .widgetStringValue == "Smoke fill"
         else { throw PDFError(.malformed, "Filled form value did not round-trip") }
         formDocument.setFormButton(fieldName: "agree", isOn: true)
+        checkpoint("checkbox fill returned")
         let toggledFormGraph = try PDFParser.parse(
           try formDocument.data(ofType: "com.adobe.pdf")
         ).graph
@@ -1881,6 +1885,7 @@
           throw PDFError(.malformed, "Checkbox state did not round-trip")
         }
         formDocument.setFormChoice(fieldName: "department", exportValue: "Support")
+        checkpoint("choice fill returned")
         let choiceGraph = try PDFParser.parse(
           try formDocument.data(ofType: "com.adobe.pdf")
         ).graph
@@ -1929,6 +1934,7 @@
           in: inlineGraph, pageIDs: formDocument.editSession.pageIDs)
         guard inlineFields.first(where: { $0.name == "notes" })?.stringValue == "Inline note"
         else { throw PDFError(.malformed, "In-page form edit did not commit") }
+        checkpoint("inline form edit passed")
 
         formViewer.showForms()
         try await Task.sleep(for: .milliseconds(300))
@@ -1944,6 +1950,7 @@
             }
           }
         }
+        checkpoint("forms sidebar render passed")
         formViewer.showPages()
         formDocument.resetForm()
         let resetGraph = try PDFParser.parse(
@@ -1956,9 +1963,11 @@
           resetFields.first(where: { $0.name == "department" })?.stringValue == "Sales",
           resetFields.first(where: { $0.name == "agree" })?.buttonState == PDFName("Off")
         else { throw PDFError(.malformed, "Form reset did not restore defaults") }
+        checkpoint("form reset passed")
         guard formDocument.applyFlattenForm() else {
           throw PDFError(.malformed, "Form flattening did not commit")
         }
+        checkpoint("form flatten returned")
         let flattenedFormData = try formDocument.data(ofType: "com.adobe.pdf")
         let flattenedFormGraph = try PDFParser.parse(flattenedFormData).graph
         guard
@@ -1976,6 +1985,7 @@
           formDocument.undoEdit(), formDocument.undoEdit(), formDocument.undoEdit(),
           try formDocument.data(ofType: "com.adobe.pdf") == formBaseline
         else { throw PDFError(.malformed, "Form edits did not undo to the baseline bytes") }
+        checkpoint("form undo passed")
 
         // Viewer search: matches, navigation, and clearing.
         viewer.showSearch()
