@@ -217,32 +217,22 @@ public enum AddedContent {
   ) throws -> PDFName {
     let owner = resourceOwner ?? pageID
     let base = family.baseFont(bold: bold, italic: italic)
-    var existing: Set<String> = []
-    if let resources = try pageResources(pageID: owner, in: graph),
-      case .dictionary(let fonts)? = resources[PDFName("Font")]
-    {
-      existing = Set(fonts.keys.map { String(decoding: $0.bytes, as: UTF8.self) })
-    }
+    let fonts = try pageResourceCategory("Font", ownerID: owner, in: graph) ?? [:]
     // Reuse an identical standard font when one is already registered.
-    if case .dictionary(let fonts)? = (try pageResources(pageID: owner, in: graph))?[
-      PDFName("Font")],
-      !fonts.isEmpty
-    {
-      for (name, value) in fonts {
-        guard case .reference(let id) = value,
-          case .dictionary(let dictionary)? = graph.objects[id],
-          case .name(let baseFont)? = dictionary[PDFName("BaseFont")],
-          String(decoding: baseFont.bytes, as: UTF8.self) == base,
-          dictionary[PDFName("Subtype")] == .name(PDFName("Type1")),
-          dictionary[PDFName("Widths")] == nil,
-          dictionary[PDFName("ToUnicode")] == nil,
-          dictionary[PDFName("FontDescriptor")] == nil,
-          // Only reuse a font with the WinAnsi encoding this writer needs;
-          // an existing StandardEncoding resource cannot carry accents.
-          dictionary[PDFName("Encoding")] == .name(PDFName("WinAnsiEncoding"))
-        else { continue }
-        return name
-      }
+    for (name, value) in fonts {
+      guard case .reference(let id) = value,
+        case .dictionary(let dictionary)? = graph.objects[id],
+        case .name(let baseFont)? = dictionary[PDFName("BaseFont")],
+        String(decoding: baseFont.bytes, as: UTF8.self) == base,
+        dictionary[PDFName("Subtype")] == .name(PDFName("Type1")),
+        dictionary[PDFName("Widths")] == nil,
+        dictionary[PDFName("ToUnicode")] == nil,
+        dictionary[PDFName("FontDescriptor")] == nil,
+        // Only reuse a font with the WinAnsi encoding this writer needs;
+        // an existing StandardEncoding resource cannot carry accents.
+        dictionary[PDFName("Encoding")] == .name(PDFName("WinAnsiEncoding"))
+      else { continue }
+      return name
     }
     let name = try uniqueFontName(
       prefix: "SPDFF", pageID: pageID, in: graph, resourceOwner: resourceOwner)
@@ -267,12 +257,8 @@ public enum AddedContent {
     resourceOwner: PDFObjectID? = nil
   ) throws -> PDFName {
     let owner = resourceOwner ?? pageID
-    var existing: Set<String> = []
-    if let resources = try pageResources(pageID: owner, in: graph),
-      case .dictionary(let fonts)? = resources[PDFName("Font")]
-    {
-      existing = Set(fonts.keys.map { String(decoding: $0.bytes, as: UTF8.self) })
-    }
+    let fonts = try pageResourceCategory("Font", ownerID: owner, in: graph) ?? [:]
+    let existing = Set(fonts.keys.map { String(decoding: $0.bytes, as: UTF8.self) })
     var counter = 1
     var name = PDFName("\(prefix)\(counter)")
     while existing.contains(String(decoding: name.bytes, as: UTF8.self)) {
@@ -431,12 +417,8 @@ public enum AddedContent {
   ) throws -> PDFName? {
     guard opacity < 0.999 else { return nil }
     let clamped = max(0.01, min(opacity, 1))
-    var existing: Set<String> = []
-    if case .dictionary(let states)? = (try pageResources(pageID: pageID, in: graph))?[
-      PDFName("ExtGState")]
-    {
-      existing = Set(states.keys.map { String(decoding: $0.bytes, as: UTF8.self) })
-    }
+    let states = try pageResourceCategory("ExtGState", ownerID: pageID, in: graph) ?? [:]
+    let existing = Set(states.keys.map { String(decoding: $0.bytes, as: UTF8.self) })
     var counter = 1
     var name = PDFName("SPDFGS\(counter)")
     while existing.contains(String(decoding: name.bytes, as: UTF8.self)) {
@@ -475,15 +457,31 @@ public enum AddedContent {
     }
   }
 
+  static func pageResourceCategory(
+    _ kind: String, ownerID: PDFObjectID, in graph: PDFGraph
+  ) throws -> [PDFName: PDFValue]? {
+    guard let resources = try pageResources(pageID: ownerID, in: graph),
+      let category = resources[PDFName(kind)] else { return nil }
+    guard case .dictionary(let entries)? = FontValue.resolve(category, in: graph) else {
+      throw PDFError(.malformed, "Page resource category is malformed")
+    }
+    return entries
+  }
+
   static func addResources(
     _ entries: [PDFName: PDFValue], kind: String, pageID: PDFObjectID, in graph: inout PDFGraph,
     resourceOwner: PDFObjectID? = nil
   ) throws {
     let owner = resourceOwner ?? pageID
-    func merged(_ resources: [PDFName: PDFValue]) -> [PDFName: PDFValue] {
+    func merged(_ resources: [PDFName: PDFValue]) throws -> [PDFName: PDFValue] {
       var resources = resources
       var existing: [PDFName: PDFValue] = [:]
-      if case .dictionary(let dictionary)? = resources[PDFName(kind)] { existing = dictionary }
+      if let category = resources[PDFName(kind)] {
+        guard case .dictionary(let dictionary)? = FontValue.resolve(category, in: graph) else {
+          throw PDFError(.malformed, "Page resource category is malformed")
+        }
+        existing = dictionary
+      }
       for (name, value) in entries { existing[name] = value }
       resources[PDFName(kind)] = .dictionary(existing)
       return resources
@@ -493,12 +491,14 @@ public enum AddedContent {
     }
     switch ownerDict[PDFName("Resources")] {
     case .dictionary(let resources)?:
-      ownerDict[PDFName("Resources")] = .dictionary(merged(resources))
+      ownerDict[PDFName("Resources")] = .dictionary(try merged(resources))
     case .reference(let id)?:
       guard case .dictionary(let resources)? = graph.objects[id] else {
         throw PDFError(.malformed, "Page resources are missing")
       }
-      graph.objects[id] = .dictionary(merged(resources))
+      let copyID = nextObjectID(in: graph)
+      graph.objects[copyID] = .dictionary(try merged(resources))
+      ownerDict[PDFName("Resources")] = .reference(copyID)
     case nil, .null?:
       ownerDict[PDFName("Resources")] = .dictionary([
         PDFName(kind): .dictionary(entries)

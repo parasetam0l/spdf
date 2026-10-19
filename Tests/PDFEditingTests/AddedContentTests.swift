@@ -49,6 +49,77 @@ struct AddedContentTests {
     #expect(graph.objects.keys.count < edited.objects.keys.count)
   }
 
+  @Test func textWriterPreservesIndirectSharedResourceCategories() throws {
+    var graph = PDFFixtures.graph(pages: 2)
+    let pages = try PDFPageTree.pageIDs(in: graph)
+    let firstID = (graph.objects.keys.map(\.number).max() ?? 0) + 1
+    let fontMapID = PDFObjectID(firstID)
+    let stateID = PDFObjectID(firstID + 1)
+    let stateMapID = PDFObjectID(firstID + 2)
+    let resourcesID = PDFObjectID(firstID + 3)
+    graph.objects[fontMapID] = .dictionary([
+      PDFName("F1"): .reference(PDFObjectID(3)),
+      PDFName("SPDFF1"): .reference(PDFObjectID(3)),
+    ])
+    graph.objects[stateID] = .dictionary([
+      PDFName("Type"): .name(PDFName("ExtGState")),
+      PDFName("ca"): .real(1),
+      PDFName("CA"): .real(1),
+    ])
+    graph.objects[stateMapID] = .dictionary([
+      PDFName("SPDFGS1"): .reference(stateID)
+    ])
+    graph.objects[resourcesID] = .dictionary([
+      PDFName("Font"): .reference(fontMapID),
+      PDFName("ExtGState"): .reference(stateMapID),
+    ])
+    for pageID in pages {
+      guard case .dictionary(var page)? = graph.objects[pageID] else {
+        Issue.record("Fixture page missing")
+        return
+      }
+      page[PDFName("Resources")] = .reference(resourcesID)
+      graph.objects[pageID] = .dictionary(page)
+    }
+    let sharedResources = graph.objects[resourcesID]
+    let sharedFonts = graph.objects[fontMapID]
+    let sharedStates = graph.objects[stateMapID]
+    let format = PageTextFormat(font: .timesBold, size: 12, opacity: 0.5)
+    let line = PageTextLine(text: "mixed", x: 72, baseline: 700,
+      segments: [PageTextSegment(text: "mixed", x: 72, format: format)])
+    let edited = try PDFEditingEngine.commit(
+      PDFTransaction([
+        AddPageTextLinesCommand(pageID: pages[0], lines: [line],
+          box: PageTextBox(x: 72, firstBaseline: 700, width: 200, lineSpacing: 14, wraps: false))
+      ]), to: graph)
+
+    guard case .dictionary(let firstPage)? = edited.objects[pages[0]],
+      case .reference(let privateResourcesID)? = firstPage[PDFName("Resources")],
+      let fonts = try AddedContent.pageResourceCategory("Font", ownerID: pages[0], in: edited),
+      let states = try AddedContent.pageResourceCategory("ExtGState", ownerID: pages[0], in: edited),
+      case .dictionary(let secondPage)? = edited.objects[pages[1]]
+    else {
+      Issue.record("Edited page resource dictionaries missing")
+      return
+    }
+    #expect(privateResourcesID != resourcesID)
+    #expect(edited.objects[resourcesID] == sharedResources)
+    #expect(edited.objects[fontMapID] == sharedFonts)
+    #expect(edited.objects[stateMapID] == sharedStates)
+    #expect(secondPage[PDFName("Resources")] == .reference(resourcesID))
+    #expect(fonts[PDFName("F1")] == .reference(PDFObjectID(3)))
+    #expect(fonts[PDFName("SPDFF1")] == .reference(PDFObjectID(3)))
+    #expect(fonts[PDFName("SPDFF2")] != nil)
+    #expect(states[PDFName("SPDFGS1")] == .reference(stateID))
+    #expect(states[PDFName("SPDFGS2")] != nil)
+    guard case .dictionary(let updatedPage)? = edited.objects[pages[0]] else {
+      Issue.record("Edited page missing")
+      return
+    }
+    #expect(IndexedTextFont.resolve(resource: PDFName("F1"), page: updatedPage, in: edited) != nil)
+    #expect(IndexedTextFont.resolve(resource: PDFName("SPDFF2"), page: updatedPage, in: edited) != nil)
+  }
+
   @Test func textAlignmentAndClipping() throws {
     let graph = try graph()
     let pageID = try PDFPageTree.pageIDs(in: graph)[0]
