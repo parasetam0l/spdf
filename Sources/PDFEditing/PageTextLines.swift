@@ -580,6 +580,61 @@ public struct RewritePageTextCommand: PDFEditCommand, Equatable, Sendable {
       }
     }
 
+    func measuredBounds(for glyph: TextCluster) -> (bounds: [Double], hasAdvance: Bool)? {
+      guard glyph.bounds.count == 4, glyph.bounds.allSatisfy(\.isFinite) else { return nil }
+      if glyph.advance != nil { return (glyph.bounds, true) }
+      guard analysis.runs.indices.contains(glyph.runIndex),
+        analysis.standardIndices.contains(glyph.runIndex)
+      else { return (glyph.bounds, false) }
+      let run = analysis.runs[glyph.runIndex]
+      guard let font = analysis.fonts[run.fontResource],
+        let family = font.baseFont.split(separator: "+", maxSplits: 1).last.map(String.init),
+        Self.standardFonts.contains(family)
+      else { return (glyph.bounds, false) }
+      let characters = Array(glyph.text.utf16)
+      guard characters.count == 1, run.fontSize.isFinite, run.fontSize > 0,
+        run.charSpacing.isFinite, run.wordSpacing.isFinite,
+        run.horizontalScale.isFinite
+      else { return (glyph.bounds, false) }
+      let standardFont = CTFontCreateWithName(family as CFString, 1_000, nil)
+      var standardGlyphs = [CGGlyph](repeating: 0, count: characters.count)
+      guard CTFontGetGlyphsForCharacters(
+        standardFont, characters, &standardGlyphs, characters.count) else {
+        return (glyph.bounds, false)
+      }
+      var advances = [CGSize](repeating: .zero, count: standardGlyphs.count)
+      let totalAdvance = CTFontGetAdvancesForGlyphs(
+        standardFont, .horizontal, standardGlyphs, &advances, standardGlyphs.count)
+      guard totalAdvance.isFinite, let width = advances.first?.width,
+        width.isFinite, width >= 0 else { return (glyph.bounds, false) }
+      let spacing = run.charSpacing + (glyph.code == 32 ? run.wordSpacing : 0)
+      let advance = (width * run.fontSize / 1_000 + spacing) * run.horizontalScale / 100
+      guard advance.isFinite else { return (glyph.bounds, false) }
+      let matrix = TextCanvasSupport.concatenate(run.ctm, run.matrix)
+      guard matrix.count == 6, matrix.allSatisfy(\.isFinite) else {
+        return (glyph.bounds, false)
+      }
+      let textX = glyph.origin[0] - matrix[4] - run.rise * matrix[2]
+      let textY = glyph.origin[1] - matrix[5] - run.rise * matrix[3]
+      let position: Double
+      if abs(matrix[0]) > 1e-9 {
+        position = textX / matrix[0]
+      } else if abs(matrix[1]) > 1e-9 {
+        position = textY / matrix[1]
+      } else {
+        return (glyph.bounds, false)
+      }
+      guard position.isFinite else { return (glyph.bounds, false) }
+      let measured = PageTextLayout.composedBounds(
+        matrix: matrix, position: position, advance: advance,
+        em: run.fontSize, descent: 0, rise: run.rise)
+      guard measured.allSatisfy(\.isFinite) else { return (glyph.bounds, false) }
+      return ([
+        min(glyph.bounds[0], measured[0]), min(glyph.bounds[1], measured[1]),
+        max(glyph.bounds[2], measured[2]), max(glyph.bounds[3], measured[3]),
+      ], true)
+    }
+
     for line in lines {
       var spans: [(minX: Double, maxX: Double, size: Double)] = []
       if line.segments.isEmpty {
@@ -608,11 +663,11 @@ public struct RewritePageTextCommand: PDFEditCommand, Equatable, Sendable {
         let size = spans.map(\.size).max(), maxX > minX else { continue }
       let editedBounds = [minX, line.baseline - size * 0.2, maxX, line.baseline + size * 0.85]
       for glyph in independentGlyphs {
-        let other = glyph.bounds
-        guard other.count == 4, other.allSatisfy(\.isFinite) else { continue }
+        let measured = measuredBounds(for: glyph)
+        guard let other = measured?.bounds else { continue }
         let overlapX = min(editedBounds[2], other[2]) - max(editedBounds[0], other[0])
         let overlapY = min(editedBounds[3], other[3]) - max(editedBounds[1], other[1])
-        if glyph.advance == nil, overlapY > 0.5 {
+        if measured?.hasAdvance == false, overlapY > 0.5 {
           throw PDFError(.unsupported,
             "Cannot safely check this edit against nearby text because glyph widths are unavailable")
         }
