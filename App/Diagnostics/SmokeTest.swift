@@ -2010,6 +2010,7 @@
         guard viewer.searchMatchCount == 0 else {
           throw PDFError(.malformed, "Viewer search did not clear")
         }
+        checkpoint("viewer search passed")
 
         // Recovery (P10): snapshot a dirty document, restore its bytes, and
         // discard after an explicit decision.
@@ -2028,6 +2029,7 @@
         guard try first.recoveryStore.latest(for: recoveryKey) == nil else {
           throw PDFError(.malformed, "Recovery discard did not clear the record")
         }
+        checkpoint("recovery passed")
 
         // P10-012: external modification detection before overwriting.
         if let firstURL = first.fileURL {
@@ -2037,6 +2039,7 @@
             throw PDFError(.malformed, "External modification was not detected")
           }
         }
+        checkpoint("external modification check passed")
 
         // P27: region redaction removes targeted text and paints a fill;
         // sanitization writes a full rewrite with no earlier revisions.
@@ -2071,6 +2074,7 @@
         guard try first.data(ofType: "com.adobe.pdf") == redactionBaseline else {
           throw PDFError(.malformed, "Redaction undo did not restore the baseline bytes")
         }
+        checkpoint("redaction and sanitization passed")
 
         // P28-016–P28-019: export an AES-256 encrypted copy and verify it
         // through the owned core and the independent reader.
@@ -2098,6 +2102,7 @@
         else {
           throw PDFError(.malformed, "The encrypted export did not round-trip through the core")
         }
+        checkpoint("encrypted export passed")
 
         // P30-016–P30-020/P30-026: sign the clean document through the app
         // path with a temporary keychain identity and validate the output.
@@ -2125,6 +2130,7 @@
         guard signedValidation.crypto == .valid, signedValidation.trust == .trusted else {
           throw PDFError(.malformed, "The signed copy failed validation")
         }
+        checkpoint("digital signing passed")
 
         // P31: lossless optimization shrinks a copy without changing text,
         // and an already-optimized input is never rewritten.
@@ -2154,6 +2160,7 @@
         guard try Data(contentsOf: firstURL) == originalThreePages else {
           throw PDFError(.malformed, "Optimization modified the original document")
         }
+        checkpoint("optimization passed")
 
         // P32: compare the three-page document against the one-page fixture,
         // verify the change list, write the local report, and capture a
@@ -2181,6 +2188,7 @@
         } else {
           throw PDFError(.malformed, "The rendered difference image was empty")
         }
+        checkpoint("document comparison passed")
 
         // P32-002/P32-003/P32-005/P32-008/P32-021: the comparison workspace
         // follows the mapping, navigates changes, corrects pairs manually,
@@ -2243,8 +2251,10 @@
         } else {
           throw PDFError(.malformed, "The comparison window was not found")
         }
+        checkpoint("comparison workspace passed")
 
         let workspaceRepairs = try await WorkspaceSmoke.checks(output: output)
+        checkpoint("workspace repair smoke passed")
         let report: [String: Any] = [
           "workspaceRepairs": workspaceRepairs,
           "status": "passed", "app": "sPDF Editor", "windows": controller.documents.count,
