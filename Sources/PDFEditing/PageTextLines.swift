@@ -547,6 +547,7 @@ public struct RewritePageTextCommand: PDFEditCommand, Equatable, Sendable {
     }
 
     func bounds(of text: String, font: IndexedTextFont?, standardFamily: String? = nil,
+      customFont: CustomTextFont? = nil,
       size: Double, spacing: Double)
       -> (min: Double, max: Double)?
     {
@@ -572,6 +573,17 @@ public struct RewritePageTextCommand: PDFEditCommand, Equatable, Sendable {
         } else {
           widths = glyphs.compactMap(\.width)
         }
+      } else if let customFont {
+        guard let inspector = try? TrueTypeInspector.inspect(customFont.program),
+          inspector.permitsEditableSubsetEmbedding else { return nil }
+        let advances = text.unicodeScalars.compactMap { scalar -> Double? in
+          guard let glyph = inspector.unicodeToGlyph[Int(scalar.value)],
+            glyph > 0, glyph < inspector.glyphCount,
+            let advance = inspector.advances[glyph] else { return nil }
+          return Double(advance) * 1_000 / Double(inspector.unitsPerEm)
+        }
+        guard advances.count == text.unicodeScalars.count else { return nil }
+        widths = advances
       } else if let standardFamily, let measured = standardWidths(of: text, family: standardFamily) {
         widths = measured
       } else {
@@ -668,9 +680,10 @@ public struct RewritePageTextCommand: PDFEditCommand, Equatable, Sendable {
       } else {
         for segment in line.segments where !segment.text.isEmpty {
           let segmentFont = font(for: segment.format)
-          let standardFamily = segment.format.sourceFont == nil ? segment.format.font.rawValue : nil
+          let standardFamily = segment.format.sourceFont == nil && segment.format.customFont == nil
+            ? segment.format.font.rawValue : nil
           guard let measured = bounds(of: segment.text, font: segmentFont,
-              standardFamily: standardFamily,
+              standardFamily: standardFamily, customFont: segment.format.customFont,
               size: segment.format.size, spacing: segment.format.characterSpacing)
           else {
             throw PDFError(.unsupported,

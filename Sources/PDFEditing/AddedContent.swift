@@ -373,6 +373,11 @@ public enum AddedContent {
       return "-"
     }.joined()
     let needed = Set(text.unicodeScalars.map { Int($0.value) })
+    let inspector = try TrueTypeInspector.inspect(custom.program)
+    guard !inspector.isCFF, inspector.permitsEditableSubsetEmbedding else {
+      throw PDFError(.unsupported,
+        "This font's embedding settings do not allow inline PDF writing")
+    }
     let subset = try TrueTypeSubsetter.subset(program: custom.program, unicodes: needed)
     if let reused = try reuseEmbeddedFont(
       subset: subset, covering: needed, pageID: pageID, in: graph,

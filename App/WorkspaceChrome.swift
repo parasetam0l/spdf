@@ -259,6 +259,14 @@ struct WorkspaceTextInspector: View {
           }
         }
       }
+      if !viewer.pageTextAvailableLicensedFonts.isEmpty {
+        Divider()
+        Section("Licensed fonts installed in this app") {
+          ForEach(Array(viewer.pageTextAvailableLicensedFonts.enumerated()), id: \.offset) { item in
+            Button(item.element.faceName) { apply(.licensedFont(item.element)) }
+          }
+        }
+      }
     } label: {
       HStack {
         Text(viewer.pageTextMixedFormatting.contains("family") ? "Mixed fonts"
@@ -269,7 +277,7 @@ struct WorkspaceTextInspector: View {
       .font(.system(size: 12)).frame(maxWidth: .infinity)
     }
     .menuStyle(.borderedButton).accessibilityLabel("Font family")
-    .help("Standard PDF fonts and verified fonts embedded in this paragraph. Missing characters are refused.")
+    .help("Standard PDF fonts, fonts embedded in this paragraph, and fonts installed after license acceptance. Missing characters are refused.")
   }
   private func traitButton(_ title: String, symbol: String, field: String, selected: Bool,
     action: @escaping () -> Void) -> some View {
@@ -290,6 +298,7 @@ struct WorkspaceTextInspector: View {
     switch change {
     case .family(let family): font = .face(family: family, bold: font.isBold, italic: font.isItalic)
     case .sourceFont(_): return
+    case .licensedFont(_): return
     case .bold(let enabled): font = .face(family: font.family, bold: enabled, italic: font.isItalic)
     case .italic(let enabled): font = .face(family: font.family, bold: font.isBold, italic: enabled)
     case .size(let size): style.fontSize = size

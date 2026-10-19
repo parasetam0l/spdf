@@ -4264,8 +4264,19 @@ final class SPDFDocument: NSDocument {
         let licenseAlert = NSAlert()
         licenseAlert.messageText = "Install \(match.name)?"
         licenseAlert.informativeText =
-          "Google Fonts install under their own licenses (often the SIL Open Font License). Installing means you accept the license shown here.\n\n"
-          + String((package.licenseText ?? "License text unavailable.").prefix(4_000))
+          "The full \(package.licenseDirectory?.uppercased() ?? "open-source") license is shown below. Installing records your acceptance and makes eligible font files available for embedded PDF writing."
+        let licenseText = NSTextView(frame: NSRect(x: 0, y: 0, width: 440, height: 240))
+        licenseText.string = package.licenseText ?? "License text unavailable."
+        licenseText.isEditable = false
+        licenseText.isSelectable = true
+        licenseText.font = .systemFont(ofSize: 11)
+        licenseText.textContainerInset = NSSize(width: 8, height: 8)
+        licenseText.textContainer?.widthTracksTextView = true
+        let licenseScroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 440, height: 240))
+        licenseScroll.hasVerticalScroller = true
+        licenseScroll.hasHorizontalScroller = false
+        licenseScroll.documentView = licenseText
+        licenseAlert.accessoryView = licenseScroll
         licenseAlert.addButton(withTitle: "Install")
         licenseAlert.addButton(withTitle: "Cancel")
         guard licenseAlert.runModal() == .alertFirstButtonReturn else {
@@ -4274,7 +4285,8 @@ final class SPDFDocument: NSDocument {
         }
         try Task.checkCancellation()
         let directory = Self.fontsInstallDirectoryOverride
-        let urls = try GoogleFontsInstaller.install(package, to: directory)
+        let urls = try GoogleFontsInstaller.install(
+          package, to: directory, licenseAccepted: true)
         refreshFonts()
         fontsModel.message =
           "Installed \(urls.count) file\(urls.count == 1 ? "" : "s") for \(match.name)."

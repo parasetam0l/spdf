@@ -192,12 +192,25 @@ public struct GoogleFontPackage: Sendable, Equatable {
   public let family: String
   public let files: [GoogleFontFile]
   public let licenseText: String?
+  public let licenseDirectory: String?
+
+  public init(
+    family: String, files: [GoogleFontFile], licenseText: String?,
+    licenseDirectory: String? = nil
+  ) {
+    self.family = family
+    self.files = files
+    self.licenseText = licenseText
+    self.licenseDirectory = licenseDirectory
+  }
 }
 
 /// P43-006/P43-009/P43-010/P43-012: fetch and install Google Fonts families
 /// from the official google/fonts repository. Downloads go to memory only;
 /// installation copies to the user font directory and registers the fonts.
 public enum GoogleFontsInstaller {
+  private static let installLock = NSLock()
+
   public struct Limits: Sendable, Equatable {
     public var maxMetadataBytes: Int
     public var maxFontBytes: Int
@@ -234,6 +247,7 @@ public enum GoogleFontsInstaller {
     family: String, client: GoogleFontsClient = .live, limits: Limits = .init()
   ) async throws -> GoogleFontPackage {
     var listing: [[String: Any]]?
+    var listingDirectory: String?
     for directory in licenseDirectories {
       let (data, response) = try await client.load(listingURL(family: family, directory: directory))
       guard let http = response as? HTTPURLResponse else { continue }
@@ -245,6 +259,7 @@ public enum GoogleFontsInstaller {
         throw FontProvisioningError.tooLarge("The font listing exceeded the fetch bound.")
       }
       listing = (try? JSONSerialization.jsonObject(with: data)) as? [[String: Any]]
+      listingDirectory = directory
       break
     }
     guard let entries = listing else {
@@ -264,6 +279,10 @@ public enum GoogleFontsInstaller {
       if data.count <= 512 * 1_024 {
         licenseText = String(data: data, encoding: .utf8)
       }
+    }
+    guard let licenseText, !licenseText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+      let listingDirectory else {
+      throw FontProvisioningError.licenseRequired
     }
 
     // Prefer variable fonts (a single file covers weights), then regular
@@ -303,7 +322,9 @@ public enum GoogleFontsInstaller {
     guard !files.isEmpty else {
       throw FontProvisioningError.notFound("No installable font files were found for “\(family)”.")
     }
-    return GoogleFontPackage(family: family, files: files, licenseText: licenseText)
+    return GoogleFontPackage(
+      family: family, files: files, licenseText: licenseText,
+      licenseDirectory: listingDirectory)
   }
 
   /// P43-006: the Font Book-compatible per-user location.
@@ -318,24 +339,68 @@ public enum GoogleFontsInstaller {
   @discardableResult
   public static func install(
     _ package: GoogleFontPackage, to directory: URL? = nil,
-    licenseAccepted: Bool = true
+    licenseAccepted: Bool = false
   ) throws -> [URL] {
-    guard licenseAccepted else { throw FontProvisioningError.licenseRequired }
+    guard licenseAccepted,
+      let licenseText = package.licenseText,
+      !licenseText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+      let licenseDirectory = package.licenseDirectory,
+      licenseDirectories.contains(licenseDirectory) else {
+      throw FontProvisioningError.licenseRequired
+    }
+    // Serialize family installs so rollback from one package cannot remove a
+    // same-named file that another in-process install has just adopted.
+    installLock.lock()
+    defer { installLock.unlock() }
     let destination = directory ?? defaultFontsDirectory()
     try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
+    let fileManager = FileManager.default
+    var targets: [(file: GoogleFontFile, url: URL, alreadyPresent: Bool)] = []
+    var names = Set<String>()
+    for file in package.files {
+      guard !file.name.isEmpty, URL(fileURLWithPath: file.name).lastPathComponent == file.name,
+        ["ttf", "otf"].contains(URL(fileURLWithPath: file.name).pathExtension.lowercased()),
+        names.insert(file.name).inserted else {
+        throw FontProvisioningError.malformed("A font filename was invalid or duplicated.")
+      }
+      let url = destination.appendingPathComponent(file.name)
+      if fileManager.fileExists(atPath: url.path) {
+        guard let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey]),
+          values.isRegularFile == true, values.isSymbolicLink != true,
+          let existing = try? Data(contentsOf: url), existing == file.data else {
+          throw FontProvisioningError.malformed(
+            "A font file named \(file.name) already exists and was left unchanged.")
+        }
+        targets.append((file, url, true))
+      } else {
+        targets.append((file, url, false))
+      }
+    }
     var written: [URL] = []
     do {
-      for file in package.files {
-        let url = destination.appendingPathComponent(file.name)
-        try file.data.write(to: url, options: .atomic)
+      for target in targets where !target.alreadyPresent {
+        let temporary = destination.appendingPathComponent(".spdf-font-\(UUID().uuidString).tmp")
+        do {
+          try target.file.data.write(to: temporary, options: .atomic)
+          // A move to an existing destination fails, so a concurrent install
+          // cannot replace a file that appeared after the preflight above.
+          try fileManager.moveItem(at: temporary, to: target.url)
+        } catch {
+          try? fileManager.removeItem(at: temporary)
+          throw error
+        }
+        let url = target.url
         written.append(url)
       }
+      try ProvisionedFontStore.recordAccepted(
+        package, installed: targets.map(\.url), in: destination)
     } catch {
       for url in written { try? FileManager.default.removeItem(at: url) }
       throw error
     }
-    register(written)
-    return written
+    let urls = targets.map(\.url)
+    register(urls)
+    return urls
   }
 
   /// Best-effort immediate registration; ~/Library/Fonts is picked up by the

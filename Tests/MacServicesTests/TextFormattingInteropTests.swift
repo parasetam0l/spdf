@@ -107,6 +107,47 @@ struct TextFormattingInteropTests {
     ])
   }
 
+  @Test @MainActor func acceptedLicensedFontPreviewsFormatsAndPersistsParagraphText() throws {
+    let program = try #require(Data(base64Encoded: FontFixtureData.subsetProgramBase64))
+    let custom = CustomTextFont(
+      program: program, familyName: "DejaVuSans", faceName: "DejaVu Sans · Book",
+      identifier: "fixture-font")
+    let original = PageTextFormat(size: 16)
+    let view = FormatTestTextView(frame: .zero)
+    let formatting = NativeTextFormatting(
+      view: view, fragments: [.init(text: "AB", format: original)], initial: original,
+      licensedFonts: [custom])
+    formatting.render(scale: 1, minimumLineSpacing: 20)
+    view.setSelectedRange(NSRange(location: 0, length: 2))
+
+    #expect(formatting.availableLicensedFonts(isTyping: true) == [custom])
+    #expect(formatting.apply(.licensedFont(custom), isTyping: true) == nil)
+    #expect(formatting.fragments() == [
+      .init(text: "AB", format: PageTextFormat(size: 16, customFont: custom))
+    ])
+    let preview = try #require(
+      view.textStorage?.attribute(.font, at: 0, effectiveRange: nil) as? NSFont)
+    #expect(preview.fontName.localizedCaseInsensitiveContains("DejaVu"))
+
+    let parsed = try PDFParser.parse(BlankPDF.data())
+    let pageID = parsed.pageIDs[0]
+    let format = PageTextFormat(size: 16, customFont: custom)
+    let box = PageTextBox(x: 48, firstBaseline: 700, width: 120, lineSpacing: 20)
+    let line = PageTextLine(text: "AB", x: 48, baseline: 700,
+      segments: [.init(text: "AB", x: 48, format: format)], endsParagraph: true)
+    let edited = try PDFEditingEngine.commit(PDFTransaction([
+      AddPageTextLinesCommand(pageID: pageID, lines: [line], box: box)
+    ]), to: parsed.graph)
+    let bytes = try PDFWriter.write(edited)
+    let reopened = try PDFParser.parse(bytes)
+    let record = try #require(
+      AuthoredPageTextBoxes.read(pageID: pageID, in: reopened.graph).first)
+    #expect(record.fragments.map(\.text).joined() == "AB\n")
+    #expect(record.fragments.first?.format.sourceFont != nil)
+    #expect(record.fragments.first?.format.customFont == nil)
+    #expect(PDFDocument(data: bytes)?.string?.contains("AB") == true)
+  }
+
   @Test @MainActor func selectedWordsKeepIndependentStylesAndFormattingUndo() throws {
     let view = FormatTestTextView(frame: .zero)
     view.history.groupsByEvent = false

@@ -25,6 +25,9 @@ public struct TrueTypeInspector: Sendable, Equatable {
   public let fontBBox: [Int]
   public let italicAngle: Double
   public let glyphCount: Int
+  /// OS/2 `fsType` embedding rights. Missing OS/2 rights are treated as
+  /// unknown, so user-supplied programs cannot be embedded on assumption.
+  public let embeddingFlags: Int?
   public let locaIsLong: Bool
   /// P15-020: true for CFF-flavored OpenType (CFF table instead of
   /// glyf/loca). Outlines live in CharStrings; only full-program embedding
@@ -135,6 +138,14 @@ public struct TrueTypeInspector: Sendable, Equatable {
 
     let maxp = try table(bytes, tables: tables, tag: "maxp", offset: 0, length: 6)
     let glyphCount = try u16(maxp, at: 4)
+
+    var embeddingFlags: Int?
+    if let os2 = tables["OS/2"] {
+      guard os2.length >= 10, os2.offset + 10 <= bytes.count else {
+        throw PDFError(.malformed, "TrueType OS/2 embedding rights are truncated")
+      }
+      embeddingFlags = try u16(bytes, at: os2.offset + 8)
+    }
 
     var italicAngle = 0.0
     if let postTable = tables["post"], postTable.length >= 8,
@@ -261,9 +272,18 @@ public struct TrueTypeInspector: Sendable, Equatable {
     return TrueTypeInspector(
       tables: tables, unitsPerEm: unitsPerEm, ascent: ascent, descent: descent,
       fontBBox: bbox, italicAngle: italicAngle, glyphCount: glyphCount,
+      embeddingFlags: embeddingFlags,
       locaIsLong: locaIsLong, isCFF: isCFF, unicodeToGlyph: unicodeToGlyph,
       platform1CodeToGlyph: platform1CodeToGlyph,
       advances: advances, glyphOffsets: glyphOffsets)
+  }
+
+  /// Inline PDF writing requires embedding and subsetting. Respect restricted,
+  /// preview/print-only, no-subsetting, and bitmap-only OS/2 flags.
+  public var permitsEditableSubsetEmbedding: Bool {
+    guard let embeddingFlags else { return false }
+    return embeddingFlags & 0x0002 == 0 && embeddingFlags & 0x0004 == 0
+      && embeddingFlags & 0x0100 == 0 && embeddingFlags & 0x0200 == 0
   }
 
   static func parseCmapFormat4(_ bytes: [UInt8], at base: Int) throws -> [Int: Int] {
@@ -445,7 +465,9 @@ public enum FontWriter {
     var nextDifference = 1
     for scalar in text.unicodeScalars.map({ Int($0.value) }) {
       if encoding.values.contains(scalar) { continue }
-      guard inspector.unicodeToGlyph[scalar] != nil else {
+      guard inspector.unicodeToGlyph[scalar].map({
+        $0 > 0 && $0 < inspector.glyphCount
+      }) == true else {
         throw PDFError(
           .unsupported, "The font program has no glyph for U+\(String(scalar, radix: 16, uppercase: true))")
       }
@@ -502,7 +524,7 @@ public enum FontWriter {
         PDFName("BaseEncoding"): .name(PDFName("WinAnsiEncoding")),
       ]
       var items: [PDFValue] = []
-      var sorted = differences.sorted { $0.code < $1.code }
+      let sorted = differences.sorted { $0.code < $1.code }
       var index = 0
       while index < sorted.count {
         let start = sorted[index].code
@@ -660,8 +682,8 @@ public enum TrueTypeSubsetter {
 
   /// P14-021: which Unicode scalars a font program can supply glyphs for,
   /// so replacement paths can check coverage before attempting a subset.
-  /// A scalar is available when the program's cmap maps it to a glyph ID
-  /// inside the glyph count. Availability is not subsettability: CFF
+  /// A scalar is available when the program's cmap maps it to a non-.notdef
+  /// glyph ID inside the glyph count. Availability is not subsettability: CFF
   /// programs report availability normally, but subsetting them still
   /// refuses (P15-020) — whole-program embedding is their only route.
   public struct GlyphAvailability: Sendable, Equatable {
@@ -683,7 +705,7 @@ public enum TrueTypeSubsetter {
     var missing: Set<Int> = []
     for scalar in unicodes {
       if let glyph = inspector.unicodeToGlyph[scalar],
-        glyph >= 0, glyph < inspector.glyphCount
+        glyph > 0, glyph < inspector.glyphCount
       {
         covered.insert(scalar)
       } else {
@@ -758,7 +780,7 @@ public enum TrueTypeSubsetter {
       needed.insert(glyph)
     }
     for scalar in unicodes {
-      guard let glyph = inspector.unicodeToGlyph[scalar] else {
+      guard let glyph = inspector.unicodeToGlyph[scalar], glyph > 0 else {
         throw PDFError(
           .unsupported,
           "The font program has no glyph for U+\(String(scalar, radix: 16, uppercase: true))")
@@ -849,7 +871,7 @@ public enum TrueTypeSubsetter {
     for entry in kept.map(\.code) + [0xFFFF] { cmapBody += u16Bytes(entry) }
     for _ in kept { cmapBody += u16Bytes(0) }  // idDelta (identity via glyph array)
     cmapBody += u16Bytes(1)
-    for position in 0..<kept.count {
+    for _ in kept {
       // Every glyph entry packs after all range offsets, so each segment
       // shares one offset: the glyph array address minus this value's own.
       cmapBody += u16Bytes((kept.count + 1) * 2)
@@ -1047,10 +1069,19 @@ public struct TrueTypeOutlineMetrics: Sendable {
 public struct CustomTextFont: Sendable, Equatable {
   public let program: Data
   public let familyName: String
+  /// User-facing face label used by native previews and font menus.
+  public let faceName: String
+  /// Stable identity for one installed font file; unlike the family name it
+  /// distinguishes regular, italic, and variable files in the same family.
+  public let identifier: String
 
-  public init(program: Data, familyName: String) {
+  public init(
+    program: Data, familyName: String, faceName: String? = nil, identifier: String? = nil
+  ) {
     self.program = program
     self.familyName = familyName
+    self.faceName = faceName ?? familyName
+    self.identifier = identifier ?? faceName ?? familyName
   }
 }
 

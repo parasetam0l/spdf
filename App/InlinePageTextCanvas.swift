@@ -296,7 +296,9 @@ final class InlinePageTextCanvas: NSView, NSTextViewDelegate {
     if let initial = initialFormat, target == nil || target?.paragraph != nil {
       formatting = NativeTextFormatting(view: textView,
         fragments: target?.paragraph?.fragments ?? [], initial: initial,
-        profiles: target?.paragraph?.fontProfiles ?? [:])
+        profiles: target?.paragraph?.fontProfiles ?? [:],
+        licensedFonts: ProvisionedFontStore.availableFonts(
+          in: SPDFDocument.fontsInstallDirectoryOverride))
       formatting?.onChange = { [weak self] in self?.formattingChanged() }
       textView.toggleBold = { [weak self] in self?.toggleFormat(italic: false) }
       textView.toggleItalic = { [weak self] in self?.toggleFormat(italic: true) }
@@ -713,6 +715,10 @@ final class InlinePageTextCanvas: NSView, NSTextViewDelegate {
     if viewer.pageTextAvailableSourceFonts != availableFonts {
       viewer.pageTextAvailableSourceFonts = availableFonts
     }
+    let availableLicensedFonts = formatting?.availableLicensedFonts(isTyping: isTyping) ?? []
+    if viewer.pageTextAvailableLicensedFonts != availableLicensedFonts {
+      viewer.pageTextAvailableLicensedFonts = availableLicensedFonts
+    }
     if viewer.pageTextSelectionScope != selection.scope { viewer.pageTextSelectionScope = selection.scope }
     viewer.canChangePageTextTraits = !selection.usesSourceFont
   }
@@ -812,6 +818,7 @@ final class InlinePageTextCanvas: NSView, NSTextViewDelegate {
     viewer?.pageTextFormattingApplier = nil
     viewer?.pageTextMixedFormatting = []
     viewer?.pageTextAvailableSourceFonts = []
+    viewer?.pageTextAvailableLicensedFonts = []
     viewer?.pageTextFormattingIssue = nil
     viewer?.canFormatPageText = false
     viewer?.canChangePageTextTraits = true

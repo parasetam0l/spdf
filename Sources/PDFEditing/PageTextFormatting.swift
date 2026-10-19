@@ -82,15 +82,20 @@ public enum StandardTextFont: String, CaseIterable, Sendable {
 public struct PageTextFormat: Sendable, Equatable {
   public var font: StandardTextFont
   public var sourceFont: PageTextSourceFont?
+  /// A user-provisioned, explicitly licensed font program for inline writing.
+  /// Existing PDF fonts remain represented by `sourceFont` and are reused.
+  public var customFont: CustomTextFont?
   public var characterSpacing: Double
-  public var fontName: String { sourceFont?.name ?? font.rawValue }
+  public var fontName: String { customFont?.faceName ?? sourceFont?.name ?? font.rawValue }
   public var size: Double
   public var color: [Double]
   public var opacity: Double
   public init(font: StandardTextFont = .helvetica, size: Double = 12, color: [Double] = [0, 0, 0],
-    sourceFont: PageTextSourceFont? = nil, characterSpacing: Double = 0, opacity: Double = 1) {
+    sourceFont: PageTextSourceFont? = nil, customFont: CustomTextFont? = nil,
+    characterSpacing: Double = 0, opacity: Double = 1) {
     self.font = font
     self.sourceFont = sourceFont
+    self.customFont = customFont
     self.characterSpacing = characterSpacing
     self.size = size
     self.color = color
@@ -182,6 +187,9 @@ enum PageTextLineWriter {
     }
     var profiles: [PDFName: PageTextFontProfile] = [:]
     for segment in lines.flatMap(\.segments) {
+      guard !(segment.format.sourceFont != nil && segment.format.customFont != nil) else {
+        throw PDFError(.malformed, "A text run cannot select two font sources")
+      }
       if let source = segment.format.sourceFont {
         guard let font = IndexedTextFont.resolve(resource: source.resource, page: page, in: graph),
           font.isInlineEditable, font.encode(segment.text) != nil,
@@ -192,6 +200,20 @@ enum PageTextLineWriter {
         guard let profile = profiles[source.resource],
           segment.text.unicodeScalars.allSatisfy({ profile.glyphs[String($0)] != nil }) else {
           throw PDFError(.unsupported, "The embedded font does not contain these characters. Choose another font for them.")
+        }
+      } else if let custom = segment.format.customFont {
+        let inspector = try TrueTypeInspector.inspect(custom.program)
+        guard !inspector.isCFF, inspector.permitsEditableSubsetEmbedding else {
+          throw PDFError(.unsupported,
+            "This font's embedding settings do not allow inline PDF writing")
+        }
+        let needed = Set(segment.text.unicodeScalars.map { Int($0.value) })
+        let availability = try TrueTypeSubsetter.availability(
+          program: custom.program, unicodes: needed)
+        guard availability.missing.isEmpty,
+          PageTextSourceFont.canWriteInline(segment.text) else {
+          throw PDFError(.unsupported,
+            "This licensed font does not contain every supported character in the selection.")
         }
       }
     }
@@ -237,6 +259,9 @@ enum PageTextLineWriter {
       guard line.breakFormat == nil || (line.endsParagraph && line.breakFormat!.isValid) else {
         throw PDFError(.malformed, "Invalid paragraph break style")
       }
+      guard line.breakFormat.map({ !($0.sourceFont != nil && $0.customFont != nil) }) ?? true else {
+        throw PDFError(.malformed, "A paragraph break cannot select two font sources")
+      }
       guard line.x.isFinite, line.baseline.isFinite,
         abs(line.x) <= 1_000_000, abs(line.baseline) <= 1_000_000
       else {
@@ -252,7 +277,9 @@ enum PageTextLineWriter {
           line.segments.allSatisfy({
             $0.x.isFinite && abs($0.x) <= 1_000_000 && $0.format.isValid
               && !$0.text.contains("\n") && !$0.text.contains("\r")
-              && ($0.format.sourceFont != nil || StandardTextFont.canEncode($0.text))
+              && !($0.format.sourceFont != nil && $0.format.customFont != nil)
+              && ($0.format.sourceFont != nil || $0.format.customFont != nil
+                || StandardTextFont.canEncode($0.text))
           })
         else {
           throw PDFError(.unsupported, "The selected PDF font cannot encode these characters")
@@ -300,6 +327,7 @@ enum PageTextLineWriter {
     }
     bytes += Array("BT\n0 Tc 0 Tw 100 Tz 0 Ts 0 Tr\n".utf8)
     var lineRecords: [PDFValue] = []
+    var customFontResources: [String: PDFName] = [:]
     for line in lines {
       var count = 0
       if line.segments.isEmpty, !line.text.isEmpty, let font = defaultFont,
@@ -313,9 +341,20 @@ enum PageTextLineWriter {
       } else {
         for segment in line.segments where !segment.text.isEmpty {
           let face = segment.format.font
-          let resource = try segment.format.sourceFont?.resource ?? AddedContent.registerStandardFont(
-            family: face.family, bold: face.isBold, italic: face.isItalic, pageID: pageID,
-            in: &graph)
+          let resource: PDFName
+          if let source = segment.format.sourceFont {
+            resource = source.resource
+          } else if let custom = segment.format.customFont {
+            resource = try AddedContent.selectFont(
+              style: AddedTextStyle(family: face.family, bold: face.isBold,
+                italic: face.isItalic, size: segment.format.size),
+              custom: custom, covering: segment.text, pageID: pageID, in: &graph).resourceName
+            customFontResources[custom.identifier] = resource
+          } else {
+            resource = try AddedContent.registerStandardFont(
+              family: face.family, bold: face.isBold, italic: face.isItalic, pageID: pageID,
+              in: &graph)
+          }
           guard case .dictionary(let page)? = graph.objects[pageID],
             let font = IndexedTextFont.resolve(resource: resource, page: page, in: graph),
             font.isInlineEditable,
@@ -329,15 +368,24 @@ enum PageTextLineWriter {
           count += 1
         }
       }
-      let breakStyle: PDFValue =
-        line.breakFormat.map { format in
-          .array([
+      let breakStyle: PDFValue
+      if let format = line.breakFormat {
+        var resource = format.sourceFont?.resource
+        if resource == nil, let custom = format.customFont {
+          resource = customFontResources[custom.identifier]
+        }
+        if format.customFont != nil && resource == nil {
+          breakStyle = .null
+        } else {
+          breakStyle = .array([
             .name(PDFName(format.font.rawValue)), .real(format.size),
-            .array(format.color.map { .real($0) }),
-            format.sourceFont.map { .name($0.resource) } ?? .null,
+            .array(format.color.map { .real($0) }), resource.map { .name($0) } ?? .null,
             .real(format.characterSpacing),
           ])
-        } ?? .null
+        }
+      } else {
+        breakStyle = .null
+      }
       lineRecords.append(
         .array([
           .integer(Int64(count)), .boolean(line.endsParagraph),

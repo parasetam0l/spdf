@@ -250,6 +250,8 @@ public final class PDFViewingSession: NSObject, ObservableObject, PDFViewDelegat
   @Published public var pageTextStyle = PageTextStyle()
   /// Verified embedded fonts available for the active inline text selection.
   @Published public var pageTextAvailableSourceFonts: [PageTextSourceFont] = []
+  /// User-accepted, locally provisioned fonts that pass inline embedding checks.
+  @Published public var pageTextAvailableLicensedFonts: [CustomTextFont] = []
   @Published public var isEditingPageText = false
   @Published public var isTypingPageText = false
   @Published public var hasPendingPageTextChanges = false
@@ -469,6 +471,7 @@ public final class PDFViewingSession: NSObject, ObservableObject, PDFViewDelegat
     canFormatPageText = false
     pageTextMixedFormatting = []
     pageTextAvailableSourceFonts = []
+    pageTextAvailableLicensedFonts = []
     pageTextFormattingIssue = nil
     selectedObjectSummary = nil
     selectionDetails = nil

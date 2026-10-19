@@ -6,6 +6,7 @@ import PDFEditing
 public enum PageTextFormatChange: Sendable {
   case family(AddedTextStyle.Family)
   case sourceFont(PageTextSourceFont)
+  case licensedFont(CustomTextFont)
   case bold(Bool)
   case italic(Bool)
   case size(Double)
@@ -33,12 +34,29 @@ public final class NativeTextFormatting {
   private var scale = 1.0
   private let sourceFonts: [PDFName: NSFont]
   private let profiles: [PDFName: PageTextFontProfile]
+  private let licensedFonts: [CustomTextFont]
+  private let licensedGlyphs: [String: Set<Int>]
+  private let licensedPreviewFonts: [String: NSFont]
   public var onChange: (() -> Void)?
 
   public init(view: NSTextView, fragments: [PageTextFragment], initial: PageTextFormat,
-    profiles: [PDFName: PageTextFontProfile] = [:]) {
+    profiles: [PDFName: PageTextFontProfile] = [:], licensedFonts: [CustomTextFont] = []) {
     sourceFonts = NativeParagraphEditing.fonts(profiles: profiles)
     self.profiles = profiles
+    self.licensedFonts = licensedFonts
+    var glyphs: [String: Set<Int>] = [:]
+    var previews: [String: NSFont] = [:]
+    for font in licensedFonts {
+      guard let inspector = try? TrueTypeInspector.inspect(font.program),
+        inspector.permitsEditableSubsetEmbedding,
+        let preview = Self.nativeFont(font, size: 12) else { continue }
+      glyphs[font.identifier] = Set(inspector.unicodeToGlyph.compactMap { entry in
+        entry.value > 0 && entry.value < inspector.glyphCount ? entry.key : nil
+      })
+      previews[font.identifier] = preview
+    }
+    licensedGlyphs = glyphs
+    licensedPreviewFonts = previews
     self.view = view
     original = Self.coalesced(fragments)
     paragraphSourceResources = Set(fragments.compactMap { $0.format.sourceFont?.resource })
@@ -121,6 +139,12 @@ public final class NativeTextFormatting {
       } else if let source = base.sourceFont,
         profiles[source.resource]?.glyphs[String(scalar)] != nil {
         appendFragment(String(scalar), format: base)
+      } else if let licensed = base.customFont,
+        licensedGlyphs[licensed.identifier]?.contains(Int(scalar.value)) == true {
+        appendFragment(String(scalar), format: base)
+      } else if base.customFont != nil {
+        return .init(usesSourceFontFallback: false, fragments: fragments, attributedText: nil,
+          issue: "The selected licensed font does not contain “\(String(scalar))”. Choose another font before inserting it.")
       } else if base.sourceFont == nil, StandardTextFont.canEncode(String(scalar)) {
         appendFragment(String(scalar), format: base)
       } else if let alternative = sourceFormat(for: scalar, base: base, current: current,
@@ -199,7 +223,9 @@ public final class NativeTextFormatting {
   public func selection(isTyping: Bool) -> (
     format: PageTextFormat, mixed: Set<String>, scope: String, usesSourceFont: Bool
   ) {
-    guard let view else { return (fallback, [], "Text", fallback.sourceFont != nil) }
+    guard let view else {
+      return (fallback, [], "Text", fallback.sourceFont != nil || fallback.customFont != nil)
+    }
     let range =
       isTyping
       ? view.selectedRange() : NSRange(location: 0, length: (view.string as NSString).length)
@@ -208,20 +234,23 @@ public final class NativeTextFormatting {
         Self.format(view.typingAttributes, fallback: fallback), [],
         isTyping ? "Typing style" : "Whole text box",
         Self.format(view.typingAttributes, fallback: fallback).sourceFont != nil
+          || Self.format(view.typingAttributes, fallback: fallback).customFont != nil
       )
     }
     let formats = fragments(in: range).map(\.format)
     let first = formats.first ?? fallback
     var mixed = Set<String>()
     for format in formats {
-      if format.sourceFont != first.sourceFont || format.font.family != first.font.family { mixed.insert("family") }
+      if format.sourceFont != first.sourceFont
+        || format.customFont?.identifier != first.customFont?.identifier
+        || format.font.family != first.font.family { mixed.insert("family") }
       if format.font.isBold != first.font.isBold { mixed.insert("bold") }
       if format.font.isItalic != first.font.isItalic { mixed.insert("italic") }
       if format.size != first.size { mixed.insert("size") }
       if format.color != first.color { mixed.insert("color") }
     }
     return (first, mixed, isTyping ? "Selected characters" : "Whole text box",
-      formats.contains { $0.sourceFont != nil })
+      formats.contains { $0.sourceFont != nil || $0.customFont != nil })
   }
 
   /// Fonts from this paragraph that have a verified embedded program and
@@ -234,14 +263,43 @@ public final class NativeTextFormatting {
     guard range.location != NSNotFound, range.location >= 0, range.length >= 0,
       NSMaxRange(range) <= storageLength else { return [] }
     let text = (view.string as NSString).substring(with: range)
-    guard PageTextSourceFont.canWriteInline(text) else { return [] }
+    let visible = String(text.unicodeScalars.filter { $0 != "\n" && $0 != "\r" })
+    guard PageTextSourceFont.canWriteInline(visible) else { return [] }
     return profiles.values.filter { profile in
       paragraphSourceResources.contains(profile.source.resource)
         && sourceFonts[profile.source.resource] != nil && !profile.glyphs.isEmpty
-        && text.unicodeScalars.allSatisfy { profile.glyphs[String($0)] != nil }
+        && visible.unicodeScalars.allSatisfy { profile.glyphs[String($0)] != nil }
     }.map(\.source).sorted {
       if $0.name != $1.name { return $0.name.localizedStandardCompare($1.name) == .orderedAscending }
       return $0.resource.bytes.lexicographicallyPrecedes($1.resource.bytes)
+    }
+  }
+
+  /// User-accepted locally installed fonts are offered only when their font
+  /// program permits embedding and covers the entire selected text.
+  public func availableLicensedFonts(isTyping: Bool) -> [CustomTextFont] {
+    guard let view else { return [] }
+    let storageLength = (view.string as NSString).length
+    let range = isTyping ? view.selectedRange() : NSRange(location: 0, length: storageLength)
+    guard range.location != NSNotFound, range.location >= 0, range.length >= 0,
+      NSMaxRange(range) <= storageLength else { return [] }
+    let text = (view.string as NSString).substring(with: range)
+    let visible = String(text.unicodeScalars.filter { $0 != "\n" && $0 != "\r" })
+    guard PageTextSourceFont.canWriteInline(visible) else { return [] }
+    return licensedFonts.filter { font in
+      guard licensedGlyphs[font.identifier] != nil,
+        licensedPreviewFonts[font.identifier] != nil else { return false }
+      return visible.unicodeScalars.allSatisfy {
+        licensedGlyphs[font.identifier]?.contains(Int($0.value)) == true
+      }
+    }.sorted {
+      if $0.familyName != $1.familyName {
+        return $0.familyName.localizedStandardCompare($1.familyName) == .orderedAscending
+      }
+      if $0.faceName != $1.faceName {
+        return $0.faceName.localizedStandardCompare($1.faceName) == .orderedAscending
+      }
+      return $0.identifier < $1.identifier
     }
   }
 
@@ -254,7 +312,7 @@ public final class NativeTextFormatting {
     let selectedText = (view.string as NSString).substring(with: range)
     let sources = range.length == 0 ? [Self.format(view.typingAttributes, fallback: fallback)]
       : fragments(in: range).map(\.format)
-    if sources.contains(where: { $0.sourceFont != nil }) {
+    if sources.contains(where: { $0.sourceFont != nil || $0.customFont != nil }) {
       switch change {
       case .bold, .italic: return "Choose a font family before changing this embedded font's weight or slant."
       default: break
@@ -272,6 +330,16 @@ public final class NativeTextFormatting {
         selectedText.unicodeScalars.allSatisfy({ profile.glyphs[String($0)] != nil }) else {
         return "This embedded font does not contain every selected character. Choose another font or keep the current format."
       }
+    case .licensedFont(let font):
+      let visible = String(selectedText.unicodeScalars.filter { $0 != "\n" && $0 != "\r" })
+      guard licensedFonts.contains(font), licensedGlyphs[font.identifier] != nil,
+        licensedPreviewFonts[font.identifier] != nil,
+        PageTextSourceFont.canWriteInline(visible),
+        visible.unicodeScalars.allSatisfy({
+          licensedGlyphs[font.identifier]?.contains(Int($0.value)) == true
+        }) else {
+        return "This licensed font cannot safely embed or preview every selected character. The format was kept."
+      }
     case .size, .color: break
     }
     func changed(_ source: PageTextFormat) -> PageTextFormat {
@@ -279,9 +347,16 @@ public final class NativeTextFormatting {
       switch change {
       case .family(let family):
         result.sourceFont = nil
+        result.customFont = nil
         result.characterSpacing = 0
         result.font = .face(family: family, bold: source.font.isBold, italic: source.font.isItalic)
-      case .sourceFont(let font): result.sourceFont = font
+      case .sourceFont(let font):
+        result.sourceFont = font
+        result.customFont = nil
+      case .licensedFont(let font):
+        result.sourceFont = nil
+        result.customFont = font
+        result.characterSpacing = 0
       case .bold(let enabled):
         result.font = .face(family: source.font.family, bold: enabled, italic: source.font.isItalic)
       case .italic(let enabled):
@@ -381,7 +456,11 @@ public final class NativeTextFormatting {
     .Key: Any]
   {
     let font: NSFont?
-    if let source = format.sourceFont, let embedded = sourceFonts[source.resource] {
+    if let custom = format.customFont, let preview = licensedPreviewFonts[custom.identifier] {
+      font = CTFontCreateCopyWithAttributes(preview, format.size * scale, nil, nil) as NSFont
+    } else if format.customFont != nil {
+      font = nil
+    } else if let source = format.sourceFont, let embedded = sourceFonts[source.resource] {
       font = CTFontCreateCopyWithAttributes(embedded, format.size * scale, nil, nil) as NSFont
     } else if format.sourceFont != nil { font = nil }
     else { font = NSFont(name: format.font.rawValue, size: format.size * scale) }
@@ -400,6 +479,12 @@ public final class NativeTextFormatting {
       result["resource"] = String(decoding: source.resource.bytes, as: UTF8.self)
       result["sourceName"] = source.name
     }
+    if let custom = format.customFont {
+      result["customProgram"] = custom.program
+      result["customFamily"] = custom.familyName
+      result["customFace"] = custom.faceName
+      result["customIdentifier"] = custom.identifier
+    }
     return result as NSDictionary
   }
   private static func format(_ attrs: [NSAttributedString.Key: Any], fallback: PageTextFormat)
@@ -413,8 +498,23 @@ public final class NativeTextFormatting {
     if let resource = dictionary["resource"] as? String, let name = dictionary["sourceName"] as? String {
       source = .init(resource: PDFName(resource), name: name)
     } else { source = nil }
+    let custom: CustomTextFont?
+    if let program = dictionary["customProgram"] as? Data,
+      let family = dictionary["customFamily"] as? String {
+      custom = .init(program: program, familyName: family,
+        faceName: dictionary["customFace"] as? String,
+        identifier: dictionary["customIdentifier"] as? String)
+    } else { custom = nil }
     return .init(font: font, size: size, color: color, sourceFont: source,
+      customFont: custom,
       characterSpacing: dictionary["spacing"] as? Double ?? 0,
       opacity: dictionary["opacity"] as? Double ?? 1)
+  }
+
+  private static func nativeFont(_ font: CustomTextFont, size: Double) -> NSFont? {
+    guard let value = ProvisionedFontStore.coreTextFont(program: font.program, size: size) else {
+      return nil
+    }
+    return value as NSFont
   }
 }

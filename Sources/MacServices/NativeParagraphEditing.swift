@@ -315,6 +315,13 @@ public enum NativeParagraphEditing {
   }
 
   static func nativeFont(_ format: PageTextFormat, embedded: [PDFName: NSFont]) -> NSFont? {
+    if let custom = format.customFont {
+      guard let font = ProvisionedFontStore.coreTextFont(
+        program: custom.program, size: format.size) else {
+        return nil
+      }
+      return font as NSFont
+    }
     if let source = format.sourceFont {
       guard let font = embedded[source.resource] else { return nil }
       return CTFontCreateCopyWithAttributes(font, format.size, nil, nil) as NSFont

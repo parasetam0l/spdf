@@ -1,6 +1,7 @@
 import Foundation
 import PDFCore
 import PDFEditing
+import PDFFixtures
 import Testing
 @testable import MacServices
 
@@ -199,16 +200,61 @@ struct FontProvisioningTests {
     let package = GoogleFontPackage(
       family: "Test Family",
       files: [GoogleFontFile(name: "Test-Regular.ttf", data: Data([1, 2, 3]))],
-      licenseText: "OFL")
+      licenseText: "OFL", licenseDirectory: "ofl")
     let directory = FileManager.default.temporaryDirectory
       .appendingPathComponent("spdf-fonts-\(UUID().uuidString)")
     defer { try? FileManager.default.removeItem(at: directory) }
-    let urls = try GoogleFontsInstaller.install(package, to: directory)
+    let urls = try GoogleFontsInstaller.install(package, to: directory, licenseAccepted: true)
     #expect(urls.count == 1)
     #expect(try Data(contentsOf: urls[0]) == Data([1, 2, 3]))
     #expect(throws: FontProvisioningError.self) {
       _ = try GoogleFontsInstaller.install(package, to: directory, licenseAccepted: false)
     }
+    #expect(try Data(contentsOf: urls[0]) == Data([1, 2, 3]))
+  }
+
+  @Test func installRefusesToReplaceAnExistingFont() throws {
+    let directory = FileManager.default.temporaryDirectory
+      .appendingPathComponent("spdf-font-conflict-\(UUID().uuidString)")
+    defer { try? FileManager.default.removeItem(at: directory) }
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    let existing = directory.appendingPathComponent("a.ttf")
+    try Data([9, 8, 7]).write(to: existing)
+    let package = GoogleFontPackage(
+      family: "Test Family",
+      files: [
+        GoogleFontFile(name: "a.ttf", data: Data([1])),
+        GoogleFontFile(name: "b.ttf", data: Data([2])),
+      ], licenseText: "OFL", licenseDirectory: "ofl")
+
+    #expect(throws: FontProvisioningError.self) {
+      _ = try GoogleFontsInstaller.install(package, to: directory, licenseAccepted: true)
+    }
+    #expect(try Data(contentsOf: existing) == Data([9, 8, 7]))
+    #expect(!FileManager.default.fileExists(atPath: directory.appendingPathComponent("b.ttf").path))
+  }
+
+  @Test func provisionedFontsRequireAnAcceptedRecordAndUnchangedBytes() throws {
+    let program = try #require(Data(base64Encoded: FontFixtureData.subsetProgramBase64))
+    let directory = FileManager.default.temporaryDirectory
+      .appendingPathComponent("spdf-font-record-\(UUID().uuidString)")
+    defer { try? FileManager.default.removeItem(at: directory) }
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    let fontURL = directory.appendingPathComponent("Fixture-Regular.ttf")
+    try program.write(to: fontURL)
+    let package = GoogleFontPackage(
+      family: "Fixture Family",
+      files: [GoogleFontFile(name: fontURL.lastPathComponent, data: program)],
+      licenseText: "SIL Open Font License", licenseDirectory: "ofl")
+
+    try ProvisionedFontStore.recordAccepted(package, installed: [fontURL], in: directory)
+    let available = ProvisionedFontStore.availableFonts(in: directory)
+    #expect(available.count == 1)
+    #expect(available.first?.familyName == "Fixture Family")
+    #expect(available.first?.program == program)
+
+    try Data([1, 2, 3]).write(to: fontURL, options: .atomic)
+    #expect(ProvisionedFontStore.availableFonts(in: directory).isEmpty)
   }
 
   @Test func installCleansUpOnFailure() throws {
@@ -224,9 +270,9 @@ struct FontProvisioningTests {
       files: [
         GoogleFontFile(name: "a.ttf", data: Data([1])),
         GoogleFontFile(name: "b.ttf", data: Data([2])),
-      ], licenseText: "OFL")
+      ], licenseText: "OFL", licenseDirectory: "ofl")
     #expect(throws: (any Error).self) {
-      _ = try GoogleFontsInstaller.install(package, to: directory)
+      _ = try GoogleFontsInstaller.install(package, to: directory, licenseAccepted: true)
     }
     // The first file must not remain after the failure (no partial install).
     #expect(!FileManager.default.fileExists(atPath: directory.appendingPathComponent("a.ttf").path))
