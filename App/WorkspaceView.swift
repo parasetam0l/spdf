@@ -485,8 +485,28 @@ struct WorkspaceView: View {
         }
         ZStack {
           NativeView(view: viewer.view)
+            .accessibilityElement(children: .contain)
             .accessibilityLabel("PDF pages")
             .accessibilityValue(viewer.selectedObjectSummary ?? "No selection")
+            .accessibilityHint(
+              "In Edit PDF or Images mode, use the next and previous actions to select supported page objects. In Edit PDF mode, selected text can be opened for typing.")
+            .accessibilityActions {
+              if viewer.canSelectAdjacentPageObject {
+                Button("Select Next Page Object") {
+                  _ = viewer.selectAdjacentPageObject()
+                }
+                Button("Select Previous Page Object") {
+                  _ = viewer.selectAdjacentPageObject(reverse: true)
+                }
+                if viewer.canEditSelectedPageText {
+                  Button("Edit Selected Text") {
+                    DispatchQueue.main.async {
+                      _ = viewer.editSelectedPageText()
+                    }
+                  }
+                }
+              }
+            }
           PageEditOverlay(viewer: viewer)
           GraphicSelectionOverlay(viewer: viewer)
           if viewer.areGuidesVisible {

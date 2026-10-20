@@ -139,17 +139,87 @@ enum AccessibilityAudit {
     findElement(labeled: label, in: AXUIElementCreateApplication(getpid()))
   }
 
+  static func applicationElement(labeledPrefix prefix: String) -> AXUIElement? {
+    findElement(labeledPrefix: prefix, in: AXUIElementCreateApplication(getpid()))
+  }
+
+  static func label(of element: AXUIElement) -> String? {
+    let description = attribute(element, kAXDescriptionAttribute) ?? ""
+    let title = attribute(element, kAXTitleAttribute) ?? ""
+    return !description.isEmpty ? description : (!title.isEmpty ? title : nil)
+  }
+
+  static func value(of element: AXUIElement) -> String? {
+    attribute(element, kAXValueAttribute)
+      ?? attribute(element, kAXValueDescriptionAttribute)
+  }
+
+  static func attributeNames(of element: AXUIElement) -> [String] {
+    var names: CFArray?
+    guard AXUIElementCopyAttributeNames(element, &names) == .success,
+      let names
+    else { return [] }
+    return names as? [String] ?? []
+  }
+
   @discardableResult
   static func press(_ element: AXUIElement) -> Bool {
     AXUIElementPerformAction(element, kAXPressAction as CFString) == .success
+  }
+
+  static func actionNames(of element: AXUIElement) -> [String] {
+    var names: CFArray?
+    guard AXUIElementCopyActionNames(element, &names) == .success,
+      let names
+    else { return [] }
+    return names as? [String] ?? []
+  }
+
+  static func hasAction(named name: String, on element: AXUIElement) -> Bool {
+    actionNames(of: element).contains { $0 == name || $0.hasPrefix("Name:\(name)\n") }
+  }
+
+  @discardableResult
+  static func performAction(named name: String, on element: AXUIElement) -> Bool {
+    let actionName = actionNames(of: element).first {
+      $0 == name || $0.hasPrefix("Name:\(name)\n")
+    }
+    guard let actionName else { return false }
+    return AXUIElementPerformAction(element, actionName as CFString) == .success
   }
 
   private static func findElement(labeled label: String, in element: AXUIElement) -> AXUIElement? {
     let description = attribute(element, kAXDescriptionAttribute) ?? ""
     let title = attribute(element, kAXTitleAttribute) ?? ""
     if description == label || title == label { return element }
-    for child in children(of: element) {
+    var descendants = children(of: element)
+    let role = attribute(element, kAXRoleAttribute) ?? ""
+    if role == kAXOutlineRole as String || role == kAXScrollAreaRole as String
+      || role == kAXGroupRole as String
+    {
+      descendants += elements(of: element, attribute: kAXRowsAttribute)
+      descendants += elements(of: element, attribute: kAXContentsAttribute)
+    }
+    for child in descendants {
       if let found = findElement(labeled: label, in: child) { return found }
+    }
+    return nil
+  }
+
+  private static func findElement(labeledPrefix prefix: String, in element: AXUIElement) -> AXUIElement? {
+    let description = attribute(element, kAXDescriptionAttribute) ?? ""
+    let title = attribute(element, kAXTitleAttribute) ?? ""
+    if description.hasPrefix(prefix) || title.hasPrefix(prefix) { return element }
+    var descendants = children(of: element)
+    let role = attribute(element, kAXRoleAttribute) ?? ""
+    if role == kAXOutlineRole as String || role == kAXScrollAreaRole as String
+      || role == kAXGroupRole as String
+    {
+      descendants += elements(of: element, attribute: kAXRowsAttribute)
+      descendants += elements(of: element, attribute: kAXContentsAttribute)
+    }
+    for child in descendants {
+      if let found = findElement(labeledPrefix: prefix, in: child) { return found }
     }
     return nil
   }

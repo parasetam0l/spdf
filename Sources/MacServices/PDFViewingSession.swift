@@ -912,6 +912,58 @@ public final class PDFViewingSession: NSObject, ObservableObject, PDFViewDelegat
     }
   }
 
+  /// Whether the active text block selected in Edit PDF can be opened directly
+  /// for typing without requiring another pointer click.
+  public var canEditSelectedPageText: Bool {
+    guard activeTool == .textEdit, canSelectAdjacentPageObject,
+      textBlockEditStarter != nil, let page = view.currentPage,
+      let document = view.document
+    else { return false }
+    let pageIndex = document.index(for: page)
+    guard pageIndex >= 0 else { return false }
+    let targets = (textTargetsProvider?(pageIndex) ?? []).filter { isValidTextTarget($0) }
+    return selectedTextTarget(from: targets, on: page) != nil
+  }
+
+  /// Start typing in the currently selected text block. This action is
+  /// exposed to assistive technology alongside page-object traversal.
+  @discardableResult
+  public func editSelectedPageText() -> Bool {
+    guard canEditSelectedPageText, let page = view.currentPage,
+      let document = view.document
+    else { return false }
+    let pageIndex = document.index(for: page)
+    guard pageIndex >= 0,
+      let target = selectedTextTarget(
+        from: (textTargetsProvider?(pageIndex) ?? []).filter { isValidTextTarget($0) },
+        on: page),
+      let textBlockEditStarter
+    else { return false }
+    textBlockEditStarter(target)
+    return isEditingPageText && isTypingPageText
+  }
+
+  private func isValidTextTarget(_ target: PageTextTarget) -> Bool {
+    target.rect.count == 4 && target.rect.allSatisfy(\.isFinite)
+      && target.rect[2] >= target.rect[0] && target.rect[3] > target.rect[1]
+  }
+
+  private func selectedTextTarget(
+    from targets: [PageTextTarget], on page: PDFPage
+  ) -> PageTextTarget? {
+    guard let selection = view.currentSelection,
+      selection.pages.contains(where: { $0 === page })
+    else { return nil }
+    let bounds = selection.bounds(for: page)
+    let intersections = targets.map { target -> (PageTextTarget, CGFloat) in
+      let overlap = bounds.intersection(pageRect(target.rect))
+      let area = overlap.isNull ? 0 : max(0, overlap.width) * max(0, overlap.height)
+      return (target, area)
+    }
+    guard let best = intersections.max(by: { $0.1 < $1.1 }), best.1 > 0 else { return nil }
+    return best.0
+  }
+
   /// Select the next or previous editable text block or supported graphic on
   /// the visible page. The active Edit PDF / Images tool determines the kind.
   @discardableResult
@@ -924,25 +976,11 @@ public final class PDFViewingSession: NSObject, ObservableObject, PDFViewDelegat
 
     switch activeTool {
     case .textEdit:
-      let targets = (textTargetsProvider?(pageIndex) ?? []).filter {
-        $0.rect.count == 4 && $0.rect.allSatisfy(\.isFinite)
-          && $0.rect[2] >= $0.rect[0] && $0.rect[3] > $0.rect[1]
-      }
+      let targets = (textTargetsProvider?(pageIndex) ?? []).filter { isValidTextTarget($0) }
       let ordered = targets.sorted { visuallyPrecedes($0.rect, $1.rect, on: page) }
       guard !ordered.isEmpty else { return false }
-      let selectedBounds: CGRect? = view.currentSelection.flatMap { selection in
-        selection.pages.contains(where: { $0 === page }) ? selection.bounds(for: page) : nil
-      }
-      let selectedIndex = selectedBounds.flatMap { bounds -> Int? in
-        let overlaps = ordered.indices.map { index -> (Int, CGFloat) in
-          let target = pageRect(ordered[index].rect)
-          let intersection = bounds.intersection(target)
-          let area = intersection.isNull ? 0 : max(0, intersection.width) * max(0, intersection.height)
-          return (index, area)
-        }
-        guard let best = overlaps.max(by: { $0.1 < $1.1 }), best.1 > 0 else { return nil }
-        return best.0
-      }
+      let selectedTarget = selectedTextTarget(from: ordered, on: page)
+      let selectedIndex = selectedTarget.flatMap { ordered.firstIndex(of: $0) }
       let next = adjacentIndex(count: ordered.count, current: selectedIndex, reverse: reverse)
       let target = ordered[next]
       var rect = pageRect(target.rect)

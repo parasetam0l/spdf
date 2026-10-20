@@ -130,6 +130,10 @@
         if let overlay = root as? PageEditOverlayView { return overlay }
         return root.subviews.lazy.compactMap { findPageEdit($0) }.first
       }
+      func findInlineCanvas(_ root: NSView) -> InlinePageTextCanvas? {
+        if let canvas = root as? InlinePageTextCanvas { return canvas }
+        return root.subviews.lazy.compactMap { findInlineCanvas($0) }.first
+      }
       try await Task.sleep(for: .milliseconds(100))
       guard let overlay = find(content) else { throw PDFError(.malformed, "Missing image overlay") }
       func point(_ x: Double, _ y: Double) throws -> NSPoint {
@@ -170,6 +174,94 @@
         throw PDFError(.malformed,
           "Text traversal unavailable in mode \(viewer.activeTool), editing=\(viewer.isEditingPageText), targets=\(textTargetNames.count)")
       }
+      guard let pageCanvasAX = AccessibilityAudit.applicationElement(labeled: "PDF pages") else {
+        throw PDFError(.malformed, "PDF pages accessibility element is missing")
+      }
+      let pageCanvasActions = AccessibilityAudit.actionNames(of: pageCanvasAX)
+      guard AccessibilityAudit.hasAction(named: "Select Next Page Object", on: pageCanvasAX),
+        AccessibilityAudit.hasAction(named: "Select Previous Page Object", on: pageCanvasAX),
+        !AccessibilityAudit.hasAction(named: "Edit Selected Text", on: pageCanvasAX) else {
+        throw PDFError(.malformed,
+          "PDF pages accessibility actions are missing (actions=\(pageCanvasActions))")
+      }
+      guard AccessibilityAudit.focus(pageCanvasAX) else {
+        throw PDFError(.malformed, "PDF pages accessibility element could not receive AX focus")
+      }
+      func currentPageCanvasAX() -> AXUIElement? {
+        AccessibilityAudit.applicationElement(labeledPrefix: "PDF pages")
+      }
+      func pageCanvasExposesSelection(_ summary: String) -> Bool {
+        guard let element = currentPageCanvasAX() else { return false }
+        return AccessibilityAudit.label(of: element) == "PDF pages"
+          && AccessibilityAudit.value(of: element) == summary
+      }
+      func performPageCanvasAction(_ name: String) -> Bool {
+        guard let element = currentPageCanvasAX() else { return false }
+        return AccessibilityAudit.performAction(named: name, on: element)
+      }
+      guard performPageCanvasAction("Select Next Page Object") else {
+        throw PDFError(.malformed, "VoiceOver next-object action did not dispatch for text")
+      }
+      try await Task.sleep(for: .milliseconds(50))
+      guard let axFirstText = viewer.selectedObjectSummary,
+        pageCanvasExposesSelection(axFirstText),
+        window.firstResponder === viewer.view else {
+        throw PDFError(.malformed,
+          "VoiceOver next-object action did not expose text selection (AX label=\(currentPageCanvasAX().flatMap(AccessibilityAudit.label(of:)) ?? "nil"), value=\(currentPageCanvasAX().flatMap(AccessibilityAudit.value(of:)) ?? "nil"), attributes=\(currentPageCanvasAX().map(AccessibilityAudit.attributeNames(of:)) ?? []), selection=\(viewer.selectedObjectSummary ?? "nil"), actions=\(pageCanvasActions))")
+      }
+      guard performPageCanvasAction("Select Next Page Object") else {
+        throw PDFError(.malformed, "VoiceOver next-object action did not advance text selection")
+      }
+      try await Task.sleep(for: .milliseconds(50))
+      guard let axSecondText = viewer.selectedObjectSummary,
+        axSecondText != axFirstText,
+        pageCanvasExposesSelection(axSecondText) else {
+        throw PDFError(.malformed,
+          "VoiceOver next-object action did not update the accessible text selection value")
+      }
+      guard performPageCanvasAction("Select Previous Page Object") else {
+        throw PDFError(.malformed, "VoiceOver previous-object action did not dispatch for text")
+      }
+      try await Task.sleep(for: .milliseconds(50))
+      guard viewer.selectedObjectSummary == axFirstText,
+        pageCanvasExposesSelection(axFirstText) else {
+        throw PDFError(.malformed,
+          "VoiceOver previous-object action did not restore the accessible text selection value")
+      }
+      guard let editablePageCanvasAX = currentPageCanvasAX() else {
+        throw PDFError(.malformed, "PDF pages accessibility element disappeared before text edit")
+      }
+      let selectedTextActions = AccessibilityAudit.actionNames(of: editablePageCanvasAX)
+      guard viewer.canEditSelectedPageText,
+        AccessibilityAudit.hasAction(named: "Edit Selected Text", on: editablePageCanvasAX) else {
+        throw PDFError(.malformed,
+          "VoiceOver selected-text edit action was not available (model=\(viewer.canEditSelectedPageText), tool=\(viewer.activeTool), callback=\(viewer.textBlockEditStarter != nil), selection=\(viewer.view.currentSelection?.string ?? "nil"), actions=\(selectedTextActions))")
+      }
+      let axEditActionReturnedSuccess = performPageCanvasAction("Edit Selected Text")
+      try await Task.sleep(for: .milliseconds(50))
+      guard axEditActionReturnedSuccess,
+        let accessibleCanvas = findInlineCanvas(content),
+        viewer.isEditingPageText, viewer.isTypingPageText,
+        window.firstResponder === accessibleCanvas.textView else {
+        throw PDFError(.malformed,
+          "VoiceOver selected-text action did not enter the inline editor (AX returned success=\(axEditActionReturnedSuccess), editing=\(viewer.isEditingPageText), typing=\(viewer.isTypingPageText), action names=\(selectedTextActions))")
+      }
+      accessibleCanvas.textView.insertText(
+        "Accessible draft",
+        replacementRange: NSRange(
+          location: 0, length: (accessibleCanvas.textView.string as NSString).length))
+      guard viewer.hasPendingPageTextChanges else {
+        throw PDFError(.malformed, "VoiceOver text input did not create a pending draft")
+      }
+      viewer.pageTextCancel?()
+      guard !viewer.isEditingPageText,
+        try document.editSession.bytesForSave() == crossTypeBaseline,
+        window.firstResponder === viewer.view else {
+        throw PDFError(.malformed,
+          "Cancelling VoiceOver text input changed the PDF or failed to restore canvas focus")
+      }
+      viewer.view.clearSelection()
+      viewer.clearGraphicSelection()
       guard AccessibilityAudit.applicationElement(labeled: "Select Next Page Object") != nil,
         AccessibilityAudit.applicationElement(labeled: "Select Previous Page Object") != nil,
         KeyboardAudit.press("Select Next Page Object") else {
@@ -205,8 +297,51 @@
         throw PDFError(.malformed,
           "Keyboard next/previous did not select distinct graphics and restore the original selection")
       }
+      guard let graphicsPageCanvasAX = AccessibilityAudit.applicationElement(labeled: "PDF pages"),
+        AccessibilityAudit.focus(graphicsPageCanvasAX) else {
+        throw PDFError(.malformed, "PDF pages accessibility element could not receive graphics focus")
+      }
+      guard AccessibilityAudit.performAction(named: "Select Next Page Object", on: graphicsPageCanvasAX) else {
+        throw PDFError(.malformed, "VoiceOver next-object action did not dispatch for graphics")
+      }
+      try await Task.sleep(for: .milliseconds(50))
+      guard let axFirstGraphic = viewer.selectedGraphics.first?.identity,
+        window.firstResponder === overlay,
+        let firstGraphicSummary = viewer.selectedObjectSummary,
+        pageCanvasExposesSelection(firstGraphicSummary) else {
+        throw PDFError(.malformed, "VoiceOver next-object action did not expose the graphic selection")
+      }
+      guard performPageCanvasAction("Select Next Page Object") else {
+        throw PDFError(.malformed, "VoiceOver next-object action did not advance graphic selection")
+      }
+      try await Task.sleep(for: .milliseconds(50))
+      guard viewer.selectedGraphics.first?.identity != axFirstGraphic,
+        let secondGraphicSummary = viewer.selectedObjectSummary,
+        pageCanvasExposesSelection(secondGraphicSummary) else {
+        throw PDFError(.malformed, "VoiceOver next-object action did not update the accessible graphic value")
+      }
+      guard performPageCanvasAction("Select Previous Page Object") else {
+        throw PDFError(.malformed, "VoiceOver previous-object action did not dispatch for graphics")
+      }
+      try await Task.sleep(for: .milliseconds(50))
+      guard viewer.selectedGraphics.first?.identity == axFirstGraphic,
+        viewer.selectedObjectSummary == firstGraphicSummary,
+        pageCanvasExposesSelection(firstGraphicSummary) else {
+        throw PDFError(.malformed,
+          "VoiceOver page actions did not select and cycle graphics")
+      }
       checkpoint("keyboard-only page-object selection passed")
       _ = viewer.activateTool(.select)
+      try await Task.sleep(for: .milliseconds(150))
+      guard let selectModeCanvasAX = AccessibilityAudit.applicationElement(labeledPrefix: "PDF pages") else {
+        throw PDFError(.malformed, "PDF pages accessibility element disappeared in Select mode")
+      }
+      let selectModeActions = AccessibilityAudit.actionNames(of: selectModeCanvasAX)
+      guard !AccessibilityAudit.hasAction(named: "Select Next Page Object", on: selectModeCanvasAX),
+        !AccessibilityAudit.hasAction(named: "Select Previous Page Object", on: selectModeCanvasAX) else {
+        throw PDFError(.malformed,
+          "Page-object actions remained exposed in Select mode (tool=\(viewer.activeTool), can=\(viewer.canSelectAdjacentPageObject), label=\(AccessibilityAudit.label(of: selectModeCanvasAX) ?? "nil"), actions=\(selectModeActions))")
+      }
       viewer.view.setCurrentSelection(overlapText, animate: false)
       viewer.refreshSelectionSummary()
       try await Task.sleep(for: .milliseconds(120))
