@@ -148,6 +148,31 @@ struct TextFormattingInteropTests {
     #expect(PDFDocument(data: bytes)?.string?.contains("AB") == true)
   }
 
+  @Test @MainActor func selectedLicensedFontBecomesTheReplacementTypingStyle() throws {
+    let program = try #require(Data(base64Encoded: FontFixtureData.subsetProgramBase64))
+    let inspector = try TrueTypeInspector.inspect(program, requireUnicodeMap: false)
+    let source = PageTextSourceFont(resource: PDFName("Subset"), name: "DejaVuSans")
+    let glyphB = PageTextFontProfile.Glyph(
+      id: try #require(inspector.unicodeToGlyph[0x42]), width: 700, codes: [0x42])
+    let profile = PageTextFontProfile(source: source, program: program, glyphs: ["B": glyphB])
+    let custom = CustomTextFont(
+      program: program, familyName: "DejaVuSans", faceName: "DejaVu Sans · Book",
+      identifier: "replacement-font")
+    let original = PageTextFormat(size: 16, sourceFont: source)
+    let view = FormatTestTextView(frame: .zero)
+    let formatting = NativeTextFormatting(
+      view: view, fragments: [.init(text: "B", format: original)], initial: original,
+      profiles: [source.resource: profile], licensedFonts: [custom])
+    formatting.render(scale: 1, minimumLineSpacing: 20)
+    view.setSelectedRange(NSRange(location: 0, length: 1))
+
+    #expect(formatting.apply(.licensedFont(custom), isTyping: true) == nil)
+    let plan = formatting.insertionPlan("A", replacing: view.selectedRange())
+    #expect(plan.issue == nil)
+    #expect(plan.fragments == [.init(
+      text: "A", format: PageTextFormat(size: 16, customFont: custom))])
+  }
+
   @Test @MainActor func selectedWordsKeepIndependentStylesAndFormattingUndo() throws {
     let view = FormatTestTextView(frame: .zero)
     view.history.groupsByEvent = false

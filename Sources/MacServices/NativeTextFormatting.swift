@@ -377,6 +377,7 @@ public final class NativeTextFormatting {
     view.breakUndoCoalescing()
     let snapshot = NSAttributedString(attributedString: storage)
     let typing = view.typingAttributes
+    let replacementFormat = changed(sources.first ?? Self.format(typing, fallback: fallback))
     view.undoManager?.beginUndoGrouping()
     registerUndo(snapshot, selection: selection, typing: typing)
     let pieces = fragments(in: range)
@@ -395,6 +396,20 @@ public final class NativeTextFormatting {
     view.setSelectedRange(selection)
     view.didChangeText()
     onChange?()
+    // A replacement typed over the formatted selection must inherit that
+    // format. AppKit otherwise keeps the pre-selection typing attributes,
+    // which can make newly typed characters fail glyph-coverage checks even
+    // though the selected text now uses a font that contains them.
+    var replacementAttributes = attributes(replacementFormat, scale: scale)
+    if let paragraphStyle = typing[.paragraphStyle] {
+      replacementAttributes[.paragraphStyle] = paragraphStyle
+    }
+    if !replacementAttributes.isEmpty {
+      view.typingAttributes = replacementAttributes
+      view.insertionPointColor = NSColor(
+        srgbRed: replacementFormat.color[0], green: replacementFormat.color[1],
+        blue: replacementFormat.color[2], alpha: replacementFormat.opacity)
+    }
     return nil
   }
 
