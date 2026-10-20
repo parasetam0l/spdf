@@ -828,6 +828,143 @@
       checkpoint("nested-image refusal and text selection passed")
     }
 
+    private static func clippedImagePDF(path: String) throws -> Data {
+      let blank = try PDFParser.parse(BlankPDF.data(format: .letter))
+      let pageID = blank.pageIDs[0]
+      var graph = try PDFEditingEngine.commit(
+        PDFTransaction([
+          PlaceImageCommand(
+            pageID: pageID, rect: [250, 300, 350, 400], width: 2, height: 2,
+            rgb8: Data([40, 120, 220, 40, 120, 220, 40, 120, 220, 40, 120, 220])
+          )
+        ]), to: blank.graph)
+      guard case .dictionary(var page)? = graph.objects[pageID] else {
+        throw PDFError(.malformed, "Clipped image fixture has no page")
+      }
+      let contentIDs: [PDFObjectID]
+      switch page[PDFName("Contents")] {
+      case .reference(let id)?: contentIDs = [id]
+      case .array(let values)?:
+        contentIDs = values.compactMap { if case .reference(let id) = $0 { return id }; return nil }
+      default: contentIDs = []
+      }
+      guard !contentIDs.isEmpty else {
+        throw PDFError(.malformed, "Clipped image fixture has no page content")
+      }
+      var imageContent = Data()
+      for id in contentIDs {
+        guard case .stream(let stream)? = graph.objects[id] else {
+          throw PDFError(.malformed, "Clipped image content stream is missing")
+        }
+        imageContent.append(contentsOf: try PDFFilters.decoded(stream))
+        imageContent.append(10)
+      }
+      let wrapperID = PDFObjectID((graph.objects.keys.map(\.number).max() ?? 0) + 1)
+      page[PDFName("Contents")] = .reference(wrapperID)
+      graph.objects[pageID] = .dictionary(page)
+      graph.objects[wrapperID] = .stream(
+        PDFStream(bytes: Data("q \(path)\n".utf8) + imageContent + Data("Q\n".utf8)))
+      graph.trailer[PDFName("Size")] = .integer(Int64(wrapperID.number + 1))
+      let bytes = try PDFWriter.write(graph)
+      let reopened = try PDFParser.parse(bytes)
+      let placements = try ImageInventory.placements(in: reopened.graph, pageID: pageID)
+      guard placements.count == 1, placements[0].bounds == [250, 300, 350, 400] else {
+        throw PDFError(.malformed, "Clipped image fixture lost its placement")
+      }
+      return bytes
+    }
+
+    private static func checkClippedImageWorkflow(output: URL) async throws {
+      let controller = NSDocumentController.shared
+      let url = output.appendingPathComponent("clipped-image.pdf")
+      let source = try clippedImagePDF(path: "300 340 20 20 re W n")
+      try source.write(to: url, options: .atomic)
+      let document = try SPDFDocument(contentsOf: url, ofType: "com.adobe.pdf")
+      controller.addDocument(document)
+      document.makeWindowControllers()
+      defer { document.close() }
+      guard let viewer = document.viewer,
+        let window = document.windowControllers.first?.window,
+        let page = viewer.view.document?.page(at: 0)
+      else { throw PDFError(.malformed, "Missing clipped image workspace") }
+      window.makeKeyAndOrderFront(nil)
+      viewer.setZoom(0.8)
+      try await Task.sleep(for: .milliseconds(100))
+
+      let hidden = [260.0, 310.0]
+      let visible = [310.0, 350.0]
+      let targets = viewer.graphicsListProvider?(0) ?? []
+      guard targets.count == 1,
+        targets[0].rect == [250, 300, 350, 400],
+        targets[0].hitRect == [300, 340, 320, 360],
+        viewer.graphicTargetProvider?(0, visible) != nil,
+        viewer.graphicTargetProvider?(0, hidden) == nil,
+        viewer.graphicRefusalProvider?(0, hidden) == nil else {
+        throw PDFError(.malformed, "Rectangular clip did not narrow native image hit testing")
+      }
+      func findGraphicOverlay(_ root: NSView) -> GraphicSelectionOverlayView? {
+        if let overlay = root as? GraphicSelectionOverlayView { return overlay }
+        return root.subviews.lazy.compactMap { findGraphicOverlay($0) }.first
+      }
+      guard let content = window.contentView, let overlay = findGraphicOverlay(content) else {
+        throw PDFError(.malformed, "Clipped image overlay is missing")
+      }
+      func point(_ values: [Double]) -> NSPoint {
+        viewer.view.convert(
+          viewer.view.convert(NSPoint(x: values[0], y: values[1]), from: page), to: nil)
+      }
+      func mouse(_ type: NSEvent.EventType, _ location: NSPoint) throws -> NSEvent {
+        guard let event = NSEvent.mouseEvent(with: type, location: location, modifierFlags: [],
+          timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
+          context: nil, eventNumber: 0, clickCount: 1,
+          pressure: type == .leftMouseUp ? 0 : 1)
+        else { throw PDFError(.malformed, "Missing clipped-image pointer event") }
+        return event
+      }
+
+      let baseline = try document.editSession.bytesForSave()
+      guard viewer.activateTool(.imageEdit) else {
+        throw PDFError(.malformed, "Could not enter Images mode for a clipped image")
+      }
+      let dragStart = point([255, 305])
+      let dragEnd = point([280, 330])
+      overlay.mouseDown(with: try mouse(.leftMouseDown, dragStart))
+      overlay.mouseDragged(with: try mouse(.leftMouseDragged, dragEnd))
+      overlay.mouseUp(with: try mouse(.leftMouseUp, dragEnd))
+      guard viewer.selectedGraphics.isEmpty else {
+        throw PDFError(.malformed, "Rubber-band selection included a fully clipped image area")
+      }
+
+      let visiblePoint = point(visible)
+      overlay.mouseDown(with: try mouse(.leftMouseDown, visiblePoint))
+      overlay.mouseUp(with: try mouse(.leftMouseUp, visiblePoint))
+      guard viewer.selectedGraphics.count == 1,
+        viewer.selectedGraphics[0].imagePlacementIndex == 0,
+        try document.editSession.bytesForSave() == baseline else {
+        throw PDFError(.malformed, "Visible clipped-image area did not select without mutation")
+      }
+
+      let unsupportedURL = output.appendingPathComponent("nonrectangular-clipped-image.pdf")
+      let unsupportedSource = try clippedImagePDF(
+        path: "300 340 m 320 340 l 300 360 l h W n")
+      try unsupportedSource.write(to: unsupportedURL, options: .atomic)
+      let unsupported = try SPDFDocument(contentsOf: unsupportedURL, ofType: "com.adobe.pdf")
+      controller.addDocument(unsupported)
+      unsupported.makeWindowControllers()
+      defer { unsupported.close() }
+      guard let unsupportedViewer = unsupported.viewer else {
+        throw PDFError(.malformed, "Missing nonrectangular clipped-image workspace")
+      }
+      let reason = unsupportedViewer.graphicRefusalProvider?(0, visible)
+      let unsupportedBaseline = try unsupported.editSession.bytesForSave()
+      guard reason?.contains("cannot hit-test exactly") == true,
+        unsupportedViewer.graphicTargetProvider?(0, visible) == nil,
+        try unsupported.editSession.bytesForSave() == unsupportedBaseline else {
+        throw PDFError(.malformed, "Unsupported clipping did not explain the canvas refusal safely")
+      }
+      checkpoint("clipped-image hit regions and refusal passed")
+    }
+
     static func run(output: URL) async {
       do {
         try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
@@ -1333,9 +1470,11 @@
       try await checkGraphicWorkflow(output: output)
       checkpoint("image workflow passed")
       try await checkNestedImageWorkflow(output: output)
+      try await checkClippedImageWorkflow(output: output)
       return [
         "graphicWorkflow": "insert, properties, preview, selection, shared resize, cancel, keyboard, delete, alignment, save/reopen",
         "nestedImageWorkflow": "Images explains reusable-form refusal; Edit PDF selects overlapping page text; cancel preserves bytes",
+        "clippedImageWorkflow": "rectangular clips narrow point/rubber-band targets; unsupported clips refuse safely",
         "directTextSelection":
           "single-click selection, body move/cancel, double-click typing, marked-text Save veto",
         "paragraphWorkflow":

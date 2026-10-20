@@ -16,6 +16,12 @@ public struct ImagePlacement: Sendable, Equatable {
   /// The enclosing page-space transform before those local operands.
   public let outerMatrix: [Double]
   public let bounds: [Double]
+  /// Page-space rectangular clipping bounds active at the image draw. Nil
+  /// means no rectangular clip bounds were captured; check the support flag.
+  public let clippingBounds: [Double]?
+  /// False when a clipping path affects this draw but is not an axis-aligned
+  /// rectangle. The canvas must not guess at its visible hit region.
+  public let hasSupportedClipping: Bool
   /// True when the placement is a page-level `q … cm /Name Do …` pattern with
   /// an axis-aligned enclosing scale, so commands can rewrite its local matrix
   /// operands while preserving page transformations and clipping.
@@ -29,7 +35,33 @@ public struct ImagePlacement: Sendable, Equatable {
   /// P20-003: exact hit test through the inverse placement matrix, valid for
   /// rotated and skewed placements while the matrix stays invertible.
   public func contains(point: [Double]) -> Bool {
-    guard matrix.count == 6 else { return false }
+    guard hasSupportedClipping, containsSourcePoint(point) else { return false }
+    guard let clip = clippingBounds else { return true }
+    return clip.count == 4 && clip[2] > clip[0] && clip[3] > clip[1]
+      && point[0] >= clip[0] && point[0] <= clip[2]
+      && point[1] >= clip[1] && point[1] <= clip[3]
+  }
+
+  /// Axis-aligned visible bounds suitable for rubber-band selection. The
+  /// transform/edit rectangle remains `bounds`; this is only its hit region.
+  public var canvasVisibleBounds: [Double]? {
+    guard hasSupportedClipping, bounds.count == 4, bounds.allSatisfy(\.isFinite),
+      bounds[2] > bounds[0], bounds[3] > bounds[1]
+    else { return nil }
+    guard let clip = clippingBounds else { return bounds }
+    guard clip.count == 4 else { return nil }
+    let visible = [max(bounds[0], clip[0]), max(bounds[1], clip[1]),
+      min(bounds[2], clip[2]), min(bounds[3], clip[3])]
+    return visible[2] > visible[0] && visible[3] > visible[1] ? visible : nil
+  }
+
+  /// Tests the image's transformed unit square, without considering a PDF
+  /// clipping path. Used only to explain why an otherwise visible draw cannot
+  /// be safely hit-tested by the canvas.
+  public func containsSourcePoint(_ point: [Double]) -> Bool {
+    guard point.count == 2, point.allSatisfy(\.isFinite),
+      matrix.count == 6, matrix.allSatisfy(\.isFinite)
+    else { return false }
     let (a, b, c, d, e, f) = (matrix[0], matrix[1], matrix[2], matrix[3], matrix[4], matrix[5])
     let determinant = a * d - b * c
     guard abs(determinant) > 1e-9 else { return false }
@@ -79,11 +111,16 @@ public enum ImageInventory {
     mutating func walk(
       instructions: [ContentInstruction], resources: [PDFName: PDFValue]?,
       transform initial: [Double], depth: Int, container: PDFObjectID?,
-      visited: Set<PDFObjectID>
+      visited: Set<PDFObjectID>, initialClip: ClipRegion = .unbounded
     ) throws {
       var transform = initial
-      var stack: [[Double]] = []
+      var clip = initialClip
+      var stack: [([Double], ClipRegion)] = []
       var cmOuterTransform: [Double]?
+      var pathRect: [Double]?
+      var pathSupported = true
+      var pathHasSegments = false
+      var pendingClip = false
       for (index, instruction) in instructions.enumerated() {
         try Task.checkCancellation()
         switch instruction.operatorName {
@@ -91,9 +128,12 @@ public enum ImageInventory {
           guard stack.count < limits.nesting else {
             throw PDFError(.limitExceeded, "Graphics state stack exceeds the configured limit")
           }
-          stack.append(transform)
+          stack.append((transform, clip))
         case "Q":
-          if let saved = stack.popLast() { transform = saved }
+          if let saved = stack.popLast() {
+            transform = saved.0
+            clip = saved.1
+          }
         case "cm":
           guard instruction.operands.count == 6 else { break }
           let values = instruction.operands.compactMap { ImageInventory.number(of: $0.value) }
@@ -101,6 +141,7 @@ public enum ImageInventory {
           cmOuterTransform = transform
           transform = ImageInventory.concat(transform, values)
         case "Do":
+          if pendingClip { clip = .unsupported }
           guard case .name(let name)? = instruction.operands.first?.value,
             case .dictionary(let xobjects)? = FontValue.resolve(
               resources?[PDFName("XObject")], in: graph),
@@ -136,6 +177,8 @@ public enum ImageInventory {
                 pageID: pageID, instructionIndex: index, resourceName: name, imageID: objectID,
                 matrix: transform, localMatrix: localMatrix, outerMatrix: outerMatrix,
                 bounds: ImageInventory.bounds(of: transform),
+                clippingBounds: clip.bounds,
+                hasSupportedClipping: clip.isSupported,
                 isDirectlyEditable: depth == 0 && simple
                   && ImageInventory.canvasSafeOuter(outerMatrix),
                 depth: depth,
@@ -163,16 +206,112 @@ public enum ImageInventory {
             }
             var childVisited = visited
             childVisited.insert(objectID)
+            let childTransform = ImageInventory.concat(transform, formMatrix)
+            let formClip = ImageInventory.formClip(
+              stream.dictionary[PDFName("BBox")], transform: childTransform, parent: clip)
             try walk(
               instructions: childInstructions, resources: childResources,
-              transform: ImageInventory.concat(transform, formMatrix), depth: depth + 1,
-              container: objectID, visited: childVisited)
+              transform: childTransform, depth: depth + 1,
+              container: objectID, visited: childVisited, initialClip: formClip)
           }
+        case "re":
+          pathHasSegments = true
+          guard pathRect == nil, instruction.operands.count == 4 else {
+            pathSupported = false
+            continue
+          }
+          let values = instruction.operands.compactMap { ImageInventory.number(of: $0.value) }
+          guard values.count == 4,
+            let transformed = ImageInventory.transformedRectangle(values, by: transform),
+            transformed.axisAligned
+          else {
+            pathSupported = false
+            continue
+          }
+          pathRect = transformed.bounds
+        case "m", "l", "c", "v", "y", "h":
+          pathHasSegments = true
+          pathSupported = false
+        case "W", "W*":
+          pendingClip = true
+        case "S", "s", "f", "F", "f*", "B", "B*", "b", "b*", "n":
+          if pendingClip {
+            if pathSupported, pathHasSegments, let pathRect {
+              clip = ImageInventory.intersection(clip, with: pathRect)
+            } else {
+              clip = .unsupported
+            }
+          }
+          pathRect = nil
+          pathSupported = true
+          pathHasSegments = false
+          pendingClip = false
         default:
           break
         }
       }
     }
+  }
+
+  private enum ClipRegion {
+    case unbounded
+    case rectangle([Double])
+    case unsupported
+
+    var bounds: [Double]? {
+      if case .rectangle(let bounds) = self { return bounds }
+      return nil
+    }
+
+    var isSupported: Bool {
+      if case .unsupported = self { return false }
+      return true
+    }
+  }
+
+  private static func intersection(_ clip: ClipRegion, with rect: [Double]) -> ClipRegion {
+    switch clip {
+    case .unbounded:
+      return .rectangle(rect)
+    case .rectangle(let existing):
+      let result = [max(existing[0], rect[0]), max(existing[1], rect[1]),
+        min(existing[2], rect[2]), min(existing[3], rect[3])]
+      return .rectangle(result)
+    case .unsupported:
+      return .unsupported
+    }
+  }
+
+  private static func formClip(
+    _ value: PDFValue?, transform: [Double], parent: ClipRegion
+  ) -> ClipRegion {
+    guard case .array(let values)? = value, values.count == 4 else { return .unsupported }
+    let bounds = values.compactMap(number(of:))
+    guard bounds.count == 4,
+      let transformed = transformedRectangle(bounds, by: transform), transformed.axisAligned
+    else { return .unsupported }
+    return intersection(parent, with: transformed.bounds)
+  }
+
+  private static func transformedRectangle(
+    _ values: [Double], by matrix: [Double]
+  ) -> (bounds: [Double], axisAligned: Bool)? {
+    guard values.count == 4, matrix.count == 6,
+      values.allSatisfy(\.isFinite), matrix.allSatisfy(\.isFinite)
+    else { return nil }
+    let x0 = min(values[0], values[0] + values[2])
+    let x1 = max(values[0], values[0] + values[2])
+    let y0 = min(values[1], values[1] + values[3])
+    let y1 = max(values[1], values[1] + values[3])
+    let points = [[x0, y0], [x1, y0], [x0, y1], [x1, y1]].map { point in
+      [matrix[0] * point[0] + matrix[2] * point[1] + matrix[4],
+        matrix[1] * point[0] + matrix[3] * point[1] + matrix[5]]
+    }
+    let xs = points.map { $0[0] }
+    let ys = points.map { $0[1] }
+    let axisAligned = (abs(matrix[1]) < 1e-9 && abs(matrix[2]) < 1e-9)
+      || (abs(matrix[0]) < 1e-9 && abs(matrix[3]) < 1e-9)
+    return ([xs.min()!, ys.min()!, xs.max()!, ys.max()!], axisAligned)
   }
 
   /// Affine composition in PDF's `[a b c d e f]` convention: the result

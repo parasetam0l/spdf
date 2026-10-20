@@ -98,6 +98,70 @@ struct ImageEditTests {
     #expect(second[0].bounds == [60, 300, 160, 400])
   }
 
+  @Test func rectangularClippingNarrowsCanvasHitAndRubberBandBounds() throws {
+    let blank = try PDFParser.parse(BlankPDF.data())
+    let pageID = blank.pageIDs[0]
+    var graph = try PDFEditingEngine.commit(
+      PDFTransaction([
+        PlaceImageCommand(
+          pageID: pageID, rect: [250, 300, 350, 400], width: 2, height: 2,
+          rgb8: Data(repeating: 120, count: 12))
+      ]), to: blank.graph)
+    let content = try PageContent.load(pageID: pageID, in: graph)
+    let imageSegment = try #require(content.segments.first {
+      String(decoding: $0.decoded, as: UTF8.self).contains("Do")
+    })
+    let clippedBytes = Data("q 290 330 40 40 re W n 300 340 20 20 re W n\n".utf8)
+      + Data(imageSegment.decoded) + Data("Q\n".utf8)
+    graph.objects[imageSegment.objectID] = .stream(PDFStream(bytes: clippedBytes))
+
+    let reopened = try PDFParser.parse(PDFWriter.write(graph))
+    let placement = try #require(ImageInventory.placements(in: reopened.graph, pageID: pageID).first)
+    #expect(placement.hasSupportedClipping)
+    #expect(placement.clippingBounds == [300, 340, 320, 360])
+    #expect(placement.bounds == [250, 300, 350, 400])
+    #expect(placement.canvasVisibleBounds == [300, 340, 320, 360])
+    #expect(placement.contains(point: [310, 350]))
+    #expect(!placement.contains(point: [260, 310]))
+    #expect(placement.containsSourcePoint([260, 310]))
+  }
+
+  @Test func nonRectangularClipDoesNotGuessCanvasHitRegion() throws {
+    let blank = try PDFParser.parse(BlankPDF.data())
+    let pageID = blank.pageIDs[0]
+    var graph = try PDFEditingEngine.commit(
+      PDFTransaction([
+        PlaceImageCommand(
+          pageID: pageID, rect: [250, 300, 350, 400], width: 2, height: 2,
+          rgb8: Data(repeating: 120, count: 12))
+      ]), to: blank.graph)
+    let content = try PageContent.load(pageID: pageID, in: graph)
+    let imageSegment = try #require(content.segments.first {
+      String(decoding: $0.decoded, as: UTF8.self).contains("Do")
+    })
+    let clippedBytes = Data("q 300 340 m 320 340 l 300 360 l h W n\n".utf8)
+      + Data(imageSegment.decoded) + Data("Q\n".utf8)
+    graph.objects[imageSegment.objectID] = .stream(PDFStream(bytes: clippedBytes))
+
+    let reopened = try PDFParser.parse(PDFWriter.write(graph))
+    let placement = try #require(ImageInventory.placements(in: reopened.graph, pageID: pageID).first)
+    #expect(!placement.hasSupportedClipping)
+    #expect(placement.clippingBounds == nil)
+    #expect(placement.canvasVisibleBounds == nil)
+    #expect(!placement.contains(point: [310, 350]))
+    #expect(placement.containsSourcePoint([310, 350]))
+
+    let restoredBytes = Data("q 300 340 m 320 340 l 300 360 l h W n Q\n".utf8)
+      + Data(imageSegment.decoded)
+    graph.objects[imageSegment.objectID] = .stream(PDFStream(bytes: restoredBytes))
+    let restored = try PDFParser.parse(PDFWriter.write(graph))
+    let unmodifiedPlacement = try #require(
+      ImageInventory.placements(in: restored.graph, pageID: pageID).first)
+    #expect(unmodifiedPlacement.hasSupportedClipping)
+    #expect(unmodifiedPlacement.clippingBounds == nil)
+    #expect(unmodifiedPlacement.contains(point: [260, 310]))
+  }
+
   @Test func moveRewritesOnlyTheTranslationOperands() throws {
     let parsed = try PDFParser.parse(PDFFixtures.imagePages())
     let page1 = parsed.pageIDs[0]

@@ -3851,10 +3851,19 @@ final class SPDFDocument: NSDocument {
         pageIndex: pageIndex, streamID: graphic.streamID,
         kind: graphic.kind == .imageStamp ? "Image stamp" : "Rectangle", rect: bounds)
     }
-    for image in nativeImageTargets(pageIndex: pageIndex).reversed() {
-      let bounds = image.rect
-      if pagePoint[0] >= bounds[0], pagePoint[0] <= bounds[2],
-        pagePoint[1] >= bounds[1], pagePoint[1] <= bounds[3] { return image }
+    guard let placements = try? ImageInventory.placements(in: graph, pageID: pageID) else {
+      return nil
+    }
+    for (index, placement) in placements.enumerated().reversed() {
+      guard placement.isDirectlyEditable, placement.hasSupportedClipping,
+        placement.matrix.count == 6, placement.matrix[0] > 0, placement.matrix[3] > 0,
+        abs(placement.matrix[1]) < 1e-9, abs(placement.matrix[2]) < 1e-9,
+        placement.canvasVisibleBounds != nil, placement.contains(point: pagePoint)
+      else { continue }
+      return AddedGraphicTarget(
+        pageIndex: pageIndex, streamID: placement.imageID, kind: "Document image",
+        rect: placement.bounds, imagePlacementIndex: index,
+        hitRect: placement.clippingBounds == nil ? nil : placement.canvasVisibleBounds)
     }
     return nil
   }
@@ -3896,12 +3905,14 @@ final class SPDFDocument: NSDocument {
     }
     return placements.enumerated().compactMap { index, placement in
       guard placement.isDirectlyEditable, placement.matrix.count == 6,
+        placement.hasSupportedClipping, let hitBounds = placement.canvasVisibleBounds,
         placement.matrix[0] > 0, placement.matrix[3] > 0,
         abs(placement.matrix[1]) < 1e-9, abs(placement.matrix[2]) < 1e-9
       else { return nil }
       return AddedGraphicTarget(
         pageIndex: pageIndex, streamID: placement.imageID, kind: "Document image",
-        rect: placement.bounds, imagePlacementIndex: index)
+        rect: placement.bounds, imagePlacementIndex: index,
+        hitRect: placement.clippingBounds == nil ? nil : hitBounds)
     }
   }
 
@@ -3910,9 +3921,17 @@ final class SPDFDocument: NSDocument {
       let graph = editSession.currentGraph, pagePoint.count == 2
     else { return nil }
     let pageID = editSession.pageIDs[pageIndex]
-    guard let placements = try? ImageInventory.placements(in: graph, pageID: pageID),
-      let placement = placements.last(where: { $0.contains(point: pagePoint) })
-    else { return nil }
+    guard let placements = try? ImageInventory.placements(in: graph, pageID: pageID) else {
+      return nil
+    }
+    let placement = placements.reversed().first { candidate in
+      guard candidate.containsSourcePoint(pagePoint) else { return false }
+      return !candidate.hasSupportedClipping || candidate.contains(point: pagePoint)
+    }
+    guard let placement else { return nil }
+    if !placement.hasSupportedClipping {
+      return "This image uses a clipping path the canvas cannot hit-test exactly. Canvas editing is disabled to avoid selecting hidden parts; use the image context menu for supported actions."
+    }
     if placement.depth > 0 {
       return "This image is drawn inside a reusable form. Canvas movement is disabled because its shared containing transform cannot be rewritten safely."
     }

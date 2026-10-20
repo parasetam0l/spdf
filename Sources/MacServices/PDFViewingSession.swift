@@ -81,19 +81,23 @@ public struct AddedGraphicTarget: Sendable, Equatable {
   public let kind: String
   /// Axis-aligned page-space bounds ([x0, y0, x1, y1]).
   public let rect: [Double]
+  /// Optional visible hit bounds, narrower than `rect` when the PDF clips an
+  /// existing image. Geometry edits still use the full transform rectangle.
+  public let hitRect: [Double]?
   /// Set only for a directly editable image already present in the PDF.
   /// App-created graphics remain identified by their content-stream object.
   public let imagePlacementIndex: Int?
 
   public init(
     pageIndex: Int, streamID: PDFObjectID, kind: String, rect: [Double],
-    imagePlacementIndex: Int? = nil
+    imagePlacementIndex: Int? = nil, hitRect: [Double]? = nil
   ) {
     self.pageIndex = pageIndex
     self.streamID = streamID
     self.kind = kind
     self.rect = rect
     self.imagePlacementIndex = imagePlacementIndex
+    self.hitRect = hitRect
   }
 
   public var identity: String {

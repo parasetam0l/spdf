@@ -101,6 +101,17 @@ final class GraphicSelectionOverlayView: NSView {
       on: page)
   }
 
+  private func overlayHitRect(of target: AddedGraphicTarget) -> CGRect? {
+    guard let bounds = target.hitRect, bounds.count == 4,
+      let page = viewer?.view.document?.page(at: target.pageIndex)
+    else { return overlayRect(of: target) }
+    return overlayRect(
+      pageRect: CGRect(
+        x: bounds[0], y: bounds[1], width: bounds[2] - bounds[0],
+        height: bounds[3] - bounds[1]),
+      on: page)
+  }
+
   /// Selection rects in overlay space for the current selection.
   private func selectionRects() -> [(AddedGraphicTarget, CGRect)] {
     guard let viewer else { return [] }
@@ -309,7 +320,7 @@ final class GraphicSelectionOverlayView: NSView {
       x: min(start.x, end.x), y: min(start.y, end.y),
       width: abs(end.x - start.x), height: abs(end.y - start.y))
     let valid = candidates.compactMap { target -> (AddedGraphicTarget, CGRect)? in
-      guard let box = overlayRect(of: target) else { return nil }; return (target, box)
+      guard let box = overlayHitRect(of: target) else { return nil }; return (target, box)
     }
     let hits = GraphicSelectionModel.rubberBandSelect(rect: rect, candidates: valid.map(\.1))
     viewer.selectGraphics(hits.map { valid[$0].0 })
