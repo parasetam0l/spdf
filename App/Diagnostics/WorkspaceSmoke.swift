@@ -225,8 +225,9 @@
       overlay.mouseDown(with: try mouse(.leftMouseDown, imagePoint))
       overlay.mouseUp(with: try mouse(.leftMouseUp, imagePoint))
       guard viewer.selectedGraphics.map(\.identity) == [targets[0].identity],
+        window.firstResponder === overlay,
         try document.editSession.bytesForSave() == crossTypeBaseline else {
-        throw PDFError(.malformed, "Images mode did not select the graphic over the text")
+        throw PDFError(.malformed, "Images mode did not select the graphic and focus keyboard controls")
       }
       checkpoint("overlapping text/image selection passed")
 
@@ -305,7 +306,9 @@
         throw PDFError(.malformed, "Select preview moved an image")
       }
       try key(53)
-      guard viewer.selectedGraphics.isEmpty else { throw PDFError(.malformed, "Escape did not clear preview selection") }
+      guard viewer.selectedGraphics.isEmpty, window.firstResponder === viewer.view else {
+        throw PDFError(.malformed, "Escape did not clear preview selection and restore page focus")
+      }
       _ = viewer.activateTool(.imageEdit)
       // A first drag selects and moves the object without a preparatory click.
       overlay.mouseDown(with: try mouse(.leftMouseDown, first))
