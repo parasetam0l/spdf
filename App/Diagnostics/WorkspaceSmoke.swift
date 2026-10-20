@@ -158,6 +158,7 @@
       try await Task.sleep(for: .milliseconds(120))
       // The resize changes the overlay's window-space origin.
       let textPoint = try point(overlapBounds.midX, overlapBounds.midY)
+      let imagePoint = try point(120, 140)
       guard AccessibilityAudit.applicationElement(labeled: "Text selection") != nil,
         let editTextAction = AccessibilityAudit.applicationElement(labeled: "Edit Text"),
         AccessibilityAudit.press(editTextAction),
@@ -227,8 +228,6 @@
       window.setFrame(
         NSRect(origin: window.frame.origin, size: NSSize(width: 820, height: 700)), display: true)
       try await Task.sleep(for: .milliseconds(150))
-      // Recompute this canvas point after switching to the compact window size.
-      let imagePoint = try point(120, 140)
       _ = viewer.activateTool(.select)
       guard let imageProperties = AccessibilityAudit.keyWindowElement(labeled: "Image properties"),
         AccessibilityAudit.press(imageProperties) else {
@@ -239,7 +238,9 @@
         AccessibilityAudit.press(editImages), viewer.activeTool == .imageEdit else {
         throw PDFError(.malformed, "Compact image inspector did not enter Images mode")
       }
-      viewer.view.setCurrentSelection(overlapText, animate: false)
+      guard let compactOverlapText = viewer.view.document?.findString("Text overlap", withOptions: []).first
+      else { throw PDFError(.malformed, "Undo did not restore a selectable overlap text target") }
+      viewer.view.setCurrentSelection(compactOverlapText, animate: false)
       viewer.refreshSelectionSummary()
       try await Task.sleep(for: .milliseconds(100))
       if AccessibilityAudit.applicationElement(labeled: "Edit Text") == nil {
