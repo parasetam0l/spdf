@@ -490,6 +490,20 @@ public struct ClipImageDrawCommand: PDFEditCommand, Equatable, Sendable {
     }
     let p00 = map(u0, v0), p10 = map(u1, v0), p11 = map(u1, v1), p01 = map(u0, v1)
     func token(_ value: Double) -> String { ImageInventory.numberToken(value) }
+    let axisAligned =
+      (abs(p00[1] - p10[1]) < 1e-9 && abs(p10[0] - p11[0]) < 1e-9
+        && abs(p11[1] - p01[1]) < 1e-9 && abs(p01[0] - p00[0]) < 1e-9)
+      || (abs(p00[0] - p10[0]) < 1e-9 && abs(p10[1] - p11[1]) < 1e-9
+        && abs(p11[0] - p01[0]) < 1e-9 && abs(p01[1] - p00[1]) < 1e-9)
+    if axisAligned {
+      let xs = [p00[0], p10[0], p11[0], p01[0]]
+      let ys = [p00[1], p10[1], p11[1], p01[1]]
+      let x = xs.min()!, y = ys.min()!
+      let width = xs.max()! - x, height = ys.max()! - y
+      if width > 0, height > 0 {
+        return "\(token(x)) \(token(y)) \(token(width)) \(token(height)) re"
+      }
+    }
     return
       "\(token(p00[0])) \(token(p00[1])) m "
       + "\(token(p10[0])) \(token(p10[1])) l "
