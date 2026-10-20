@@ -662,6 +662,172 @@
       if let error { throw error }
     }
 
+    private static func nestedImageOverlapPDF() throws -> Data {
+      let blank = try PDFParser.parse(BlankPDF.data(format: .letter))
+      let pageID = blank.pageIDs[0]
+      var graph = try PDFEditingEngine.commit(
+        PDFTransaction([
+          PlaceImageCommand(
+            pageID: pageID, rect: [250, 340, 350, 440], width: 2, height: 2,
+            rgb8: Data([40, 120, 220, 40, 120, 220, 40, 120, 220, 40, 120, 220])
+          )
+        ]), to: blank.graph)
+
+      func dictionary(_ value: PDFValue?, in graph: PDFGraph) -> [PDFName: PDFValue]? {
+        switch value {
+        case .dictionary(let value)?: return value
+        case .reference(let id)?:
+          guard case .dictionary(let value)? = graph.objects[id] else { return nil }
+          return value
+        default: return nil
+        }
+      }
+
+      guard case .dictionary(var page)? = graph.objects[pageID],
+        let pageResources = dictionary(page[PDFName("Resources")], in: graph)
+      else { throw PDFError(.malformed, "Nested image fixture has no page resources") }
+      let contentIDs: [PDFObjectID]
+      switch page[PDFName("Contents")] {
+      case .reference(let id)?: contentIDs = [id]
+      case .array(let values)?:
+        contentIDs = values.compactMap { if case .reference(let id) = $0 { return id }; return nil }
+      default: contentIDs = []
+      }
+      guard !contentIDs.isEmpty else {
+        throw PDFError(.malformed, "Nested image fixture has no page content")
+      }
+      var imageContent = Data()
+      for id in contentIDs {
+        guard case .stream(let stream)? = graph.objects[id] else {
+          throw PDFError(.malformed, "Nested image fixture content stream is missing")
+        }
+        imageContent.append(stream.bytes)
+        imageContent.append(10)
+      }
+
+      let formID = PDFObjectID((graph.objects.keys.map(\.number).max() ?? 0) + 1)
+      let wrapperID = PDFObjectID(formID.number + 1)
+      graph.objects[formID] = .stream(PDFStream(dictionary: [
+        PDFName("Type"): .name(PDFName("XObject")),
+        PDFName("Subtype"): .name(PDFName("Form")),
+        PDFName("BBox"): .array([.integer(0), .integer(0), .integer(612), .integer(792)]),
+        PDFName("Resources"): .dictionary(pageResources),
+      ], bytes: imageContent))
+
+      var pageResourcesWithForm = pageResources
+      var xObjects = dictionary(pageResources[PDFName("XObject")], in: graph) ?? [:]
+      xObjects[PDFName("NestedForm")] = .reference(formID)
+      pageResourcesWithForm[PDFName("XObject")] = .dictionary(xObjects)
+      page[PDFName("Resources")] = .dictionary(pageResourcesWithForm)
+      page[PDFName("Contents")] = .reference(wrapperID)
+      graph.objects[pageID] = .dictionary(page)
+      graph.objects[wrapperID] = .stream(
+        PDFStream(bytes: Data("q /NestedForm Do Q\n".utf8)))
+      try graph.validate()
+
+      let withText = try PDFEditingEngine.commit(
+        PDFTransaction([
+          AddTextObjectCommand(
+            pageID: pageID, rect: [220, 360, 430, 410], text: "Nested image overlap",
+            style: AddedTextStyle(size: 18))
+        ]), to: graph)
+      let bytes = try PDFWriter.write(withText)
+      let reopened = try PDFParser.parse(bytes)
+      let placements = try ImageInventory.placements(in: reopened.graph, pageID: pageID)
+      guard placements.count == 1, placements[0].depth == 1,
+        !placements[0].isDirectlyEditable else {
+        throw PDFError(.malformed, "Nested image fixture did not retain its reusable-form placement")
+      }
+      return bytes
+    }
+
+    private static func checkNestedImageWorkflow(output: URL) async throws {
+      let controller = NSDocumentController.shared
+      let url = output.appendingPathComponent("nested-image-overlap.pdf")
+      let source = try nestedImageOverlapPDF()
+      try source.write(to: url, options: .atomic)
+      let document = try SPDFDocument(contentsOf: url, ofType: "com.adobe.pdf")
+      controller.addDocument(document)
+      document.makeWindowControllers()
+      defer { document.close() }
+      guard let viewer = document.viewer,
+        let window = document.windowControllers.first?.window,
+        let content = window.contentView,
+        let page = viewer.view.document?.page(at: 0)
+      else { throw PDFError(.malformed, "Missing nested image workspace") }
+      window.makeKeyAndOrderFront(nil)
+      viewer.setZoom(0.8)
+      try await Task.sleep(for: .milliseconds(120))
+
+      let textSelection = viewer.view.document?.findString(
+        "Nested image overlap", withOptions: []).first
+      guard let textSelection else {
+        throw PDFError(.malformed, "PDFKit could not find text over the nested image")
+      }
+      let textBounds = textSelection.bounds(for: page)
+      let overlap = textBounds.intersection(CGRect(x: 250, y: 340, width: 100, height: 100))
+      guard !overlap.isNull, overlap.width > 1, overlap.height > 1 else {
+        throw PDFError(.malformed, "Nested image and page text do not overlap")
+      }
+      let probe = [Double(overlap.midX), Double(overlap.midY)]
+      guard let refusal = viewer.graphicRefusalProvider?(0, probe),
+        refusal.contains("reusable form"),
+        viewer.graphicTargetProvider?(0, probe) == nil,
+        viewer.textRunProvider?(0, probe) != nil else {
+        throw PDFError(.malformed, "Nested image overlap did not expose matching text and refusal targets")
+      }
+      func findGraphicOverlay(_ root: NSView) -> GraphicSelectionOverlayView? {
+        if let overlay = root as? GraphicSelectionOverlayView { return overlay }
+        return root.subviews.lazy.compactMap { findGraphicOverlay($0) }.first
+      }
+      func findTextOverlay(_ root: NSView) -> PageEditOverlayView? {
+        if let overlay = root as? PageEditOverlayView { return overlay }
+        return root.subviews.lazy.compactMap { findTextOverlay($0) }.first
+      }
+      guard let graphicOverlay = findGraphicOverlay(content),
+        let textOverlay = findTextOverlay(content) else {
+        throw PDFError(.malformed, "Nested overlap overlays are missing")
+      }
+      func point(_ x: Double, _ y: Double) -> NSPoint {
+        viewer.view.convert(viewer.view.convert(NSPoint(x: x, y: y), from: page), to: nil)
+      }
+      func mouse(_ type: NSEvent.EventType, _ point: NSPoint) throws -> NSEvent {
+        guard let event = NSEvent.mouseEvent(with: type, location: point, modifierFlags: [],
+          timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
+          context: nil, eventNumber: 0, clickCount: 1, pressure: type == .leftMouseUp ? 0 : 1)
+        else { throw PDFError(.malformed, "Missing nested overlap pointer event") }
+        return event
+      }
+
+      let baseline = try document.editSession.bytesForSave()
+      guard viewer.activateTool(.imageEdit) else {
+        throw PDFError(.malformed, "Could not enter Images mode for a nested image")
+      }
+      let windowPoint = point(probe[0], probe[1])
+      graphicOverlay.mouseDown(with: try mouse(.leftMouseDown, windowPoint))
+      graphicOverlay.mouseUp(with: try mouse(.leftMouseUp, windowPoint))
+      guard viewer.selectedGraphics.isEmpty,
+        viewer.selectionDetails?.text == refusal,
+        try document.editSession.bytesForSave() == baseline else {
+        throw PDFError(.malformed, "Images mode did not explain the nested-image refusal without mutation")
+      }
+
+      guard viewer.activateTool(.textEdit) else {
+        throw PDFError(.malformed, "Could not enter Edit PDF mode over a nested image")
+      }
+      textOverlay.mouseDown(with: try mouse(.leftMouseDown, windowPoint))
+      textOverlay.mouseUp(with: try mouse(.leftMouseUp, windowPoint))
+      guard viewer.isEditingPageText, viewer.selectedGraphics.isEmpty else {
+        throw PDFError(.malformed, "Edit PDF did not select visible page text over a nested image")
+      }
+      viewer.pageTextCancel?()
+      guard !viewer.isEditingPageText,
+        try document.editSession.bytesForSave() == baseline else {
+        throw PDFError(.malformed, "Canceling nested-overlap text editing changed the PDF")
+      }
+      checkpoint("nested-image refusal and text selection passed")
+    }
+
     static func run(output: URL) async {
       do {
         try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
@@ -1166,8 +1332,10 @@
       checkpoint("workspace sizing and settings passed")
       try await checkGraphicWorkflow(output: output)
       checkpoint("image workflow passed")
+      try await checkNestedImageWorkflow(output: output)
       return [
         "graphicWorkflow": "insert, properties, preview, selection, shared resize, cancel, keyboard, delete, alignment, save/reopen",
+        "nestedImageWorkflow": "Images explains reusable-form refusal; Edit PDF selects overlapping page text; cancel preserves bytes",
         "directTextSelection":
           "single-click selection, body move/cancel, double-click typing, marked-text Save veto",
         "paragraphWorkflow":
