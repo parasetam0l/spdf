@@ -450,7 +450,8 @@ final class SPDFDocument: NSDocument {
               pageID: self.editSession.pageIDs[target.pageIndex], runIndex: run, in: preview)
           }
         }
-        return try PDFWriter.write(preview, droppingLinearization: true)
+        return try PDFWriter.write(
+          preview, droppingLinearization: true, limits: SPDFDocumentResourcePolicy.parsingLimits)
       } catch { return nil }
     }
     viewer.onTextBlockCommit = { [weak self] target, text, style, dx, dy, lines, box in
