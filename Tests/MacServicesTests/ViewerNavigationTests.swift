@@ -326,6 +326,49 @@ extension ViewerNavigationTests {
     #expect(session.selectionDetails == nil)
   }
 
+  @Test @MainActor func textAndGraphicSelectionsReplaceEachOtherAcrossToolSwitches() throws {
+    let session = PDFViewingSession()
+    try session.open(PDFSource(data: PDFFixtures.onePage()))
+    session.searchText = "fixture - page 1"
+    session.runSearch()
+    #expect(session.selectionDetails?.text.contains("fixture - page 1") == true)
+
+    let image = AddedGraphicTarget(
+      pageIndex: 0, streamID: PDFObjectID(100), kind: "Document image",
+      rect: [100, 100, 200, 200], imagePlacementIndex: 0)
+    session.selectGraphics([image])
+    #expect(session.view.currentSelection?.string == nil)
+    #expect(session.selectedGraphics == [image])
+    #expect(session.selectionDetails?.text == "Document image graphic")
+
+    // A new native text selection supersedes the image selection and updates
+    // the inspector instead of leaving stale graphic details behind.
+    session.runSearch()
+    #expect(session.selectedGraphics.isEmpty)
+    #expect(session.selectionDetails?.text.contains("fixture - page 1") == true)
+
+    session.selectGraphics([image])
+    #expect(session.activateTool(.imageEdit))
+    #expect(session.selectedGraphics == [image])
+    #expect(session.view.currentSelection?.string == nil)
+
+    session.pendingEditFinisher = { false }
+    #expect(!session.activateTool(.textEdit))
+    #expect(session.activeTool == .imageEdit)
+    #expect(session.selectedGraphics == [image])
+
+    session.pendingEditFinisher = { true }
+    #expect(session.activateTool(.textEdit))
+    #expect(session.activeTool == .textEdit)
+    #expect(session.selectedGraphics.isEmpty)
+
+    session.runSearch()
+    #expect(session.selectionDetails?.text.contains("fixture - page 1") == true)
+    #expect(session.activateTool(.imageEdit))
+    #expect(session.view.currentSelection?.string == nil)
+    #expect(session.selectionDetails == nil)
+  }
+
   @Test func sidebarModesRoundTripThroughStoredNames() {
     for mode in SidebarMode.allCases {
       #expect(SidebarMode(storedName: mode.storedName) == mode)

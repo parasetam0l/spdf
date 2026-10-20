@@ -108,6 +108,11 @@
       guard viewer.selectedGraphicBounds == CGRect(x: 72, y: 100, width: 160, height: 80),
         document.insertImage(bytes, pageIndex: 0) else { throw PDFError(.malformed, "Image property selection was lost") }
       viewer.setGraphicBounds(CGRect(x: 300, y: 240, width: 120, height: 60))
+      guard document.addPageText(
+        pageIndex: 0, rect: [78, 110, 226, 164], text: "Text overlap",
+        style: PageTextStyle(fontSize: 18)) else {
+        throw PDFError(.malformed, "Could not create the cross-type overlap fixture")
+      }
       let targets = viewer.graphicsListProvider?(0) ?? []
       guard targets.count == preexisting.count + 2 else {
         throw PDFError(.malformed, "Second image placement failed")
@@ -117,16 +122,22 @@
         if let overlay = root as? GraphicSelectionOverlayView { return overlay }
         return root.subviews.lazy.compactMap { find($0) }.first
       }
+      func findPageEdit(_ root: NSView) -> PageEditOverlayView? {
+        if let overlay = root as? PageEditOverlayView { return overlay }
+        return root.subviews.lazy.compactMap { findPageEdit($0) }.first
+      }
       try await Task.sleep(for: .milliseconds(100))
       guard let overlay = find(content) else { throw PDFError(.malformed, "Missing image overlay") }
       func point(_ x: Double, _ y: Double) throws -> NSPoint {
         guard let page = viewer.view.document?.page(at: 0) else { throw PDFError(.malformed, "Missing image page") }
         return viewer.view.convert(viewer.view.convert(NSPoint(x: x, y: y), from: page), to: nil)
       }
-      func mouse(_ type: NSEvent.EventType, _ point: NSPoint, flags: NSEvent.ModifierFlags = []) throws -> NSEvent {
+      func mouse(
+        _ type: NSEvent.EventType, _ point: NSPoint, flags: NSEvent.ModifierFlags = [], clicks: Int = 1
+      ) throws -> NSEvent {
         guard let event = NSEvent.mouseEvent(with: type, location: point, modifierFlags: flags,
           timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
-          context: nil, eventNumber: 0, clickCount: 1, pressure: type == .leftMouseUp ? 0 : 1)
+          context: nil, eventNumber: 0, clickCount: clicks, pressure: type == .leftMouseUp ? 0 : 1)
         else { throw PDFError(.malformed, "Missing image pointer event") }; return event
       }
       func key(_ code: UInt16, flags: NSEvent.ModifierFlags = []) throws {
@@ -135,6 +146,97 @@
           context: nil, characters: "", charactersIgnoringModifiers: "", isARepeat: false, keyCode: code)
         else { throw PDFError(.malformed, "Missing image key event") }; overlay.keyDown(with: event)
       }
+      guard let textOverlay = findPageEdit(content),
+        let overlapPage = viewer.view.document?.page(at: 0),
+        let overlapText = viewer.view.document?.findString("Text overlap", withOptions: []).first
+      else { throw PDFError(.malformed, "Missing overlapping text target") }
+      let overlapBounds = overlapText.bounds(for: overlapPage)
+      let textPoint = try point(overlapBounds.midX, overlapBounds.midY)
+      let imagePoint = try point(120, 140)
+      let crossTypeBaseline = try document.editSession.bytesForSave()
+      window.setContentSize(NSSize(width: 1_160, height: 740))
+      viewer.view.setCurrentSelection(overlapText, animate: false)
+      viewer.refreshSelectionSummary()
+      try await Task.sleep(for: .milliseconds(120))
+      guard AccessibilityAudit.applicationElement(labeled: "Text selection") != nil,
+        let editTextAction = AccessibilityAudit.applicationElement(labeled: "Edit Text"),
+        AccessibilityAudit.press(editTextAction),
+        viewer.activeTool == .textEdit, viewer.selectedGraphics.isEmpty else {
+        throw PDFError(.malformed, "Wide text inspector did not hand selection to Edit PDF")
+      }
+      textOverlay.mouseDown(with: try mouse(.leftMouseDown, textPoint))
+      textOverlay.mouseUp(with: try mouse(.leftMouseUp, textPoint))
+      guard viewer.isEditingPageText, !viewer.isTypingPageText,
+        viewer.selectedGraphics.isEmpty else {
+        throw PDFError(.malformed, "Edit PDF did not select the text over the image")
+      }
+      viewer.pageTextCancel?()
+      guard !viewer.isEditingPageText,
+        try document.editSession.bytesForSave() == crossTypeBaseline else {
+        throw PDFError(.malformed, "Cancelling the overlap text selection changed the document")
+      }
+
+      // A real pending paragraph draft must finish before the tool changes.
+      // Verify the text is committed by the switch, then Undo restores the
+      // exact pre-edit document before continuing the image selection checks.
+      textOverlay.mouseDown(with: try mouse(.leftMouseDown, textPoint, clicks: 2))
+      textOverlay.mouseUp(with: try mouse(.leftMouseUp, textPoint, clicks: 2))
+      func findCanvas(_ root: NSView) -> InlinePageTextCanvas? {
+        if let canvas = root as? InlinePageTextCanvas { return canvas }
+        return root.subviews.lazy.compactMap { findCanvas($0) }.first
+      }
+      guard let draft = findCanvas(content), viewer.isTypingPageText else {
+        throw PDFError(.malformed, "Double-click did not start overlapping text input")
+      }
+      draft.textView.insertText(
+        "Draft overlap", replacementRange: NSRange(location: 0, length: (draft.textView.string as NSString).length))
+      guard viewer.hasPendingPageTextChanges,
+        viewer.activateTool(.imageEdit), viewer.activeTool == .imageEdit,
+        try document.editSession.bytesForSave() != crossTypeBaseline,
+        PDFDocument(data: try document.editSession.bytesForSave())?.string?.contains("Draft overlap") == true
+      else { throw PDFError(.malformed, "Switching tools lost the pending text draft") }
+      document.undoEdit()
+      guard try document.editSession.bytesForSave() == crossTypeBaseline else {
+        throw PDFError(.malformed, "Undo after committing the pending text draft did not restore the source")
+      }
+      _ = viewer.activateTool(.imageEdit)
+      overlay.mouseDown(with: try mouse(.leftMouseDown, imagePoint))
+      overlay.mouseUp(with: try mouse(.leftMouseUp, imagePoint))
+      guard viewer.selectedGraphics.map(\.identity) == [targets[0].identity],
+        try document.editSession.bytesForSave() == crossTypeBaseline else {
+        throw PDFError(.malformed, "Images mode did not select the graphic over the text")
+      }
+      checkpoint("overlapping text/image selection passed")
+      window.setFrame(
+        NSRect(origin: window.frame.origin, size: NSSize(width: 820, height: 700)), display: true)
+      try await Task.sleep(for: .milliseconds(150))
+      _ = viewer.activateTool(.select)
+      guard let imageProperties = AccessibilityAudit.keyWindowElement(labeled: "Image properties"),
+        AccessibilityAudit.press(imageProperties) else {
+        throw PDFError(.malformed, "Compact workspace could not open image properties")
+      }
+      try await Task.sleep(for: .milliseconds(100))
+      guard let editImages = AccessibilityAudit.applicationElement(labeled: "Edit Images"),
+        AccessibilityAudit.press(editImages), viewer.activeTool == .imageEdit else {
+        throw PDFError(.malformed, "Compact image inspector did not enter Images mode")
+      }
+      viewer.view.setCurrentSelection(overlapText, animate: false)
+      viewer.refreshSelectionSummary()
+      try await Task.sleep(for: .milliseconds(100))
+      if AccessibilityAudit.applicationElement(labeled: "Edit Text") == nil {
+        guard let textProperties = AccessibilityAudit.applicationElement(labeled: "Text selection"),
+          AccessibilityAudit.press(textProperties) else {
+          throw PDFError(.malformed, "Compact workspace could not open text selection properties")
+        }
+        try await Task.sleep(for: .milliseconds(100))
+      }
+      guard let editText = AccessibilityAudit.applicationElement(labeled: "Edit Text"),
+        AccessibilityAudit.press(editText), viewer.activeTool == .textEdit,
+        viewer.selectedGraphics.isEmpty,
+        viewer.view.currentSelection?.string?.contains("Text overlap") == true else {
+        throw PDFError(.malformed, "Compact text inspector did not enter Edit PDF mode")
+      }
+      checkpoint("compact contextual inspector actions passed")
       let baseline = try document.editSession.bytesForSave()
       _ = viewer.activateTool(.select)
       let first = try point(152, 140), moved = try point(172, 150)

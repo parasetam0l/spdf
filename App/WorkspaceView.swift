@@ -123,7 +123,7 @@ struct WorkspaceView: View {
       iconButton("Find", symbol: "magnifyingglass") { viewer.showSearch() }
         .help("Find in document (⌘F)")
       if usesProperties {
-        iconButton(usesTextProperties ? "Text properties" : "Image properties", symbol: "sidebar.right") {
+        iconButton(inspectorTitle, symbol: "sidebar.right") {
           if wide { inspectorVisible.toggle() } else { inspectorPopover.toggle() }
         }
         .popover(isPresented: $inspectorPopover, arrowEdge: .bottom) {
@@ -180,9 +180,22 @@ struct WorkspaceView: View {
     }
     .buttonStyle(WorkspaceToolStyle(selected: viewer.activeTool == tool))
     .disabled(tool != .select && tool != .annotate && !canEdit)
-    .help(title)
+    .help(toolHelp(tool, fallback: title))
     .accessibilityLabel(title)
     .accessibilityValue(viewer.activeTool == tool ? "Active" : "Inactive")
+  }
+
+  private func toolHelp(_ tool: ViewerToolMode, fallback: String) -> String {
+    switch tool {
+    case .select:
+      return "Select page text and graphics. In overlaps, use Edit PDF to target text or Images to target graphics."
+    case .textEdit:
+      return "Edit PDF: click a text block to select it and double-click to type. Text is targeted in overlaps."
+    case .imageEdit:
+      return "Images: select, move and resize supported images and graphics. Graphics are targeted in overlaps."
+    default:
+      return fallback
+    }
   }
 
   private var navigationPanel: some View {
@@ -364,12 +377,32 @@ struct WorkspaceView: View {
   private var usesTextProperties: Bool {
     viewer.activeTool == .textEdit || viewer.activeTool == .addText
   }
+  private var hasNativeTextSelection: Bool {
+    viewer.selectedGraphics.isEmpty
+      && viewer.view.currentSelection?.string?
+        .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+  }
   private var usesProperties: Bool {
     usesTextProperties || viewer.activeTool == .imageEdit || !viewer.selectedGraphics.isEmpty
+      || hasNativeTextSelection
+  }
+  private var inspectorTitle: String {
+    if usesTextProperties { return "Text properties" }
+    if hasNativeTextSelection { return "Text selection" }
+    return "Image properties"
   }
   @ViewBuilder private var propertiesInspector: some View {
-    if usesTextProperties { WorkspaceTextInspector(viewer: viewer) }
-    else { WorkspaceGraphicInspector(viewer: viewer) }
+    if !viewer.selectedGraphics.isEmpty {
+      WorkspaceGraphicInspector(viewer: viewer)
+    } else if usesTextProperties {
+      WorkspaceTextInspector(viewer: viewer)
+    } else if hasNativeTextSelection {
+      WorkspaceTextSelectionInspector(viewer: viewer) {
+        _ = viewer.activateTool(.textEdit)
+      }
+    } else {
+      WorkspaceGraphicInspector(viewer: viewer)
+    }
   }
   private var canEdit: Bool { viewer.allowsContentEditing && !viewer.isLocked }
   private func iconButton(_ title: String, symbol: String, action: @escaping () -> Void)

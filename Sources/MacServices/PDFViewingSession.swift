@@ -797,6 +797,20 @@ public final class PDFViewingSession: NSObject, ObservableObject, PDFViewDelegat
     if activeTool != .select, let finisher = pendingEditFinisher, !finisher() {
       return false
     }
+    // Text and graphic objects are selected through different native layers.
+    // Keep one active selection so a tool switch cannot leave a stale object
+    // highlighted behind the new inspector.
+    switch tool {
+    case .textEdit:
+      clearGraphicSelection()
+      refreshSelectionSummary()
+    case .addText, .imageEdit:
+      view.clearSelection()
+      refreshSelectionSummary()
+      if tool == .addText { clearGraphicSelection() }
+    case .select, .annotate, .page:
+      break
+    }
     activeTool = tool
     return true
   }
@@ -806,11 +820,20 @@ public final class PDFViewingSession: NSObject, ObservableObject, PDFViewDelegat
   public func refreshSelectionSummary() {
     let text = (view.currentSelection?.string ?? "")
       .trimmingCharacters(in: .whitespacesAndNewlines)
-    guard !text.isEmpty,
-      let document = view.document,
+    guard !text.isEmpty else {
+      // PDFKit posts selection changes asynchronously. If clearing its text
+      // selection was part of selecting a graphic, keep the graphic summary.
+      guard selectedGraphics.isEmpty else { return }
+      selectedObjectSummary = nil
+      selectionDetails = nil
+      return
+    }
+    // A new native text selection replaces an earlier graphic selection.
+    // This keeps the contextual inspector and canvas highlight in agreement.
+    if !selectedGraphics.isEmpty { selectedGraphics = [] }
+    guard let document = view.document,
       let selection = view.currentSelection,
-      let page = selection.pages.first
-    else {
+      let page = selection.pages.first else {
       selectedObjectSummary = nil
       selectionDetails = nil
       return
@@ -843,6 +866,11 @@ public final class PDFViewingSession: NSObject, ObservableObject, PDFViewDelegat
         && seen.insert($0.identity).inserted
     }
     selectedGraphics = targets
+    if !targets.isEmpty {
+      // Graphic selection takes ownership from PDFKit text/search selection.
+      // Publish the graphic details after clearing the native highlight.
+      view.clearSelection()
+    }
     guard !targets.isEmpty else {
       if view.currentSelection == nil {
         selectedObjectSummary = nil

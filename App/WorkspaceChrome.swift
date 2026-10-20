@@ -384,6 +384,55 @@ struct WorkspaceAlignmentControls: View {
   }
 }
 
+struct WorkspaceTextSelectionInspector: View {
+  @ObservedObject var viewer: PDFViewingSession
+  var onEditText: () -> Void
+
+  var body: some View {
+    VStack(alignment: .leading, spacing: 0) {
+      Text("Text selection").font(.system(size: 13, weight: .semibold)).padding(16)
+      Divider()
+      ScrollView {
+        VStack(alignment: .leading, spacing: 14) {
+          if let details = viewer.selectionDetails {
+            LabeledContent("Page") { Text("\(details.pageNumber)") }
+            VStack(alignment: .leading, spacing: 5) {
+              Text("Selected text").font(.caption).foregroundStyle(.secondary)
+              Text(details.text).font(.system(size: 12)).textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+            }
+            if let bounds = details.bounds, bounds.count == 4 {
+              LabeledContent("Bounds") {
+                Text("\(Int(bounds[0])), \(Int(bounds[1])) – \(Int(bounds[2])), \(Int(bounds[3])) pt")
+                  .textSelection(.enabled)
+              }
+            }
+            Button(action: onEditText) {
+              Label("Edit Text", systemImage: "square.and.pencil")
+                .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.borderedProminent)
+            .disabled(!viewer.allowsContentEditing || viewer.isLocked)
+            Text("PDF text selection is read-only. Choose Edit PDF to select and edit a text block.")
+              .font(.system(size: 11)).foregroundStyle(.secondary)
+              .fixedSize(horizontal: false, vertical: true)
+          } else {
+            Text("Select text on the page to inspect it here.")
+              .font(.system(size: 12)).foregroundStyle(.secondary)
+          }
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+      }
+      Spacer(minLength: 0)
+    }
+    .background(Color(nsColor: .controlBackgroundColor))
+    .frame(width: 224)
+    .accessibilityElement(children: .contain)
+    .accessibilityLabel("Text selection properties")
+  }
+}
+
 struct WorkspaceGraphicInspector: View {
   @ObservedObject var viewer: PDFViewingSession
   @State private var constrain = true
@@ -405,6 +454,14 @@ struct WorkspaceGraphicInspector: View {
             Label("Insert Image…", systemImage: "photo.badge.plus").frame(maxWidth: .infinity)
           }.buttonStyle(.bordered).disabled(!editable)
           if let bounds = viewer.selectedGraphicBounds {
+            if !editable {
+              Button { _ = viewer.activateTool(.imageEdit) } label: {
+                Label("Edit Images", systemImage: "photo")
+                  .frame(maxWidth: .infinity)
+              }
+              .buttonStyle(.borderedProminent)
+              .disabled(!viewer.allowsContentEditing || viewer.isLocked)
+            }
             VStack(alignment: .leading, spacing: 10) {
               Text("POSITION & SIZE").font(.system(size: 10, weight: .semibold))
                 .tracking(0.7).foregroundStyle(.secondary)

@@ -135,6 +135,15 @@ enum AccessibilityAudit {
     return findElement(labeled: label, in: window)
   }
 
+  static func applicationElement(labeled label: String) -> AXUIElement? {
+    findElement(labeled: label, in: AXUIElementCreateApplication(getpid()))
+  }
+
+  @discardableResult
+  static func press(_ element: AXUIElement) -> Bool {
+    AXUIElementPerformAction(element, kAXPressAction as CFString) == .success
+  }
+
   private static func findElement(labeled label: String, in element: AXUIElement) -> AXUIElement? {
     let description = attribute(element, kAXDescriptionAttribute) ?? ""
     let title = attribute(element, kAXTitleAttribute) ?? ""
