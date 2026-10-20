@@ -106,7 +106,11 @@
       }
       viewer.setGraphicBounds(CGRect(x: 72, y: 100, width: 160, height: 80))
       guard viewer.selectedGraphicBounds == CGRect(x: 72, y: 100, width: 160, height: 80),
-        document.insertImage(bytes, pageIndex: 0) else { throw PDFError(.malformed, "Image property selection was lost") }
+        document.addPageText(
+          pageIndex: 0, rect: [304, 244, 412, 298], text: "Image over text",
+          style: PageTextStyle(fontSize: 18)),
+        document.insertImage(bytes, pageIndex: 0)
+      else { throw PDFError(.malformed, "Could not create the reverse paint-order fixture") }
       viewer.setGraphicBounds(CGRect(x: 300, y: 240, width: 120, height: 60))
       guard document.addPageText(
         pageIndex: 0, rect: [78, 110, 226, 164], text: "Text overlap",
@@ -225,6 +229,39 @@
         throw PDFError(.malformed, "Images mode did not select the graphic over the text")
       }
       checkpoint("overlapping text/image selection passed")
+
+      // Repeat the mode-priority check with reversed paint order: this image
+      // was inserted after the text and visibly covers it. The active tool
+      // must still determine which object type receives the click.
+      let reversedPagePoint = [310.0, 285.0]
+      guard viewer.textRunProvider?(0, reversedPagePoint) != nil else {
+        throw PDFError(.malformed, "Text editing could not resolve text below a later-painted image")
+      }
+      checkpoint("reverse paint-order text target found")
+      guard viewer.activateTool(.textEdit) else {
+        throw PDFError(.malformed, "Text mode was vetoed before the reverse-order overlap check")
+      }
+      let reversedTextPoint = try point(reversedPagePoint[0], reversedPagePoint[1])
+      textOverlay.mouseDown(with: try mouse(.leftMouseDown, reversedTextPoint))
+      textOverlay.mouseUp(with: try mouse(.leftMouseUp, reversedTextPoint))
+      guard viewer.isEditingPageText, viewer.selectedGraphics.isEmpty else {
+        throw PDFError(.malformed, "Edit PDF did not select text below a later-painted image")
+      }
+      viewer.pageTextCancel?()
+      guard try document.editSession.bytesForSave() == crossTypeBaseline,
+        viewer.activateTool(.imageEdit) else {
+        throw PDFError(.malformed, "Reverse-order text cancel changed the document or blocked Images")
+      }
+      let reversedImagePoint = try point(350, 270)
+      overlay.mouseDown(with: try mouse(.leftMouseDown, reversedImagePoint))
+      overlay.mouseUp(with: try mouse(.leftMouseUp, reversedImagePoint))
+      guard viewer.selectedGraphics.map(\.identity) == [targets[1].identity],
+        viewer.view.currentSelection?.string == nil,
+        try document.editSession.bytesForSave() == crossTypeBaseline else {
+        throw PDFError(.malformed, "Images did not select the later-painted image over text")
+      }
+      checkpoint("reverse paint-order selection passed")
+
       window.setFrame(
         NSRect(origin: window.frame.origin, size: NSSize(width: 820, height: 700)), display: true)
       try await Task.sleep(for: .milliseconds(150))
