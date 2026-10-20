@@ -185,8 +185,25 @@
         if let canvas = root as? InlinePageTextCanvas { return canvas }
         return root.subviews.lazy.compactMap { findCanvas($0) }.first
       }
-      guard let draft = findCanvas(content), viewer.isTypingPageText else {
+      guard let cancelledDraft = findCanvas(content), viewer.isTypingPageText else {
         throw PDFError(.malformed, "Double-click did not start overlapping text input")
+      }
+      cancelledDraft.textView.insertText(
+        "Cancelled draft",
+        replacementRange: NSRange(location: 0, length: (cancelledDraft.textView.string as NSString).length))
+      guard viewer.hasPendingPageTextChanges else {
+        throw PDFError(.malformed, "Typing over the image did not create a pending text draft")
+      }
+      viewer.pageTextCancel?()
+      guard !viewer.isEditingPageText,
+        try document.editSession.bytesForSave() == crossTypeBaseline else {
+        throw PDFError(.malformed, "Cancelling a typed overlap draft changed the PDF")
+      }
+
+      textOverlay.mouseDown(with: try mouse(.leftMouseDown, textPoint, clicks: 2))
+      textOverlay.mouseUp(with: try mouse(.leftMouseUp, textPoint, clicks: 2))
+      guard let draft = findCanvas(content), viewer.isTypingPageText else {
+        throw PDFError(.malformed, "Second double-click did not start text input")
       }
       draft.textView.insertText(
         "Draft overlap", replacementRange: NSRange(location: 0, length: (draft.textView.string as NSString).length))
