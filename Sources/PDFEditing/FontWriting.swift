@@ -1027,8 +1027,8 @@ public struct TrueTypeOutlineMetrics: Sendable {
   public let inspector: TrueTypeInspector
   private let program: [UInt8]
 
-  public init(program: Data) throws {
-    self.inspector = try TrueTypeInspector.inspect(program)
+  public init(program: Data, requireUnicodeMap: Bool = true) throws {
+    self.inspector = try TrueTypeInspector.inspect(program, requireUnicodeMap: requireUnicodeMap)
     self.program = [UInt8](program)
   }
 

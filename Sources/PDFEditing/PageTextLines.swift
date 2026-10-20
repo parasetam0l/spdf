@@ -546,6 +546,127 @@ public struct RewritePageTextCommand: PDFEditCommand, Equatable, Sendable {
       return advances.map { $0.width.rounded() }
     }
 
+    var outputOutlineMetrics: [PDFObjectID: TrueTypeOutlineMetrics] = [:]
+    var fontsWithoutOutputOutlines: Set<PDFObjectID> = []
+    var customFontOutlineMetrics: [String: TrueTypeOutlineMetrics] = [:]
+    var customFontsWithoutOutlines: Set<String> = []
+    func outlineMetrics(for font: IndexedTextFont) -> TrueTypeOutlineMetrics? {
+      if let cached = outputOutlineMetrics[font.fontID] { return cached }
+      guard !fontsWithoutOutputOutlines.contains(font.fontID) else { return nil }
+      guard let metrics = font.outlineMetrics else {
+        fontsWithoutOutputOutlines.insert(font.fontID)
+        return nil
+      }
+      outputOutlineMetrics[font.fontID] = metrics
+      return metrics
+    }
+    func outlineMetrics(forCustomFont font: CustomTextFont) -> TrueTypeOutlineMetrics? {
+      if let cached = customFontOutlineMetrics[font.identifier] { return cached }
+      guard !customFontsWithoutOutlines.contains(font.identifier) else { return nil }
+      guard let metrics = try? TrueTypeOutlineMetrics(program: font.program) else {
+        customFontsWithoutOutlines.insert(font.identifier)
+        return nil
+      }
+      customFontOutlineMetrics[font.identifier] = metrics
+      return metrics
+    }
+
+    /// Measure output glyphs individually when the font exposes its outlines.
+    /// A single line rectangle can extend through a neighboring line's ink
+    /// box even when the glyphs themselves remain separated.
+    func inkBounds(of text: String, font: IndexedTextFont?, standardFamily: String? = nil,
+      customFont: CustomTextFont? = nil, size: Double, spacing: Double,
+      x: Double, baseline: Double) -> [[Double]]?
+    {
+      guard size.isFinite, size > 0, spacing.isFinite,
+        x.isFinite, baseline.isFinite else { return nil }
+      if text.isEmpty { return [] }
+
+      if let font {
+        guard let metrics = outlineMetrics(for: font),
+          metrics.inspector.unitsPerEm > 0,
+          let codes = font.encode(text), let glyphs = font.glyphs(codes), !glyphs.isEmpty
+        else { return nil }
+        let unitScale = size / Double(metrics.inspector.unitsPerEm)
+        var pen = 0.0
+        var result: [[Double]] = []
+        for glyph in glyphs {
+          guard let width = glyph.width,
+            width.isFinite, width >= 0 else { return nil }
+          guard let glyphID = font.outlineGlyphID(for: glyph, inspector: metrics.inspector) else {
+            return nil
+          }
+          if let box = metrics.bounds(glyphID: glyphID) {
+            let bounds = [
+              x + pen + Double(box[0]) * unitScale,
+              baseline + Double(box[1]) * unitScale,
+              x + pen + Double(box[2]) * unitScale,
+              baseline + Double(box[3]) * unitScale,
+            ]
+            guard bounds.allSatisfy(\.isFinite) else { return nil }
+            result.append(bounds)
+          }
+          pen += width * size / 1_000 + spacing
+        }
+        return result
+      }
+
+      if let customFont {
+        guard let metrics = outlineMetrics(forCustomFont: customFont),
+          metrics.inspector.unitsPerEm > 0 else { return nil }
+        let unitScale = size / Double(metrics.inspector.unitsPerEm)
+        var pen = 0.0
+        var result: [[Double]] = []
+        for scalar in text.unicodeScalars {
+          guard let glyphID = metrics.inspector.unicodeToGlyph[Int(scalar.value)],
+            glyphID > 0, glyphID < metrics.inspector.glyphCount,
+            let advance = metrics.inspector.advances[glyphID], advance >= 0 else { return nil }
+          if let box = metrics.bounds(glyphID: glyphID) {
+            let bounds = [
+              x + pen + Double(box[0]) * unitScale,
+              baseline + Double(box[1]) * unitScale,
+              x + pen + Double(box[2]) * unitScale,
+              baseline + Double(box[3]) * unitScale,
+            ]
+            guard bounds.allSatisfy(\.isFinite) else { return nil }
+            result.append(bounds)
+          }
+          pen += Double(advance) * unitScale + spacing
+        }
+        return result
+      }
+
+      guard let standardFamily, Self.standardFonts.contains(standardFamily),
+        StandardTextFont(rawValue: standardFamily) != nil,
+        let widths = standardWidths(of: text, family: standardFamily),
+        widths.count == text.unicodeScalars.count else { return nil }
+      let characters = Array(text.utf16)
+      guard characters.count == text.unicodeScalars.count else { return nil }
+      let coreTextFont = standardFont(named: standardFamily)
+      var glyphs = [CGGlyph](repeating: 0, count: characters.count)
+      guard CTFontGetGlyphsForCharacters(coreTextFont, characters, &glyphs, glyphs.count),
+        glyphs.allSatisfy({ $0 != 0 }) else { return nil }
+      var rects = [CGRect](repeating: .zero, count: glyphs.count)
+      _ = CTFontGetBoundingRectsForGlyphs(coreTextFont, .horizontal, glyphs, &rects, glyphs.count)
+      var pen = 0.0
+      var result: [[Double]] = []
+      for (index, rect) in rects.enumerated() {
+        if !rect.isNull, rect.width > 0, rect.height > 0 {
+          let scale = size / 1_000
+          let bounds = [
+            x + pen + Double(rect.minX) * scale,
+            baseline + Double(rect.minY) * scale,
+            x + pen + Double(rect.maxX) * scale,
+            baseline + Double(rect.maxY) * scale,
+          ]
+          guard bounds.allSatisfy(\.isFinite) else { return nil }
+          result.append(bounds)
+        }
+        pen += widths[index] * size / 1_000 + spacing
+      }
+      return result
+    }
+
     func bounds(of text: String, font: IndexedTextFont?, standardFamily: String? = nil,
       customFont: CustomTextFont? = nil,
       size: Double, spacing: Double)
@@ -574,7 +695,7 @@ public struct RewritePageTextCommand: PDFEditCommand, Equatable, Sendable {
           widths = glyphs.compactMap(\.width)
         }
       } else if let customFont {
-        guard let inspector = try? TrueTypeInspector.inspect(customFont.program),
+        guard let inspector = outlineMetrics(forCustomFont: customFont)?.inspector,
           inspector.permitsEditableSubsetEmbedding else { return nil }
         let advances = text.unicodeScalars.compactMap { scalar -> Double? in
           guard let glyph = inspector.unicodeToGlyph[Int(scalar.value)],
@@ -610,8 +731,45 @@ public struct RewritePageTextCommand: PDFEditCommand, Equatable, Sendable {
       return IndexedTextFont.resolve(resource: source.resource, page: page, in: graph)
     }
 
+    func embeddedInkBounds(for glyph: TextCluster) -> [Double]? {
+      guard analysis.runs.indices.contains(glyph.runIndex) else { return nil }
+      let run = analysis.runs[glyph.runIndex]
+      guard let font = analysis.fonts[run.fontResource],
+        let metrics = outlineMetrics(for: font), metrics.inspector.unitsPerEm > 0,
+        let sourceGlyphs = font.glyphs(run.rawCodes), sourceGlyphs.indices.contains(glyph.glyphIndex),
+        let glyphID = font.outlineGlyphID(
+          for: sourceGlyphs[glyph.glyphIndex], inspector: metrics.inspector),
+        let box = metrics.bounds(glyphID: glyphID)
+      else { return nil }
+      let matrix = TextCanvasSupport.concatenate(run.ctm, run.matrix)
+      guard matrix.count == 6, matrix.allSatisfy(\.isFinite),
+        run.fontSize.isFinite, run.fontSize > 0, run.rise.isFinite,
+        run.horizontalScale.isFinite else { return nil }
+      let textX = glyph.origin[0] - matrix[4] - run.rise * matrix[2]
+      let textY = glyph.origin[1] - matrix[5] - run.rise * matrix[3]
+      let position: Double
+      if abs(matrix[0]) > 1e-9 {
+        position = textX / matrix[0]
+      } else if abs(matrix[1]) > 1e-9 {
+        position = textY / matrix[1]
+      } else {
+        return nil
+      }
+      guard position.isFinite else { return nil }
+      let pointScale = run.fontSize / Double(metrics.inspector.unitsPerEm)
+      let horizontal = pointScale * max(0.01, min(1000, run.horizontalScale)) / 100
+      let bounds = PageTextLayout.composedBounds(
+        matrix: matrix, position: position,
+        advance: Double(box[2] - box[0]) * horizontal,
+        em: Double(box[3] - box[1]) * pointScale,
+        descent: Double(box[1]) * pointScale,
+        xOffset: Double(box[0]) * horizontal, rise: run.rise)
+      return bounds.allSatisfy(\.isFinite) ? bounds : nil
+    }
+
     func measuredBounds(for glyph: TextCluster) -> (bounds: [Double], hasAdvance: Bool)? {
       guard glyph.bounds.count == 4, glyph.bounds.allSatisfy(\.isFinite) else { return nil }
+      if let ink = embeddedInkBounds(for: glyph) { return (ink, true) }
       if glyph.advance != nil { return (glyph.bounds, true) }
       guard analysis.runs.indices.contains(glyph.runIndex),
         analysis.standardIndices.contains(glyph.runIndex)
@@ -665,8 +823,9 @@ public struct RewritePageTextCommand: PDFEditCommand, Equatable, Sendable {
       ], true)
     }
 
+    let independentGlyphBounds = independentGlyphs.compactMap { measuredBounds(for: $0) }
     for line in lines {
-      var spans: [(minX: Double, maxX: Double, size: Double)] = []
+      var editedGlyphBounds: [[Double]] = []
       if line.segments.isEmpty {
         if !line.text.isEmpty {
           guard let measured = bounds(
@@ -675,7 +834,15 @@ public struct RewritePageTextCommand: PDFEditCommand, Equatable, Sendable {
             throw PDFError(.unsupported,
               "Cannot safely check this edit against nearby text because output glyph widths are unavailable")
           }
-          spans.append((line.x + measured.min, line.x + measured.max, defaultFontSize))
+          if let ink = inkBounds(of: line.text, font: defaultFont,
+            size: defaultFontSize, spacing: 0, x: line.x, baseline: line.baseline) {
+            editedGlyphBounds += ink
+          } else {
+            editedGlyphBounds.append([
+              line.x + measured.min, line.baseline - defaultFontSize * 0.2,
+              line.x + measured.max, line.baseline + defaultFontSize * 0.85,
+            ])
+          }
         }
       } else {
         for segment in line.segments where !segment.text.isEmpty {
@@ -689,24 +856,52 @@ public struct RewritePageTextCommand: PDFEditCommand, Equatable, Sendable {
             throw PDFError(.unsupported,
               "Cannot safely check this edit against nearby text because output glyph widths are unavailable")
           }
-          spans.append((segment.x + measured.min, segment.x + measured.max, segment.format.size))
+          if let ink = inkBounds(of: segment.text, font: segmentFont,
+            standardFamily: standardFamily, customFont: segment.format.customFont,
+            size: segment.format.size, spacing: segment.format.characterSpacing,
+            x: segment.x, baseline: line.baseline) {
+            editedGlyphBounds += ink
+          } else {
+            editedGlyphBounds.append([
+              segment.x + measured.min, line.baseline - segment.format.size * 0.2,
+              segment.x + measured.max, line.baseline + segment.format.size * 0.85,
+            ])
+          }
         }
       }
-      guard let minX = spans.map(\.minX).min(), let maxX = spans.map(\.maxX).max(),
-        let size = spans.map(\.size).max(), maxX > minX else { continue }
-      let editedBounds = [minX, line.baseline - size * 0.2, maxX, line.baseline + size * 0.85]
-      for glyph in independentGlyphs {
-        let measured = measuredBounds(for: glyph)
-        guard let other = measured?.bounds else { continue }
-        let overlapX = min(editedBounds[2], other[2]) - max(editedBounds[0], other[0])
-        let overlapY = min(editedBounds[3], other[3]) - max(editedBounds[1], other[1])
-        if measured?.hasAdvance == false, overlapY > 0.5 {
-          throw PDFError(.unsupported,
-            "Cannot safely check this edit against nearby text because glyph widths are unavailable")
+      guard !editedGlyphBounds.isEmpty else { continue }
+
+      // Preserve the conservative refusal for nearby text whose width cannot
+      // be measured. For known glyphs, first limit pairwise outline checks to
+      // candidates that can intersect this line's ink box; long output lines
+      // then avoid comparing every output glyph with every page glyph.
+      if independentGlyphBounds.contains(where: { other in
+        guard !other.hasAdvance else { return false }
+        return editedGlyphBounds.contains { edited in
+          min(edited[3], other.bounds[3]) - max(edited[1], other.bounds[1]) > 0.5
         }
-        guard overlapX > 0.5, overlapY > 0.5 else { continue }
+      }) {
         throw PDFError(.unsupported,
-          "This edit would overlap another text block. Shorten the text or choose a wider area.")
+          "Cannot safely check this edit against nearby text because glyph widths are unavailable")
+      }
+      let lineBounds = [
+        editedGlyphBounds.map { $0[0] }.min()!, editedGlyphBounds.map { $0[1] }.min()!,
+        editedGlyphBounds.map { $0[2] }.max()!, editedGlyphBounds.map { $0[3] }.max()!,
+      ]
+      let nearbyGlyphBounds = independentGlyphBounds.filter { other in
+        guard other.hasAdvance else { return false }
+        return min(lineBounds[2], other.bounds[2]) - max(lineBounds[0], other.bounds[0]) > 0.5
+          && min(lineBounds[3], other.bounds[3]) - max(lineBounds[1], other.bounds[1]) > 0.5
+      }
+      for editedBounds in editedGlyphBounds {
+        for measured in nearbyGlyphBounds {
+          let other = measured.bounds
+          let overlapX = min(editedBounds[2], other[2]) - max(editedBounds[0], other[0])
+          let overlapY = min(editedBounds[3], other[3]) - max(editedBounds[1], other[1])
+          guard overlapX > 0.5, overlapY > 0.5 else { continue }
+          throw PDFError(.unsupported,
+            "This edit would overlap another text block. Shorten the text or choose a wider area.")
+        }
       }
     }
   }

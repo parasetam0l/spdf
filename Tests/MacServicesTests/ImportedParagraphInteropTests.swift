@@ -108,6 +108,78 @@ struct ImportedParagraphInteropTests {
     return NativeParagraphEditing.targets(from: blocks, pageID: pageID, graph: graph, page: page, pageIndex: 0)
   }
 
+  private func removingUnicodeCmap(from program: Data) throws -> Data {
+    var bytes = [UInt8](program)
+    let inspector = try TrueTypeInspector.inspect(program)
+    let count = try TrueTypeInspector.u16(bytes, at: 4)
+    var removed = false
+    for index in 0..<count {
+      let offset = 12 + index * 16
+      if String(decoding: bytes[offset..<offset + 4], as: UTF8.self) == "cmap" {
+        bytes.replaceSubrange(offset..<offset + 4, with: Array("zzzz".utf8))
+        removed = true
+      }
+    }
+    guard removed, let head = inspector.tables["head"] else {
+      throw PDFError(.malformed, "The test font has no cmap or head table")
+    }
+    bytes.replaceSubrange(head.offset + 8..<head.offset + 12, with: [0, 0, 0, 0])
+    let adjustment = (0xB1B0_AFBA - TrueTypeSubsetter.checksum(bytes)) & 0xFFFF_FFFF
+    bytes.replaceSubrange(head.offset + 8..<head.offset + 12, with: TrueTypeSubsetter.u32Bytes(adjustment))
+    return Data(bytes)
+  }
+
+  private func cmaplessExplicitCIDMapFixture() throws -> (PDFGraph, PDFObjectID) {
+    var (graph, pageID) = try fixture(composite: true)
+    let program = try #require(Data(base64Encoded: FontFixtureData.subsetProgramBase64))
+    let inspector = try TrueTypeInspector.inspect(program)
+    let scalars = [32, 65, 66, 67]
+    let cidByScalar = try Dictionary(uniqueKeysWithValues: scalars.map { scalar in
+      (scalar, try #require(inspector.unicodeToGlyph[scalar]) + 256)
+    })
+    let maximumCID = cidByScalar.values.max() ?? 0
+    var cidToGID = [UInt8](repeating: 0, count: (maximumCID + 1) * 2)
+    var widths: [PDFValue] = []
+    var unicodeEntries: [String] = []
+    for scalar in scalars {
+      let cid = cidByScalar[scalar]!
+      let glyphID = try #require(inspector.unicodeToGlyph[scalar])
+      cidToGID[cid * 2] = UInt8((glyphID >> 8) & 0xFF)
+      cidToGID[cid * 2 + 1] = UInt8(glyphID & 0xFF)
+      let advance = try #require(inspector.advances[glyphID])
+      widths += [.integer(Int64(cid)), .array([.real((Double(advance) * 1_000
+        / Double(inspector.unitsPerEm)).rounded())])]
+      unicodeEntries.append(String(format: "<%04X> <%04X>", cid, scalar))
+    }
+
+    guard case .dictionary(var descendant)? = graph.objects[PDFObjectID(20)] else {
+      throw PDFError(.malformed, "The test CID font is missing")
+    }
+    descendant[PDFName("CIDToGIDMap")] = .reference(PDFObjectID(22))
+    descendant[PDFName("W")] = .array(widths)
+    graph.objects[PDFObjectID(20)] = .dictionary(descendant)
+    graph.objects[PDFObjectID(22)] = .stream(PDFStream(bytes: Data(cidToGID)))
+    graph.objects[PDFObjectID(21)] = .stream(PDFStream(bytes: Data("""
+      /CIDInit /ProcSet findresource begin 12 dict begin begincmap
+      1 begincodespacerange <0000> <FFFF> endcodespacerange
+      \(unicodeEntries.count) beginbfchar
+      \(unicodeEntries.joined(separator: "\n"))
+      endbfchar endcmap end end
+      """.utf8)))
+
+    func operand(_ text: String) -> String {
+      "<" + text.unicodeScalars.map {
+        String(format: "%04X", cidByScalar[Int($0.value)]!)
+      }.joined() + ">"
+    }
+    let content = [700, 688].map { baseline in
+      "BT /F1 16 Tf 1 0 0 1 42 \(baseline) Tm \(operand("ABC")) Tj ET"
+    }.joined(separator: "\n")
+    graph.objects[PDFObjectID(5)] = .stream(PDFStream(bytes: Data(content.utf8)))
+    graph.objects[PDFObjectID(7)] = .stream(PDFStream(bytes: try removingUnicodeCmap(from: program)))
+    return (graph, pageID)
+  }
+
   @Test @MainActor func embeddedSimpleAndIdentitySubsetParagraphsKeepTheOriginalFont() throws {
     for composite in [false, true] {
       let (graph, pageID) = try fixture(composite: composite)
@@ -144,7 +216,8 @@ struct ImportedParagraphInteropTests {
         initial: initial, profiles: paragraph.fontProfiles)
       formatting.render(scale: 1, minimumLineSpacing: 22)
       #expect(!formatting.hasChanges)
-      #expect((view.font?.fontName ?? "").contains("DejaVuSans"))
+      let usesEmbeddedFont = (view.font?.fontName ?? "").contains("DejaVuSans")
+      #expect(usesEmbeddedFont)
       view.setSelectedRange(NSRange(location: 0, length: 3))
       #expect(formatting.apply(.color([0.2, 0.4, 0.7]), isTyping: true) == nil)
       #expect(formatting.fragments().first?.format.sourceFont == initial.sourceFont)
@@ -663,30 +736,20 @@ struct ImportedParagraphInteropTests {
   @Test @MainActor func cidSubsetWithoutUnicodeCmapUsesItsOriginalGlyphsForTheNativePreview() throws {
     var (graph, pageID) = try fixture(composite: true)
     guard case .stream(let stream)? = graph.objects[PDFObjectID(7)] else { return }
-    var bytes = [UInt8](stream.bytes)
-    let inspector = try TrueTypeInspector.inspect(Data(bytes))
-    let count = try TrueTypeInspector.u16(bytes, at: 4)
-    for index in 0..<count {
-      let offset = 12 + index * 16
-      if String(decoding: bytes[offset..<offset + 4], as: UTF8.self) == "cmap" {
-        bytes.replaceSubrange(offset..<offset + 4, with: Array("zzzz".utf8))
-      }
-    }
-    let head = try #require(inspector.tables["head"])
-    bytes.replaceSubrange(head.offset + 8..<head.offset + 12, with: [0, 0, 0, 0])
-    let adjustment = (0xB1B0_AFBA - TrueTypeSubsetter.checksum(bytes)) & 0xFFFF_FFFF
-    bytes.replaceSubrange(head.offset + 8..<head.offset + 12, with: TrueTypeSubsetter.u32Bytes(adjustment))
-    graph.objects[PDFObjectID(7)] = .stream(PDFStream(bytes: Data(bytes)))
-    #expect(throws: PDFError.self) { try TrueTypeInspector.inspect(Data(bytes)) }
+    let program = try removingUnicodeCmap(from: stream.bytes)
+    let inspector = try TrueTypeInspector.inspect(stream.bytes)
+    graph.objects[PDFObjectID(7)] = .stream(PDFStream(bytes: program))
+    #expect(throws: PDFError.self) { try TrueTypeInspector.inspect(program) }
     let profiles = try PageTextEditing.fontProfiles(pageID: pageID, in: graph)
     let profile = try #require(profiles[PDFName("F1")])
     let preview = try #require(profile.previewProgram)
     let previewInfo = try TrueTypeInspector.inspect(preview)
-    let originalInfo = try TrueTypeInspector.inspect(Data(bytes), requireUnicodeMap: false)
+    let originalInfo = try TrueTypeInspector.inspect(program, requireUnicodeMap: false)
     #expect(previewInfo.unicodeToGlyph[65] == inspector.unicodeToGlyph[65])
+    let programBytes = [UInt8](program)
     for tag in ["glyf", "loca", "hmtx", "maxp"] {
       let before = try #require(originalInfo.tables[tag]); let after = try #require(previewInfo.tables[tag])
-      #expect(Array(bytes[before.offset..<before.offset + before.length])
+      #expect(Array(programBytes[before.offset..<before.offset + before.length])
         == Array(preview[after.offset..<after.offset + after.length]))
     }
     let paragraph = try #require(targets(graph, pageID: pageID).first?.paragraph)
@@ -697,7 +760,34 @@ struct ImportedParagraphInteropTests {
     #expect(!formatting.hasChanges)
     #expect(formatting.insertionIssue("ABC") == nil)
     #expect(formatting.insertionIssue("D") != nil)
-    #expect(graph.objects[PDFObjectID(7)] == .stream(PDFStream(bytes: Data(bytes))))
+    #expect(graph.objects[PDFObjectID(7)] == .stream(PDFStream(bytes: program)))
+  }
+
+  @Test @MainActor func cmaplessExplicitCIDOutlinesAllowSafeSpacingAndRefuseRealInkOverlap() throws {
+    let (graph, pageID) = try cmaplessExplicitCIDMapFixture()
+    let layout = try PageTextLayout.build(pageID: pageID, in: graph)
+    #expect(Set(layout.clusters.map(\.runIndex)) == Set([0, 1]))
+    #expect(layout.clusters.filter { $0.runIndex == 0 }.map(\.text).joined() == "ABC")
+    #expect(layout.clusters.filter { $0.runIndex == 1 }.map(\.text).joined() == "ABC")
+
+    let format = PageTextFormat(font: .helvetica, size: 16,
+      sourceFont: .init(resource: PDFName("F1"), name: "DejaVuSans"))
+    let safelySpaced = RewritePageTextCommand(pageID: pageID, originalText: [0: "ABC"],
+      lines: [.init(text: "ABC", x: 42, baseline: 700,
+        segments: [.init(text: "ABC", x: 42, format: format)])],
+      fontSize: 16, color: [0, 0, 0])
+    try safelySpaced.validate(in: graph)
+
+    let overlapping = RewritePageTextCommand(pageID: pageID, originalText: [0: "ABC"],
+      lines: [.init(text: "ABC", x: 42, baseline: 696,
+        segments: [.init(text: "ABC", x: 42, format: format)])],
+      fontSize: 16, color: [0, 0, 0])
+    do {
+      try overlapping.validate(in: graph)
+      Issue.record("An edit overlapping source glyph ink was accepted")
+    } catch let error as PDFError {
+      #expect(error.message.contains("overlap another text block"))
+    }
   }
   @Test @MainActor func rectangularClipsSurviveNativeDiscoveryRewriteAndReopen() throws {
     for composite in [false, true] {

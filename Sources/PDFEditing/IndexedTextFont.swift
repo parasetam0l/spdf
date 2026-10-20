@@ -140,6 +140,39 @@ struct IndexedTextFont {
   var isSupported: Bool { simple?.isSupported ?? !mapping.isEmpty }
   var isInlineEditable: Bool { simple.map { $0.isEditable && !$0.isType3 } ?? (program != nil) }
 
+  /// Read-only outline metrics for collision checks. This deliberately does
+  /// not apply the font embedding-permission gate used by the writer: reading
+  /// an already embedded outline to check ink geometry does not embed it.
+  var outlineMetrics: TrueTypeOutlineMetrics? {
+    guard let program else { return nil }
+    return try? TrueTypeOutlineMetrics(program: program, requireUnicodeMap: false)
+  }
+
+  /// Resolve a source PDF character code through the font's actual
+  /// code-to-glyph mapping, including CIDToGIDMap for Identity-H fonts.
+  func outlineGlyphID(for glyph: Glyph, inspector: TrueTypeInspector) -> Int? {
+    guard glyph.text.unicodeScalars.count == 1,
+      let scalar = glyph.text.unicodeScalars.first else { return nil }
+    let glyphID: Int
+    if simple != nil {
+      guard glyph.codes.count == 1 else { return nil }
+      glyphID = inspector.unicodeToGlyph[Int(scalar.value)]
+        ?? inspector.platform1CodeToGlyph[Int(glyph.codes[0])]
+        ?? 0
+    } else {
+      guard glyph.codes.count == 2 else { return nil }
+      let cid = Int(glyph.codes[0]) * 256 + Int(glyph.codes[1])
+      if let gids {
+        guard cid * 2 + 1 < gids.count else { return nil }
+        glyphID = Int(gids[cid * 2]) * 256 + Int(gids[cid * 2 + 1])
+      } else {
+        glyphID = cid
+      }
+    }
+    guard glyphID > 0, glyphID < inspector.glyphCount else { return nil }
+    return glyphID
+  }
+
   func glyphs(_ codes: [UInt8]) -> [Glyph]? {
     if let simple {
       return codes.map { Glyph(text: simple.decode([$0]), codes: [$0], width: simple.width(of: $0)) }
