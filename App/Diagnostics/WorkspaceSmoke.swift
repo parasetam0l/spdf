@@ -151,13 +151,13 @@
         let overlapText = viewer.view.document?.findString("Text overlap", withOptions: []).first
       else { throw PDFError(.malformed, "Missing overlapping text target") }
       let overlapBounds = overlapText.bounds(for: overlapPage)
-      let textPoint = try point(overlapBounds.midX, overlapBounds.midY)
-      let imagePoint = try point(120, 140)
       let crossTypeBaseline = try document.editSession.bytesForSave()
       window.setContentSize(NSSize(width: 1_160, height: 740))
       viewer.view.setCurrentSelection(overlapText, animate: false)
       viewer.refreshSelectionSummary()
       try await Task.sleep(for: .milliseconds(120))
+      // The resize changes the overlay's window-space origin.
+      let textPoint = try point(overlapBounds.midX, overlapBounds.midY)
       guard AccessibilityAudit.applicationElement(labeled: "Text selection") != nil,
         let editTextAction = AccessibilityAudit.applicationElement(labeled: "Edit Text"),
         AccessibilityAudit.press(editTextAction),
@@ -227,6 +227,8 @@
       window.setFrame(
         NSRect(origin: window.frame.origin, size: NSSize(width: 820, height: 700)), display: true)
       try await Task.sleep(for: .milliseconds(150))
+      // Recompute this canvas point after switching to the compact window size.
+      let imagePoint = try point(120, 140)
       _ = viewer.activateTool(.select)
       guard let imageProperties = AccessibilityAudit.keyWindowElement(labeled: "Image properties"),
         AccessibilityAudit.press(imageProperties) else {
