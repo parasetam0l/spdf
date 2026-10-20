@@ -425,6 +425,9 @@ final class SPDFDocument: NSDocument {
     viewer.textRunProvider = { [weak self] pageIndex, pagePoint in
       self?.textRunTarget(pageIndex: pageIndex, pagePoint: pagePoint)
     }
+    viewer.textTargetsProvider = { [weak self] pageIndex in
+      self?.textRunTargets(pageIndex: pageIndex) ?? []
+    }
     viewer.onTextRunCommit = { [weak self] pageIndex, runIndex, text in
       self?.replaceText(pageIndex: pageIndex, runIndex: runIndex, with: text) ?? false
     }
@@ -1388,32 +1391,34 @@ final class SPDFDocument: NSDocument {
     return nil
   }
 
-  /// P18-021: resolve an editable document text run under a page point.
-  private func textRunTarget(pageIndex: Int, pagePoint: [Double]) -> PageTextTarget? {
+  /// P18-021: resolve editable document text targets for keyboard traversal
+  /// and pointer hit testing, sharing the revision-scoped cache.
+  private func textRunTargets(pageIndex: Int) -> [PageTextTarget] {
     guard pageIndex >= 0, pageIndex < editSession.pageIDs.count,
       let graph = editSession.currentGraph
-    else { return nil }
+    else { return [] }
     if textBlockCacheRevision != editSession.documentRevision {
       textBlockCache.removeAll()
       textBlockCacheRevision = editSession.documentRevision
     }
-    func rebuildTargets() {
-      guard let page = viewer?.view.document?.page(at: pageIndex) else { return }
+    if textBlockCache[pageIndex] == nil {
+      guard let page = viewer?.view.document?.page(at: pageIndex) else { return [] }
       let pageID = editSession.pageIDs[pageIndex]
       let blocks = (try? PageTextEditing.blocks(pageID: pageID, in: graph)) ?? []
-      let rebuilt = NativeParagraphEditing.targets(from: blocks,
+      textBlockCache[pageIndex] = NativeParagraphEditing.targets(from: blocks,
         pageID: pageID, graph: graph, page: page, pageIndex: pageIndex)
-      textBlockCache[pageIndex] = rebuilt
     }
-    func matches() -> [PageTextTarget] {
-      textBlockCache[pageIndex]?.filter { target in
-        let r = target.rect
-        return pagePoint[0] >= r[0] - 2 && pagePoint[0] <= r[2] + 2
-          && pagePoint[1] >= r[1] - 2 && pagePoint[1] <= r[3] + 2
-      } ?? []
+    return textBlockCache[pageIndex] ?? []
+  }
+
+  /// P18-021: resolve an editable document text run under a page point.
+  private func textRunTarget(pageIndex: Int, pagePoint: [Double]) -> PageTextTarget? {
+    guard pagePoint.count >= 2 else { return nil }
+    let candidates = textRunTargets(pageIndex: pageIndex).filter { target in
+      let r = target.rect
+      return pagePoint[0] >= r[0] - 2 && pagePoint[0] <= r[2] + 2
+        && pagePoint[1] >= r[1] - 2 && pagePoint[1] <= r[3] + 2
     }
-    if textBlockCache[pageIndex] == nil { rebuildTargets() }
-    let candidates = matches()
     return NativeParagraphEditing.preferredHitTarget(from: candidates, at: pagePoint)
   }
 

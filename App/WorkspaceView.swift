@@ -190,9 +190,9 @@ struct WorkspaceView: View {
     case .select:
       return "Select page text and graphics. In overlaps, use Edit PDF to target text or Images to target graphics."
     case .textEdit:
-      return "Edit PDF: click a text block to select it and double-click to type. Text is targeted in overlaps."
+      return "Edit PDF: click a text block or press ⌥⌘↓/↑ to select page text; double-click to type. Text is targeted in overlaps."
     case .imageEdit:
-      return "Images: select, move and resize supported images and graphics. Graphics are targeted in overlaps."
+      return "Images: select, move and resize supported graphics; press ⌥⌘↓/↑ to cycle page objects. Graphics are targeted in overlaps."
     default:
       return fallback
     }

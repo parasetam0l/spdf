@@ -414,6 +414,12 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
   @objc private func editSelectedText(_ sender: Any?) {
     currentDocument?.editSelectedText()
   }
+  @objc private func selectNextPageObject(_ sender: Any?) {
+    _ = currentDocument?.viewer?.selectAdjacentPageObject()
+  }
+  @objc private func selectPreviousPageObject(_ sender: Any?) {
+    _ = currentDocument?.viewer?.selectAdjacentPageObject(reverse: true)
+  }
   @objc private func exportReviewSummary(_ sender: Any?) {
     currentDocument?.exportReviewSummary()
   }
@@ -645,6 +651,8 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
       return document.canExportReviewSummary
     case #selector(editSelectedText):
       return document.selectedTextTarget() != nil
+    case #selector(selectNextPageObject(_:)), #selector(selectPreviousPageObject(_:)):
+      return document.viewer?.canSelectAdjacentPageObject == true
     case #selector(reflowParagraph):
       return document.canAuthorForm
     case #selector(redactSelection):
@@ -797,6 +805,10 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
     add("Paste", #selector(NSText.paste(_:)), key: "v", to: edit)
     add("Copy as Rich Text", #selector(copyAsRichText), target: self, to: edit)
     add("Select All", #selector(NSText.selectAll(_:)), key: "a", to: edit)
+    add("Select Next Page Object", #selector(selectNextPageObject(_:)), key: "\u{F701}",
+      modifiers: [.command, .option], target: self, to: edit)
+    add("Select Previous Page Object", #selector(selectPreviousPageObject(_:)), key: "\u{F700}",
+      modifiers: [.command, .option], target: self, to: edit)
     let format = submenu("Text Format", in: edit)
     add("Bold", #selector(togglePageTextBold), key: "b", target: self, to: format)
     add("Italic", #selector(togglePageTextItalic), key: "i", target: self, to: format)

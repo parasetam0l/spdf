@@ -455,6 +455,8 @@
           .init(title: "Select Tool", modifiers: [.command, .control]),
           .init(title: "Go Back", modifiers: [.command, .option]),
           .init(title: "Go Forward", modifiers: [.command, .option]),
+          .init(title: "Select Next Page Object", modifiers: [.command, .option]),
+          .init(title: "Select Previous Page Object", modifiers: [.command, .option]),
           .init(title: "Fit Width", modifiers: [.command, .shift]),
           .init(title: "Show Inspector", modifiers: [.command, .option]),
           .init(title: "Show Document Info", modifiers: [.command, .option]),

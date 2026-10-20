@@ -331,6 +331,9 @@ public final class PDFViewingSession: NSObject, ObservableObject, PDFViewDelegat
   public var onFormFieldCommit: ((String, String) -> Bool)?
   /// P18-021: resolve an editable document text run under a page point.
   public var textRunProvider: ((Int, [Double]) -> PageTextTarget?)?
+  /// Editable text blocks on a page, in any order; the viewer sorts these by
+  /// their visible position before keyboard traversal.
+  public var textTargetsProvider: ((Int) -> [PageTextTarget])?
   /// P18-021: commit an in-place text-run replacement.
   public var onTextRunCommit: ((Int, Int, String) -> Bool)?
   /// Add real page text at a rectangle chosen in the workspace.
@@ -893,6 +896,104 @@ public final class PDFViewingSession: NSObject, ObservableObject, PDFViewDelegat
         pageNumber: targets[0].pageIndex + 1,
         text: "\(targets.count) graphics selected", bounds: nil)
     }
+  }
+
+  /// Page-object traversal is available only in an explicit editing mode.
+  /// The menu commands are then usable through keyboard navigation and
+  /// assistive technology without stealing Tab from normal window controls.
+  public var canSelectAdjacentPageObject: Bool {
+    guard allowsContentEditing, !isLocked, !isEditingPageText,
+      (view.document?.pageCount ?? 0) > 0
+    else { return false }
+    switch activeTool {
+    case .textEdit: return textTargetsProvider != nil
+    case .imageEdit: return graphicsListProvider != nil
+    default: return false
+    }
+  }
+
+  /// Select the next or previous editable text block or supported graphic on
+  /// the visible page. The active Edit PDF / Images tool determines the kind.
+  @discardableResult
+  public func selectAdjacentPageObject(reverse: Bool = false) -> Bool {
+    guard canSelectAdjacentPageObject, let page = view.currentPage,
+      let document = view.document
+    else { return false }
+    let pageIndex = document.index(for: page)
+    guard pageIndex >= 0 else { return false }
+
+    switch activeTool {
+    case .textEdit:
+      let targets = (textTargetsProvider?(pageIndex) ?? []).filter {
+        $0.rect.count == 4 && $0.rect.allSatisfy(\.isFinite)
+          && $0.rect[2] >= $0.rect[0] && $0.rect[3] > $0.rect[1]
+      }
+      let ordered = targets.sorted { visuallyPrecedes($0.rect, $1.rect, on: page) }
+      guard !ordered.isEmpty else { return false }
+      let selectedBounds: CGRect? = view.currentSelection.flatMap { selection in
+        selection.pages.contains(where: { $0 === page }) ? selection.bounds(for: page) : nil
+      }
+      let selectedIndex = selectedBounds.flatMap { bounds -> Int? in
+        let overlaps = ordered.indices.map { index -> (Int, CGFloat) in
+          let target = pageRect(ordered[index].rect)
+          let intersection = bounds.intersection(target)
+          let area = intersection.isNull ? 0 : max(0, intersection.width) * max(0, intersection.height)
+          return (index, area)
+        }
+        guard let best = overlaps.max(by: { $0.1 < $1.1 }), best.1 > 0 else { return nil }
+        return best.0
+      }
+      let next = adjacentIndex(count: ordered.count, current: selectedIndex, reverse: reverse)
+      let target = ordered[next]
+      var rect = pageRect(target.rect)
+      if rect.width < 8 {
+        rect.size.width = max(60, Double(target.text.count) * rect.height * 0.55)
+      }
+      guard let selection = page.selection(for: rect) else { return false }
+      clearGraphicSelection()
+      view.setCurrentSelection(selection, animate: false)
+      view.window?.makeFirstResponder(view)
+      refreshSelectionSummary()
+      return true
+
+    case .imageEdit:
+      let targets = (graphicsListProvider?(pageIndex) ?? []).filter {
+        $0.rect.count == 4 && $0.rect.allSatisfy(\.isFinite)
+          && $0.rect[2] > $0.rect[0] && $0.rect[3] > $0.rect[1]
+      }
+      let ordered = targets.sorted { visuallyPrecedes($0.rect, $1.rect, on: page) }
+      guard !ordered.isEmpty else { return false }
+      let currentIdentity = selectedGraphics.first?.identity
+      let currentIndex = currentIdentity.flatMap { identity in
+        ordered.firstIndex(where: { $0.identity == identity })
+      }
+      let next = adjacentIndex(count: ordered.count, current: currentIndex, reverse: reverse)
+      selectGraphics([ordered[next]])
+      graphicSelectionFocuser?()
+      return true
+
+    default:
+      return false
+    }
+  }
+
+  private func adjacentIndex(count: Int, current: Int?, reverse: Bool) -> Int {
+    guard count > 0 else { return 0 }
+    guard let current else { return reverse ? count - 1 : 0 }
+    return (current + (reverse ? count - 1 : 1)) % count
+  }
+
+  private func pageRect(_ values: [Double]) -> CGRect {
+    CGRect(x: values[0], y: values[1], width: values[2] - values[0], height: values[3] - values[1])
+  }
+
+  private func visuallyPrecedes(_ lhs: [Double], _ rhs: [Double], on page: PDFPage) -> Bool {
+    let a = view.convert(pageRect(lhs), from: page)
+    let b = view.convert(pageRect(rhs), from: page)
+    let aTop = view.isFlipped ? a.minY : -a.maxY
+    let bTop = view.isFlipped ? b.minY : -b.maxY
+    if aTop != bTop { return aTop < bTop }
+    return a.minX < b.minX
   }
 
   /// P12-017: drop the graphics selection without touching text selection.

@@ -283,6 +283,8 @@ enum KeyboardAudit {
     switch item.keyEquivalent {
     case "s": keyCode = UInt16(kVK_ANSI_S)
     case "f": keyCode = UInt16(kVK_ANSI_F)
+    case "\u{F700}": keyCode = UInt16(kVK_UpArrow)
+    case "\u{F701}": keyCode = UInt16(kVK_DownArrow)
     default: keyCode = 0
     }
     guard item.isEnabled,

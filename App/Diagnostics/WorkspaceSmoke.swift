@@ -157,6 +157,56 @@
       let overlapBounds = overlapText.bounds(for: overlapPage)
       let crossTypeBaseline = try document.editSession.bytesForSave()
       window.setContentSize(NSSize(width: 1_160, height: 740))
+      guard viewer.activateTool(.textEdit) else {
+        throw PDFError(.malformed, "Could not activate Edit PDF before keyboard traversal")
+      }
+      NSApp.activate(ignoringOtherApps: true)
+      window.makeKeyAndOrderFront(nil)
+      try await Task.sleep(for: .milliseconds(80))
+      viewer.view.clearSelection()
+      viewer.clearGraphicSelection()
+      let textTargetNames = (viewer.textTargetsProvider?(0) ?? []).map(\.text)
+      guard viewer.canSelectAdjacentPageObject else {
+        throw PDFError(.malformed,
+          "Text traversal unavailable in mode \(viewer.activeTool), editing=\(viewer.isEditingPageText), targets=\(textTargetNames.count)")
+      }
+      guard AccessibilityAudit.applicationElement(labeled: "Select Next Page Object") != nil,
+        AccessibilityAudit.applicationElement(labeled: "Select Previous Page Object") != nil,
+        KeyboardAudit.press("Select Next Page Object") else {
+        let item = KeyboardAudit.find("Select Next Page Object")
+        throw PDFError(.malformed,
+          "Next text-object shortcut did not dispatch (enabled=\(item?.isEnabled ?? false), key=\(item?.keyEquivalent.unicodeScalars.map(\.value) ?? []), keyDocument=\(NSDocumentController.shared.currentDocument === document), targets=\(textTargetNames))")
+      }
+      guard let firstTextSelection = viewer.selectedObjectSummary,
+        window.firstResponder === viewer.view else {
+        throw PDFError(.malformed,
+          "Next text-object shortcut did not select a block or focus the PDF view (summary=\(viewer.selectedObjectSummary ?? "nil"), targets=\(textTargetNames))")
+      }
+      guard KeyboardAudit.press("Select Next Page Object"),
+        let secondTextSelection = viewer.selectedObjectSummary,
+        secondTextSelection != firstTextSelection,
+        KeyboardAudit.press("Select Previous Page Object"),
+        viewer.selectedObjectSummary == firstTextSelection else {
+        throw PDFError(.malformed,
+          "Keyboard next/previous did not cycle distinct text blocks (first=\(firstTextSelection), second=\(viewer.selectedObjectSummary ?? "nil"), targets=\(textTargetNames))")
+      }
+      _ = viewer.activateTool(.imageEdit)
+      viewer.view.clearSelection()
+      viewer.clearGraphicSelection()
+      guard KeyboardAudit.press("Select Next Page Object"),
+        let firstGraphic = viewer.selectedGraphics.first?.identity,
+        targets.contains(where: { $0.identity == firstGraphic }),
+        window.firstResponder === overlay,
+        KeyboardAudit.press("Select Next Page Object"),
+        let secondGraphic = viewer.selectedGraphics.first?.identity,
+        secondGraphic != firstGraphic,
+        KeyboardAudit.press("Select Previous Page Object"),
+        viewer.selectedGraphics.first?.identity == firstGraphic else {
+        throw PDFError(.malformed,
+          "Keyboard next/previous did not select distinct graphics and restore the original selection")
+      }
+      checkpoint("keyboard-only page-object selection passed")
+      _ = viewer.activateTool(.select)
       viewer.view.setCurrentSelection(overlapText, animate: false)
       viewer.refreshSelectionSummary()
       try await Task.sleep(for: .milliseconds(120))
