@@ -973,7 +973,7 @@
         return root.subviews.lazy.compactMap { findTextOverlay($0) }.first
       }
       guard let graphicOverlay = findGraphicOverlay(content),
-        let textOverlay = findTextOverlay(content) else {
+        findTextOverlay(content) != nil else {
         throw PDFError(.malformed, "Nested overlap overlays are missing")
       }
       func point(_ x: Double, _ y: Double) -> NSPoint {
@@ -994,19 +994,39 @@
       let windowPoint = point(probe[0], probe[1])
       graphicOverlay.mouseDown(with: try mouse(.leftMouseDown, windowPoint))
       graphicOverlay.mouseUp(with: try mouse(.leftMouseUp, windowPoint))
+      try await Task.sleep(for: .milliseconds(100))
       guard viewer.selectedGraphics.isEmpty,
         viewer.selectionDetails?.text == refusal,
+        viewer.graphicEditRefusal == refusal,
+        AccessibilityAudit.keyWindowElement(labeled: "Image editing unavailable") != nil,
         try document.editSession.bytesForSave() == baseline else {
-        throw PDFError(.malformed, "Images mode did not explain the nested-image refusal without mutation")
+        throw PDFError(.malformed,
+          "Images mode did not show the nested-image refusal or preserve source bytes "
+            + "(selected=\(viewer.selectedGraphics.count), details=\(viewer.selectionDetails?.text ?? "nil"), "
+            + "refusal=\(viewer.graphicEditRefusal ?? "nil"), ax=\(AccessibilityAudit.keyWindowElement(labeled: "Image editing unavailable") != nil), "
+            + "bytes=\(try document.editSession.bytesForSave() == baseline))")
       }
 
       guard viewer.activateTool(.textEdit) else {
         throw PDFError(.malformed, "Could not enter Edit PDF mode over a nested image")
       }
-      textOverlay.mouseDown(with: try mouse(.leftMouseDown, windowPoint))
-      textOverlay.mouseUp(with: try mouse(.leftMouseUp, windowPoint))
+      guard let nestedTextTarget = viewer.textRunProvider?(0, probe) else {
+        throw PDFError(.malformed, "Page text target disappeared after refusing the nested image")
+      }
+      let nestedPreviewAvailable = viewer.onTextBlockPreview?(nestedTextTarget) != nil
+      guard let currentTextOverlay = findTextOverlay(content) else {
+        throw PDFError(.malformed, "Edit PDF overlay disappeared after the refusal message")
+      }
+      let currentWindowPoint = point(probe[0], probe[1])
+      currentTextOverlay.mouseDown(with: try mouse(.leftMouseDown, currentWindowPoint))
+      currentTextOverlay.mouseUp(with: try mouse(.leftMouseUp, currentWindowPoint))
       guard viewer.isEditingPageText, viewer.selectedGraphics.isEmpty else {
-        throw PDFError(.malformed, "Edit PDF did not select visible page text over a nested image")
+        throw PDFError(.malformed,
+          "Edit PDF did not select visible page text over a nested image "
+            + "(editing=\(viewer.isEditingPageText), canEdit=\(document.canEditContent), "
+            + "allows=\(viewer.allowsContentEditing), reason=\(viewer.editingRestrictionNotice ?? "nil"), "
+            + "target=true, preview=\(nestedPreviewAvailable), rotation=\(page.rotation), "
+            + "bounds=\(nestedTextTarget.rect), selection=\(viewer.view.currentSelection?.string ?? "nil"))")
       }
       viewer.pageTextCancel?()
       guard !viewer.isEditingPageText,
@@ -1014,6 +1034,148 @@
         throw PDFError(.malformed, "Canceling nested-overlap text editing changed the PDF")
       }
       checkpoint("nested-image refusal and text selection passed")
+    }
+
+    private static func checkReadOnlyExplanation(output: URL) async throws {
+      let controller = NSDocumentController.shared
+      let graph = try PDFParser.parse(BlankPDF.data(format: .letter)).graph
+      let protectedBytes = try PDFWriter.write(graph, encryption: PDFEncryptionOptions(
+        userPassword: "user", ownerPassword: "owner", permissions: 4 | 16))
+      let url = output.appendingPathComponent("permission-read-only.pdf")
+      try protectedBytes.write(to: url, options: .atomic)
+      let document = try SPDFDocument(contentsOf: url, ofType: "com.adobe.pdf")
+      controller.addDocument(document)
+      document.makeWindowControllers()
+      defer { document.close() }
+      guard let viewer = document.viewer,
+        let window = document.windowControllers.first?.window else {
+        throw PDFError(.malformed, "Missing password-permission workspace")
+      }
+      window.makeKeyAndOrderFront(nil)
+      guard viewer.isLocked, viewer.unlock(password: "user") else {
+        throw PDFError(.malformed, "Permission fixture did not open with its user password")
+      }
+      document.unlockCoreSession(with: "user")
+      try await Task.sleep(for: .milliseconds(100))
+      let original = try document.editSession.bytesForSave()
+      guard !document.canEditContent, !viewer.allowsContentEditing,
+        viewer.editingRestrictionNotice?.contains("password allows reading but not modification") == true,
+        !viewer.canSelectAdjacentPageObject,
+        AccessibilityAudit.keyWindowElement(labeled: "Editing unavailable") != nil,
+        !document.addPageText(pageIndex: 0, rect: [72, 120, 280, 150], text: "Blocked edit"),
+        try document.editSession.bytesForSave() == original else {
+        throw PDFError(.malformed,
+          "Password permissions were not explained at the point of use or the source changed")
+      }
+      checkpoint("password-limited read-only explanation passed")
+    }
+
+    private static func clippingTextPDF() throws -> Data {
+      let fixtureURL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+        .appendingPathComponent("Tests/Fixtures/text-edit.pdf")
+      let parsed = try PDFParser.parse(Data(contentsOf: fixtureURL))
+      var graph = parsed.graph
+      guard case .stream(let stream)? = graph.objects[PDFObjectID(5)] else {
+        throw PDFError(.malformed, "Clipping-text fixture stream is missing")
+      }
+      graph.objects[PDFObjectID(5)] = .stream(
+        PDFStream(dictionary: stream.dictionary, bytes: Data("4 Tr\n".utf8) + stream.bytes))
+      let bytes = try PDFWriter.write(graph)
+      let reopened = try PDFParser.parse(bytes)
+      let pageID = reopened.pageIDs[0]
+      let layout = try PageTextLayout.build(pageID: pageID, in: reopened.graph)
+      let blocks = try PageTextEditing.blocks(pageID: pageID, in: reopened.graph)
+      let refusals = try PageTextEditing.editRefusalTargets(pageID: pageID, in: reopened.graph)
+      let refusalText = refusals.map(\.reason).joined(separator: " | ")
+      let runIndex = layout.clusters.first?.runIndex ?? -1
+      let assessment = TextEditabilityCheck.assess(
+        pageID: pageID, runIndex: runIndex, in: reopened.graph)
+      guard layout.clusters.map(\.text).joined().contains("Replace this text"),
+        refusalText.contains("clipping mode") else {
+        throw PDFError(.malformed,
+          "Clipping-text fixture did not expose a visible refusal target "
+            + "(clusters=\(layout.clusters.count), blocks=\(blocks.count), "
+            + "assessment=\(assessment.reasons), refusal=\(refusalText))")
+      }
+      return bytes
+    }
+
+    private static func checkTextEditRefusal(output: URL) async throws {
+      let controller = NSDocumentController.shared
+      let url = output.appendingPathComponent("clipping-text-refusal.pdf")
+      let source = try clippingTextPDF()
+      try source.write(to: url, options: .atomic)
+      let document = try SPDFDocument(contentsOf: url, ofType: "com.adobe.pdf")
+      controller.addDocument(document)
+      document.makeWindowControllers()
+      defer { document.close() }
+      guard let viewer = document.viewer,
+        let window = document.windowControllers.first?.window,
+        let page = viewer.view.document?.page(at: 0),
+        let content = window.contentView else {
+        throw PDFError(.malformed, "Missing clipping-text workspace")
+      }
+      window.makeKeyAndOrderFront(nil)
+      viewer.setZoom(0.8)
+      try await Task.sleep(for: .milliseconds(100))
+      guard let selection = viewer.view.document?.findString(
+        "Replace this text", withOptions: []).first else {
+        throw PDFError(.malformed, "PDFKit could not find the clipping-mode text")
+      }
+      let bounds = selection.bounds(for: page)
+      guard let graph = document.editSession.currentGraph,
+        let pageID = document.editSession.pageIDs.first,
+        let refusalTarget = try PageTextEditing.editRefusalTargets(pageID: pageID, in: graph).first
+      else { throw PDFError(.malformed, "Clipping-mode refusal geometry is missing") }
+      let pagePoint = [
+        (refusalTarget.rect[0] + refusalTarget.rect[2]) / 2,
+        (refusalTarget.rect[1] + refusalTarget.rect[3]) / 2,
+      ]
+      let reason = viewer.textEditRefusalProvider?(0, pagePoint)
+      guard reason?.contains("clipping mode") == true,
+        viewer.textRunProvider?(0, pagePoint) == nil,
+        viewer.activateTool(.textEdit) else {
+        throw PDFError(.malformed,
+          "Clipping-mode text did not resolve to a specific inline refusal "
+            + "(reason=\(reason ?? "nil"), target=\(refusalTarget.rect), pdfKit=\(bounds))")
+      }
+      func findOverlay(_ root: NSView) -> PageEditOverlayView? {
+        if let overlay = root as? PageEditOverlayView { return overlay }
+        return root.subviews.lazy.compactMap { findOverlay($0) }.first
+      }
+      guard let overlay = findOverlay(content) else {
+        throw PDFError(.malformed, "Clipping-text page overlay is missing")
+      }
+      func mouse(_ type: NSEvent.EventType, _ location: NSPoint) throws -> NSEvent {
+        guard let event = NSEvent.mouseEvent(
+          with: type, location: location, modifierFlags: [],
+          timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
+          context: nil, eventNumber: 0, clickCount: 1,
+          pressure: type == .leftMouseUp ? 0 : 1)
+        else { throw PDFError(.malformed, "Missing clipping-text pointer event") }
+        return event
+      }
+      let original = try document.editSession.bytesForSave()
+      let viewPoint = viewer.view.convert(NSPoint(x: pagePoint[0], y: pagePoint[1]), from: page)
+      let windowPoint = viewer.view.convert(viewPoint, to: nil)
+      let overlayPoint = overlay.convert(windowPoint, from: nil)
+      guard overlay.hitTest(overlayPoint) === overlay else {
+        throw PDFError(.malformed, "The overlay did not capture the unsupported text hit")
+      }
+      overlay.mouseDown(with: try mouse(.leftMouseDown, windowPoint))
+      overlay.mouseUp(with: try mouse(.leftMouseUp, windowPoint))
+      try await Task.sleep(for: .milliseconds(100))
+      guard viewer.textEditRefusal?.contains("clipping mode") == true,
+        !viewer.isEditingPageText,
+        AccessibilityAudit.keyWindowElement(labeled: "Inline text editing unavailable") != nil,
+        try document.editSession.bytesForSave() == original else {
+        throw PDFError(.malformed,
+          "The text refusal was not visible/accessible or the source changed "
+            + "(reason=\(viewer.textEditRefusal ?? "nil"), editing=\(viewer.isEditingPageText), "
+            + "ax=\(AccessibilityAudit.keyWindowElement(labeled: "Inline text editing unavailable") != nil), "
+            + "bytes=\(try document.editSession.bytesForSave() == original))")
+      }
+      checkpoint("clipping-mode text refusal and unchanged source passed")
     }
 
     private static func clippedImagePDF(path: String) throws -> Data {
@@ -1659,10 +1821,14 @@
       checkpoint("image workflow passed")
       try await checkNestedImageWorkflow(output: output)
       try await checkClippedImageWorkflow(output: output)
+      try await checkTextEditRefusal(output: output)
+      try await checkReadOnlyExplanation(output: output)
       return [
         "graphicWorkflow": "insert, properties, preview, selection, shared resize, cancel, keyboard, delete, alignment, save/reopen",
         "nestedImageWorkflow": "Images explains reusable-form refusal; Edit PDF selects overlapping page text; cancel preserves bytes",
         "clippedImageWorkflow": "rectangular clips narrow point/rubber-band targets; unsupported clips refuse safely",
+        "textEditRestrictions": "visible clipping-mode text explains inline refusal before editing and preserves source bytes",
+        "readOnlyRestrictions": "password-permission editing block is visible and accessible; source bytes remain unchanged",
         "directTextSelection":
           "single-click selection, body move/cancel, double-click typing, marked-text Save veto",
         "paragraphWorkflow":

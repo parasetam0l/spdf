@@ -596,7 +596,7 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
     case #selector(toggleInkTool):
       guard let viewer = document.viewer else { return false }
       menuItem.state = viewer.isInkToolActive ? .on : .off
-      return !viewer.isLocked && viewer.pageCount > 0
+      return !viewer.isLocked && document.canEditContent && viewer.pageCount > 0
     case #selector(selectTool), #selector(textEditTool), #selector(addTextTool),
       #selector(pageTool),
       #selector(imageEditTool):
@@ -611,7 +611,7 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
             : menuItem.action == #selector(imageEditTool) ? .imageEdit : .select
       menuItem.state = viewer.activeTool == tool ? .on : .off
       return !viewer.isLocked && viewer.pageCount > 0
-        && (tool == .select || document.editSession.canEdit)
+        && (tool == .select || document.canEditContent)
     case #selector(flattenAnnotations):
       return document.canFlattenAnnotations
     case #selector(flattenForm):
@@ -645,26 +645,28 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
       return document.canAuthorForm && document.formFieldNames().count >= 2
     case #selector(distributeFormFields), #selector(editFormTabOrder):
       return document.canAuthorForm && document.formFieldNames().count >= 3
-    case #selector(exportFormValues), #selector(importFormValues):
+    case #selector(exportFormValues):
       return !document.editSession.formFields().isEmpty
+    case #selector(importFormValues):
+      return document.canEditContent && !document.editSession.formFields().isEmpty
     case #selector(exportReviewSummary):
       return document.canExportReviewSummary
     case #selector(editSelectedText):
-      return document.selectedTextTarget() != nil
+      return document.canEditContent && document.selectedTextTarget() != nil
     case #selector(selectNextPageObject(_:)), #selector(selectPreviousPageObject(_:)):
       return document.viewer?.canSelectAdjacentPageObject == true
     case #selector(reflowParagraph):
-      return document.canAuthorForm
+      return document.canEditContent
     case #selector(redactSelection):
       return document.canRedactSelection
     case #selector(importPages):
-      return document.editSession.canEdit
+      return document.canEditContent
     case #selector(copyAsRichText):
       return document.viewer?.view.currentSelection != nil
     case #selector(saveSanitizedCopy):
-      return document.editSession.canEdit
+      return document.canEditContent
     case #selector(exportEncryptedCopy):
-      return document.editSession.canEdit
+      return document.canEditContent
     case #selector(signDocument):
       return document.canSignDocument
     case #selector(optimizeDocument):
@@ -678,20 +680,22 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
     case #selector(lockDocument):
       return document.canLockDocument
     case #selector(undoEdit):
-      return (NSApp.keyWindow?.firstResponder as? InlinePageTextView)?.typingUndo.canUndo == true
-        || document.viewer?.isEditingPageText == true || document.editSession.canUndo
+      return document.canEditContent
+        && ((NSApp.keyWindow?.firstResponder as? InlinePageTextView)?.typingUndo.canUndo == true
+          || document.viewer?.isEditingPageText == true || document.editSession.canUndo)
     case #selector(redoEdit):
-      return (NSApp.keyWindow?.firstResponder as? InlinePageTextView)?.typingUndo.canRedo == true
-        || document.editSession.canRedo
+      return document.canEditContent
+        && ((NSApp.keyWindow?.firstResponder as? InlinePageTextView)?.typingUndo.canRedo == true
+          || document.editSession.canRedo)
     case #selector(rotateLeft), #selector(rotateRight), #selector(insertBlankPage):
-      return document.editSession.canEdit && (document.viewer?.pageCount ?? 0) > 0
+      return document.canEditContent && (document.viewer?.pageCount ?? 0) > 0
     case #selector(movePageUp):
-      return document.editSession.canEdit && (document.viewer?.pageNumber ?? 1) > 1
+      return document.canEditContent && (document.viewer?.pageNumber ?? 1) > 1
     case #selector(movePageDown):
       guard let viewer = document.viewer else { return false }
-      return document.editSession.canEdit && viewer.pageNumber < viewer.pageCount
+      return document.canEditContent && viewer.pageNumber < viewer.pageCount
     case #selector(deletePage):
-      return document.editSession.canEdit && (document.viewer?.pageCount ?? 0) > 1
+      return document.canEditContent && (document.viewer?.pageCount ?? 0) > 1
     case #selector(previousPage), #selector(firstPage):
       return document.viewer?.canGoBack ?? false
     case #selector(nextPage), #selector(lastPage):

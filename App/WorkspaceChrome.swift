@@ -103,6 +103,22 @@ struct WorkspaceTextInspector: View {
       Divider()
       ScrollView {
         VStack(alignment: .leading, spacing: 20) {
+          if let refusal = viewer.textEditRefusal {
+            VStack(alignment: .leading, spacing: 8) {
+              Label("Inline text editing unavailable", systemImage: "exclamationmark.triangle")
+                .font(.system(size: 12, weight: .semibold)).foregroundStyle(.orange)
+              Text(refusal).font(.system(size: 11)).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+              if viewer.allowsContentEditing {
+                Button("Add Text") { _ = viewer.activateTool(.addText) }
+                  .buttonStyle(.bordered)
+              }
+            }
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel("Inline text editing unavailable")
+            .accessibilityValue(refusal)
+            Divider()
+          }
           if viewer.isEditingPageText || viewer.activeTool == .addText {
             VStack(alignment: .leading, spacing: 10) {
               sectionTitle("TYPE")
@@ -413,9 +429,14 @@ struct WorkspaceTextSelectionInspector: View {
             }
             .buttonStyle(.borderedProminent)
             .disabled(!viewer.allowsContentEditing || viewer.isLocked)
-            Text("PDF text selection is read-only. Choose Edit PDF to select and edit a text block.")
-              .font(.system(size: 11)).foregroundStyle(.secondary)
-              .fixedSize(horizontal: false, vertical: true)
+            if let restriction = viewer.editingRestrictionNotice {
+              Text(restriction).font(.system(size: 11)).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            } else {
+              Text("PDF text selection is read-only. Choose Edit PDF to select and edit a supported text block.")
+                .font(.system(size: 11)).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            }
           } else {
             Text("Select text on the page to inspect it here.")
               .font(.system(size: 12)).foregroundStyle(.secondary)
@@ -454,6 +475,15 @@ struct WorkspaceGraphicInspector: View {
             Label("Insert Image…", systemImage: "photo.badge.plus").frame(maxWidth: .infinity)
           }.buttonStyle(.bordered).disabled(!editable)
           if let bounds = viewer.selectedGraphicBounds {
+            if let restriction = viewer.editingRestrictionNotice, !viewer.allowsContentEditing {
+              Label {
+                Text(restriction).fixedSize(horizontal: false, vertical: true)
+              } icon: {
+                Image(systemName: "exclamationmark.lock.fill")
+              }
+              .font(.system(size: 11)).foregroundStyle(.secondary)
+              .accessibilityLabel("Editing unavailable")
+            }
             if !editable {
               Button { _ = viewer.activateTool(.imageEdit) } label: {
                 Label("Edit Images", systemImage: "photo")
@@ -487,6 +517,31 @@ struct WorkspaceGraphicInspector: View {
             Button(role: .destructive) { viewer.deleteSelectedGraphics() } label: {
               Label("Delete Selection", systemImage: "trash").frame(maxWidth: .infinity)
             }.buttonStyle(.bordered).disabled(!editable || !viewer.canDeleteSelectedGraphics)
+          } else if let refusal = viewer.graphicEditRefusal {
+            VStack(alignment: .leading, spacing: 8) {
+              Image(systemName: "exclamationmark.triangle")
+                .font(.system(size: 24, weight: .light)).foregroundStyle(.orange)
+                .accessibilityHidden(true)
+              Text("Image editing unavailable")
+                .font(.system(size: 13, weight: .medium))
+              Text(refusal).font(.system(size: 12)).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            }
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel("Image editing unavailable")
+            .accessibilityValue(refusal)
+          } else if let restriction = viewer.editingRestrictionNotice, !viewer.allowsContentEditing {
+            VStack(alignment: .leading, spacing: 8) {
+              Image(systemName: "exclamationmark.lock.fill")
+                .font(.system(size: 24, weight: .light)).foregroundStyle(.orange)
+                .accessibilityHidden(true)
+              Text("Editing unavailable").font(.system(size: 13, weight: .medium))
+              Text(restriction).font(.system(size: 12)).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            }
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel("Editing unavailable")
+            .accessibilityValue(restriction)
           } else {
             VStack(alignment: .leading, spacing: 10) {
               Image(systemName: "photo.on.rectangle.angled").font(.system(size: 26, weight: .light))

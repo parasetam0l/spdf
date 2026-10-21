@@ -11,6 +11,14 @@ public struct PageTextBlock: Sendable, Equatable {
   public let fontResource: PDFName
 }
 
+/// A visible text run that can be identified on the page but is outside the
+/// inline writer's supported profile. The rectangle uses unrotated page space.
+public struct PageTextEditRefusalTarget: Sendable, Equatable {
+  public let runIndex: Int
+  public let rect: [Double]
+  public let reason: String
+}
+
 public enum PageTextEditing {
   public struct ListMarker: Sendable, Equatable {
     public let runIndex: Int
@@ -242,6 +250,81 @@ public enum PageTextEditing {
         runIndices: indices, text: text, rect: rect,
         style: TextEditTargeting.inputStyle(runIndex: first, runs: runs, in: graph),
         fontResource: runs[first].fontResource)
+    }
+  }
+
+  /// Visible text that the inline editor deliberately excludes, with a
+  /// point-of-use explanation. Runs without readable glyph geometry are
+  /// omitted here; the native viewer can still provide a general refusal when
+  /// PDFKit confirms text under the pointer.
+  public static func editRefusalTargets(
+    pageID: PDFObjectID, in graph: PDFGraph
+  ) throws -> [PageTextEditRefusalTarget] {
+    let content = try PageContent.load(pageID: pageID, in: graph)
+    let runs = try TextRunIndexer.runs(in: content, graph: graph)
+    let layout = try PageTextLayout.build(pageID: pageID, in: graph)
+    let writableRuns = Set(try blocks(pageID: pageID, in: graph).flatMap(\.runIndices))
+    let clustersByRun = Dictionary(grouping: layout.clusters, by: \.runIndex)
+    return clustersByRun.keys.sorted().compactMap { runIndex in
+      guard !writableRuns.contains(runIndex), runs.indices.contains(runIndex),
+        let clusters = clustersByRun[runIndex], !clusters.isEmpty,
+        TextCanvasSupport.renderingMode(at: runs[runIndex].instructionIndex, in: content) != 3
+      else { return nil }
+      let xs = clusters.flatMap { [$0.bounds[0], $0.bounds[2]] }
+      let ys = clusters.flatMap { [$0.bounds[1], $0.bounds[3]] }
+      guard let minX = xs.min(), let maxX = xs.max(),
+        let minY = ys.min(), let maxY = ys.max(),
+        [minX, maxX, minY, maxY].allSatisfy(\.isFinite)
+      else { return nil }
+      let padding = max(2, runs[runIndex].fontSize * 0.08)
+      return PageTextEditRefusalTarget(
+        runIndex: runIndex,
+        rect: [minX - padding, minY - padding, maxX + padding, maxY + padding],
+        reason: refusalReason(
+          pageID: pageID, runIndex: runIndex, run: runs[runIndex],
+          content: content, graph: graph))
+    }
+  }
+
+  private static func refusalReason(
+    pageID: PDFObjectID, runIndex: Int, run: TextRun, content: PageContent,
+    graph: PDFGraph
+  ) -> String {
+    let assessment = TextEditabilityCheck.assess(pageID: pageID, runIndex: runIndex, in: graph)
+    let detail: String
+    if !assessment.reasons.isEmpty {
+      detail = assessment.reasons.joined(separator: "; ")
+    } else {
+      let transform = TextCanvasSupport.concatenate(run.ctm, run.matrix)
+      let ordinaryTransform = transform[0] > 0
+        && abs(transform[0] - transform[3]) < 1e-6
+        && abs(transform[1]) < 1e-6 && abs(transform[2]) < 1e-6
+      let ordinarySpacing = abs(run.charSpacing) < 1e-6
+        && abs(run.wordSpacing) < 1e-6 && abs(run.horizontalScale - 100) < 1e-6
+      if !ordinaryTransform {
+        detail = "This text is rotated or transformed; inline editing requires horizontal text on an unrotated page"
+      } else if !ordinarySpacing {
+        detail = "This text uses adjusted character spacing that the inline editor cannot preserve"
+      } else if hasAdjustedTJ(run, content: content) {
+        detail = "This text uses per-glyph spacing adjustments that the inline editor cannot preserve"
+      } else {
+        detail = "This text layout is outside sPDF's current inline-editing profile"
+      }
+    }
+    return "\(detail). The PDF is unchanged. Use Add Text for a separate overlay, or open a copy with supported text to edit the original."
+  }
+
+  private static func hasAdjustedTJ(_ run: TextRun, content: PageContent) -> Bool {
+    guard run.operandPath.count == 2,
+      let instruction = content.instructions[safe: run.instructionIndex],
+      case .array(let members)? = instruction.operands.first?.value
+    else { return false }
+    return members.contains { member in
+      switch member {
+      case .integer(let value): return value != 0
+      case .real(let value): return abs(value) > 1e-6
+      default: return false
+      }
     }
   }
 

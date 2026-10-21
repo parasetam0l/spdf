@@ -246,6 +246,12 @@ public final class PDFViewingSession: NSObject, ObservableObject, PDFViewDelegat
   @Published public var isInkToolActive = false
   /// The document publishes its current core editing permission to the workspace.
   @Published public var allowsContentEditing = false
+  /// A visible explanation when document-level policy keeps editing disabled.
+  @Published public var editingRestrictionNotice: String?
+  /// Point-of-use explanation for an image target the canvas deliberately refuses.
+  @Published public private(set) var graphicEditRefusal: String?
+  /// Point-of-use explanation when rendered page text is outside the inline editor profile.
+  @Published public private(set) var textEditRefusal: String?
   @Published public private(set) var activeTool: ViewerToolMode = .select
   /// P12-013: hook the app installs to finish (commit or cancel) a pending
   /// edit before the active tool changes. Returning false vetoes the switch
@@ -331,6 +337,8 @@ public final class PDFViewingSession: NSObject, ObservableObject, PDFViewDelegat
   public var onFormFieldCommit: ((String, String) -> Bool)?
   /// P18-021: resolve an editable document text run under a page point.
   public var textRunProvider: ((Int, [Double]) -> PageTextTarget?)?
+  /// Explain why visible text under a page point cannot be edited inline.
+  public var textEditRefusalProvider: ((Int, [Double]) -> String?)?
   /// Editable text blocks on a page, in any order; the viewer sorts these by
   /// their visible position before keyboard traversal.
   public var textTargetsProvider: ((Int) -> [PageTextTarget])?
@@ -438,6 +446,9 @@ public final class PDFViewingSession: NSObject, ObservableObject, PDFViewDelegat
 
   public func open(_ source: PDFSource) throws {
     graphicPreviewState = nil
+    editingRestrictionNotice = nil
+    graphicEditRefusal = nil
+    textEditRefusal = nil
     selectedObjectSummary = nil
     selectionDetails = nil
     selectedGraphics = []
@@ -480,6 +491,9 @@ public final class PDFViewingSession: NSObject, ObservableObject, PDFViewDelegat
     pageTextAvailableSourceFonts = []
     pageTextAvailableLicensedFonts = []
     pageTextFormattingIssue = nil
+    editingRestrictionNotice = nil
+    graphicEditRefusal = nil
+    textEditRefusal = nil
     selectedObjectSummary = nil
     selectionDetails = nil
     selectedGraphics = []
@@ -804,6 +818,8 @@ public final class PDFViewingSession: NSObject, ObservableObject, PDFViewDelegat
     if activeTool != .select, let finisher = pendingEditFinisher, !finisher() {
       return false
     }
+    if tool != .imageEdit { graphicEditRefusal = nil }
+    if tool != .textEdit { textEditRefusal = nil }
     // Text and graphic objects are selected through different native layers.
     // Keep one active selection so a tool switch cannot leave a stale object
     // highlighted behind the new inspector.
@@ -830,7 +846,8 @@ public final class PDFViewingSession: NSObject, ObservableObject, PDFViewDelegat
     guard !text.isEmpty else {
       // PDFKit posts selection changes asynchronously. If clearing its text
       // selection was part of selecting a graphic, keep the graphic summary.
-      guard selectedGraphics.isEmpty else { return }
+      guard selectedGraphics.isEmpty, graphicEditRefusal == nil,
+        textEditRefusal == nil else { return }
       selectedObjectSummary = nil
       selectionDetails = nil
       return
@@ -838,6 +855,8 @@ public final class PDFViewingSession: NSObject, ObservableObject, PDFViewDelegat
     // A new native text selection replaces an earlier graphic selection.
     // This keeps the contextual inspector and canvas highlight in agreement.
     if !selectedGraphics.isEmpty { selectedGraphics = [] }
+    graphicEditRefusal = nil
+    textEditRefusal = nil
     guard let document = view.document,
       let selection = view.currentSelection,
       let page = selection.pages.first else {
@@ -873,6 +892,8 @@ public final class PDFViewingSession: NSObject, ObservableObject, PDFViewDelegat
         && seen.insert($0.identity).inserted
     }
     selectedGraphics = targets
+    graphicEditRefusal = nil
+    textEditRefusal = nil
     if !targets.isEmpty {
       // Graphic selection takes ownership from PDFKit text/search selection.
       // Publish the graphic details after clearing the native highlight.
@@ -1041,9 +1062,24 @@ public final class PDFViewingSession: NSObject, ObservableObject, PDFViewDelegat
 
   public func reportGraphicUnavailable(pageIndex: Int, reason: String) {
     selectedGraphics = []
+    textEditRefusal = nil
+    graphicEditRefusal = reason
     selectedObjectSummary = "Page \(pageIndex + 1): editing unavailable"
     selectionDetails = SelectionDetails(
       pageNumber: pageIndex + 1, text: reason, bounds: nil)
+  }
+
+  public func reportTextEditUnavailable(pageIndex: Int, reason: String) {
+    selectedGraphics = []
+    graphicEditRefusal = nil
+    textEditRefusal = reason
+    selectedObjectSummary = "Page \(pageIndex + 1): inline text editing unavailable"
+    selectionDetails = SelectionDetails(
+      pageNumber: pageIndex + 1, text: reason, bounds: nil)
+  }
+
+  public func clearTextEditRefusal() {
+    textEditRefusal = nil
   }
 
   public var selectedGraphicBounds: CGRect? {

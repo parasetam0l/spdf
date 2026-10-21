@@ -139,6 +139,7 @@ final class PageEditOverlayView: NSView, NSTextFieldDelegate {
   /// Double-clicking enters native text input.
   /// The Select tool keeps PDFKit's native character selection.
   private var pressTarget: EditTarget?
+  private var pressRefusal: (pageIndex: Int, reason: String)?
   private var pressPoint: NSPoint = .zero
 
   override func hitTest(_ point: NSPoint) -> NSView? {
@@ -149,7 +150,9 @@ final class PageEditOverlayView: NSView, NSTextFieldDelegate {
     if editor != nil {
       return super.hitTest(point) ?? self
     }
-    guard let target = target(at: point) else { return nil }
+    guard let target = target(at: point) else {
+      return textEditRefusal(at: point) == nil ? nil : self
+    }
     // P12-017: form widgets always edit on click; text runs only claim the
     // pointer in the text tool so drag selection passes through otherwise.
     switch target {
@@ -166,6 +169,12 @@ final class PageEditOverlayView: NSView, NSTextFieldDelegate {
     if editor != nil || textCanvas != nil, !commitEditing() { return }
     let point = convert(event.locationInWindow, from: nil)
     pressTarget = target(at: point)
+    pressRefusal = nil
+    if pressTarget == nil {
+      pressRefusal = textEditRefusal(at: point)
+    } else {
+      viewer?.clearTextEditRefusal()
+    }
     pressPoint = point
   }
 
@@ -187,6 +196,13 @@ final class PageEditOverlayView: NSView, NSTextFieldDelegate {
           x: event.locationInWindow.x - start.x,
           y: event.locationInWindow.y - start.y), finished: true)
       pressTarget = nil
+      return
+    }
+    if let refusal = pressRefusal {
+      pressRefusal = nil
+      let point = convert(event.locationInWindow, from: nil)
+      guard hypot(point.x - pressPoint.x, point.y - pressPoint.y) <= 4 else { return }
+      viewer?.reportTextEditUnavailable(pageIndex: refusal.pageIndex, reason: refusal.reason)
       return
     }
     guard editor == nil, let pending = pressTarget else {
@@ -238,7 +254,39 @@ final class PageEditOverlayView: NSView, NSTextFieldDelegate {
     return nil
   }
 
+  /// Refuse a text hit without creating an editor when the source run is
+  /// rendered by PDFKit but excluded from sPDF's inline editing profile.
+  private func textEditRefusal(at point: NSPoint) -> (pageIndex: Int, reason: String)? {
+    guard viewer?.activeTool == .textEdit, let viewer,
+      let document = viewer.view.document
+    else { return nil }
+    let viewPoint = convert(point, to: viewer.view)
+    guard let page = viewer.view.page(for: viewPoint, nearest: false) else { return nil }
+    let pagePoint = viewer.view.convert(viewPoint, to: page)
+    let pageIndex = document.index(for: page)
+    let values = [Double(pagePoint.x), Double(pagePoint.y)]
+    if let reason = viewer.textEditRefusalProvider?(pageIndex, values) {
+      return (pageIndex, reason)
+    }
+    // Some unsupported fonts cannot be decoded into core glyph geometry. Use
+    // PDFKit only as a presence check; the fallback never claims that the text
+    // is writable and never mutates the source.
+    let probe = CGRect(x: pagePoint.x - 2, y: pagePoint.y - 2, width: 4, height: 4)
+    guard let selection = page.selection(for: probe),
+      !(selection.string ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    else { return nil }
+    let reason = viewer.allowsContentEditing
+      ? "This visible text is outside sPDF's current inline-editing profile. The PDF is unchanged. Use Add Text for a separate overlay, or edit the original in an application that supports this PDF text structure."
+      : (viewer.editingRestrictionNotice
+        ?? "This document is view-only. The PDF is unchanged; open an editable copy to change its text.")
+    return (
+      pageIndex,
+      reason
+    )
+  }
+
   private func beginEditing(_ target: EditTarget, at point: NSPoint) {
+    viewer?.clearTextEditRefusal()
     hoverTarget = nil
     needsDisplay = true
     guard let viewer, let document = viewer.view.document,
@@ -271,7 +319,7 @@ final class PageEditOverlayView: NSView, NSTextFieldDelegate {
         let alert = NSAlert()
         alert.messageText = "Inline Editing Unavailable"
         alert.informativeText =
-          "Direct editing currently supports horizontal text with ordinary character spacing on unrotated pages. This block cannot be edited inline."
+          "Inline editing supports horizontal text with ordinary character spacing on unrotated pages. No text was changed. To add a separate text overlay, choose Add Text; to edit this original text, use an unrotated copy within the supported text profile."
         alert.runModal()
         return
       }

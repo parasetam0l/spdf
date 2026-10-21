@@ -53,6 +53,17 @@ struct DocumentInfoPanel: View {
           row("Producer", info.producer)
           row("Language", info.language)
         }
+        if let restriction = viewer.editingRestrictionNotice {
+          Section("Editing") {
+            Label {
+              Text(restriction).fixedSize(horizontal: false, vertical: true)
+            } icon: {
+              Image(systemName: "exclamationmark.lock.fill").foregroundStyle(.orange)
+            }
+            .accessibilityLabel("Editing unavailable")
+            .accessibilityValue(restriction)
+          }
+        }
         if let capability = info.capabilitySummary, !capability.isEmpty {
           Section("Capabilities") {
             Text(capability).foregroundStyle(.secondary)

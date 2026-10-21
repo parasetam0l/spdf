@@ -52,6 +52,10 @@ struct WorkspaceView: View {
       VStack(spacing: 0) {
         commandBar(wide: wide)
         Divider()
+        if !canEdit && !viewer.isLocked {
+          editingRestrictionBanner
+          Divider()
+        }
         if viewer.isSearchVisible {
           searchBar
           Divider()
@@ -179,10 +183,14 @@ struct WorkspaceView: View {
       }
     }
     .buttonStyle(WorkspaceToolStyle(selected: viewer.activeTool == tool))
-    .disabled(tool != .select && tool != .annotate && !canEdit)
-    .help(toolHelp(tool, fallback: title))
+    .disabled(tool != .select && !canEdit)
+    .help(tool != .select && !canEdit
+      ? "\(toolHelp(tool, fallback: title)) Editing unavailable: \(viewer.editingRestrictionNotice ?? "this document is view-only.")"
+      : toolHelp(tool, fallback: title))
     .accessibilityLabel(title)
-    .accessibilityValue(viewer.activeTool == tool ? "Active" : "Inactive")
+    .accessibilityValue(tool != .select && !canEdit
+      ? "Unavailable. \(viewer.editingRestrictionNotice ?? "This document is view-only.")"
+      : viewer.activeTool == tool ? "Active" : "Inactive")
   }
 
   private func toolHelp(_ tool: ViewerToolMode, fallback: String) -> String {
@@ -190,9 +198,9 @@ struct WorkspaceView: View {
     case .select:
       return "Select page text and graphics. In overlaps, use Edit PDF to target text or Images to target graphics."
     case .textEdit:
-      return "Edit PDF: click a text block or press ⌥⌘↓/↑ to select page text; double-click to type. Text is targeted in overlaps."
+      return "Edit PDF: edits horizontal text with ordinary character spacing on unrotated pages. Click a block or press ⌥⌘↓/↑; double-click to type. Unsupported source text remains unchanged."
     case .imageEdit:
-      return "Images: select, move and resize supported graphics; press ⌥⌘↓/↑ to cycle page objects. Graphics are targeted in overlaps."
+      return "Images: select, move and resize supported page-level graphics; press ⌥⌘↓/↑ to cycle objects. Nested, clipped or transformed placements may be view-only with a reason shown in the inspector."
     default:
       return fallback
     }
@@ -405,6 +413,31 @@ struct WorkspaceView: View {
     }
   }
   private var canEdit: Bool { viewer.allowsContentEditing && !viewer.isLocked }
+  private var editingRestrictionBanner: some View {
+    let reason = viewer.editingRestrictionNotice ?? "This document is view-only."
+    return HStack(alignment: .top, spacing: 10) {
+      Image(systemName: "exclamationmark.lock.fill")
+        .foregroundStyle(.orange)
+        .accessibilityHidden(true)
+      VStack(alignment: .leading, spacing: 2) {
+        Text("Editing unavailable").font(.system(size: 11, weight: .semibold))
+        Text(reason).font(.system(size: 11)).foregroundStyle(.secondary)
+          .fixedSize(horizontal: false, vertical: true)
+      }
+      Spacer(minLength: 8)
+      Button("Document Info") {
+        viewer.sidebarMode = .info
+        viewer.isSidebarVisible = true
+      }
+      .buttonStyle(.link)
+      .accessibilityHint("Opens document capabilities and security details")
+    }
+    .padding(.horizontal, 14).padding(.vertical, 8)
+    .frame(maxWidth: .infinity, alignment: .leading)
+    .background(Color.orange.opacity(0.08))
+    .accessibilityElement(children: .contain)
+    .accessibilityLabel("Editing unavailable")
+  }
   private func iconButton(_ title: String, symbol: String, action: @escaping () -> Void)
     -> some View
   {
@@ -435,11 +468,13 @@ struct WorkspaceView: View {
       case .comments:
         CommentsPanel(
           comments: comments.comments, pageCount: viewer.pageCount,
+          canEditContent: canEdit, editingRestrictionNotice: viewer.editingRestrictionNotice,
           onSelect: onSelectComment, onDelete: onDeleteComment,
           onReply: onReplyComment, onSetState: onSetStateComment)
       case .forms:
         FormsPanel(
           fields: forms.fields, orphanedWidgetCount: forms.orphanedWidgetCount,
+          canEditContent: canEdit, editingRestrictionNotice: viewer.editingRestrictionNotice,
           onSubmitText: onSubmitFormText,
           onDraftText: { forms.pendingText[$0] = $1 }, onToggle: onToggleForm,
           onSelectChoice: onSelectFormChoice, onSelect: onSelectFormField)
@@ -453,7 +488,9 @@ struct WorkspaceView: View {
         DocumentInfoPanel(viewer: viewer)
       case .structure:
         StructurePanel(
-          model: structure, onSelect: onSelectStructurePage,
+          model: structure, canEditContent: canEdit,
+          editingRestrictionNotice: viewer.editingRestrictionNotice,
+          onSelect: onSelectStructurePage,
           onEditRole: onEditStructureRole, onEditAltText: onEditStructureAltText,
           onMarkArtifact: onMarkStructureArtifact,
           onSuggestTags: onSuggestStructureTags,

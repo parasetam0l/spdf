@@ -8,6 +8,8 @@ import SwiftUI
 struct CommentsPanel: View {
   let comments: [Comment]
   let pageCount: Int
+  var canEditContent = true
+  var editingRestrictionNotice: String?
   var onSelect: (Comment) -> Void
   var onDelete: (Comment) -> Void
   var onReply: (Comment) -> Void
@@ -93,6 +95,8 @@ struct CommentsPanel: View {
             .buttonStyle(.plain)
             .contextMenu {
               Button("Reply…") { onReply(row.comment) }
+                .disabled(!canEditContent)
+                .help(editingRestrictionNotice ?? "Reply to this comment")
               Menu("Set Status") {
                 ForEach(Array(Self.statusOptions.enumerated()), id: \.offset) { _, name in
                   Button(Self.stateLabel(for: name)) { onSetState(row.comment, name) }
@@ -100,8 +104,11 @@ struct CommentsPanel: View {
                 Divider()
                 Button("Clear Status") { onSetState(row.comment, nil) }
               }
+              .disabled(!canEditContent)
               Divider()
               Button("Delete Comment", role: .destructive) { onDelete(row.comment) }
+                .disabled(!canEditContent)
+                .help(editingRestrictionNotice ?? "Delete this comment")
             }
           }
         }

@@ -6,6 +6,8 @@ import SwiftUI
 /// order, and detected reference issues.
 struct StructurePanel: View {
   let model: StructureModel
+  var canEditContent = true
+  var editingRestrictionNotice: String?
   var onSelect: (Int) -> Void
   var onEditRole: (PDFObjectID, String) -> Void
   var onEditAltText: (PDFObjectID) -> Void
@@ -96,7 +98,8 @@ struct StructurePanel: View {
               }
               HStack {
                 Button("Apply Accepted") { onApplySuggestions() }
-                  .disabled(review.accepted.isEmpty)
+                  .disabled(!canEditContent || review.accepted.isEmpty)
+                  .help(editingRestrictionNotice ?? "Apply accepted structure suggestions")
                 Button("Discard") { onDiscardSuggestions() }
               }
               .font(.caption)
@@ -136,10 +139,14 @@ struct StructurePanel: View {
                       Button(role) { onEditRole(objectID, role) }
                     }
                   }
+                  .disabled(!canEditContent)
+                  .help(editingRestrictionNotice ?? "Change this structure element's role")
                   Button("Edit Alternate Text…") { onEditAltText(objectID) }
-                    .disabled(entry.element.role != "Figure")
+                    .disabled(!canEditContent || entry.element.role != "Figure")
+                    .help(editingRestrictionNotice ?? "Edit this figure's alternate text")
                   Button("Mark as Artifact") { onMarkArtifact(objectID) }
-                    .disabled(entry.element.role == "Artifact")
+                    .disabled(!canEditContent || entry.element.role == "Artifact")
+                    .help(editingRestrictionNotice ?? "Mark this element as an artifact")
                 }
               }
             }

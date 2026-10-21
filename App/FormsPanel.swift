@@ -9,6 +9,8 @@ import SwiftUI
 struct FormsPanel: View {
   let fields: [FormField]
   let orphanedWidgetCount: Int
+  var canEditContent = true
+  var editingRestrictionNotice: String?
   var onSubmitText: (String, String) -> Void
   var onDraftText: (String, String) -> Void
   var onToggle: (String, Bool) -> Void
@@ -22,6 +24,13 @@ struct FormsPanel: View {
         detail: "This PDF has no form fields to fill in.")
     } else {
       VStack(alignment: .leading, spacing: 0) {
+        if !canEditContent, let editingRestrictionNotice {
+          Text("Form fields are view-only. \(editingRestrictionNotice)")
+            .font(.caption2).foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+            .padding(8)
+          Divider()
+        }
         if orphanedWidgetCount > 0 {
           Text(
             "\(orphanedWidgetCount) orphaned widget\(orphanedWidgetCount == 1 ? "" : "s") "
@@ -65,13 +74,15 @@ struct FormsPanel: View {
       }
       switch field.kind {
       case .text:
-        FormTextFieldRow(field: field, onSubmit: onSubmitText, onDraft: onDraftText)
+        FormTextFieldRow(
+          field: field, isEditable: canEditContent,
+          onSubmit: onSubmitText, onDraft: onDraftText)
           .id("\(field.name)-\(field.stringValue ?? "")")
       case .button where !field.isPushButton:
-        FormToggleRow(field: field, onToggle: onToggle)
+        FormToggleRow(field: field, isEditable: canEditContent, onToggle: onToggle)
           .id("\(field.name)-\(field.isChecked)")
       case .choice:
-        FormChoiceRow(field: field, onSelect: onSelectChoice)
+        FormChoiceRow(field: field, isEditable: canEditContent, onSelect: onSelectChoice)
           .id("\(field.name)-\(field.stringValue ?? "")")
       case .signature:
         Text("Signature fields cannot be filled yet.")
@@ -100,15 +111,18 @@ struct FormsPanel: View {
 
 private struct FormTextFieldRow: View {
   let field: FormField
+  var isEditable: Bool
   var onSubmit: (String, String) -> Void
   var onDraft: (String, String) -> Void
   @State private var text: String
 
   init(
-    field: FormField, onSubmit: @escaping (String, String) -> Void,
+    field: FormField, isEditable: Bool,
+    onSubmit: @escaping (String, String) -> Void,
     onDraft: @escaping (String, String) -> Void
   ) {
     self.field = field
+    self.isEditable = isEditable
     self.onSubmit = onSubmit
     self.onDraft = onDraft
     _text = State(initialValue: field.stringValue ?? "")
@@ -118,7 +132,7 @@ private struct FormTextFieldRow: View {
     TextField("Value", text: $text)
       .textFieldStyle(.roundedBorder)
       .font(.callout)
-      .disabled(field.isReadOnly)
+      .disabled(field.isReadOnly || !isEditable)
       .onSubmit { onSubmit(field.name, text) }
       .onChange(of: text) { _, value in onDraft(field.name, value) }
       .accessibilityLabel("Field \(field.name)")
@@ -127,6 +141,7 @@ private struct FormTextFieldRow: View {
 
 private struct FormToggleRow: View {
   let field: FormField
+  var isEditable: Bool
   var onToggle: (String, Bool) -> Void
 
   var body: some View {
@@ -138,7 +153,7 @@ private struct FormToggleRow: View {
     ) {
       Text(field.isChecked ? "On" : "Off").font(.caption)
     }
-    .disabled(field.isReadOnly)
+    .disabled(field.isReadOnly || !isEditable)
     .accessibilityLabel("Field \(field.name)")
   }
 }
@@ -146,6 +161,7 @@ private struct FormToggleRow: View {
 /// P24-015: a menu of display values that submits the option's export value.
 private struct FormChoiceRow: View {
   let field: FormField
+  var isEditable: Bool
   var onSelect: (String, String) -> Void
 
   var body: some View {
@@ -164,7 +180,7 @@ private struct FormChoiceRow: View {
     }
     .menuStyle(.button)
     .buttonStyle(.bordered)
-    .disabled(field.isReadOnly || field.options.isEmpty)
+    .disabled(field.isReadOnly || !isEditable || field.options.isEmpty)
     .accessibilityLabel("Field \(field.name)")
   }
 }
