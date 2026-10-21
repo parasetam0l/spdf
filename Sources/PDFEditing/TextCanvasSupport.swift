@@ -192,7 +192,8 @@ public enum PageTextEditing {
       guard var format = format(for: run, family: style.fontFamily ?? "", pageID: pageID,
         in: graph, standard: standard, profiles: profiles), run.hasKnownOffset,
         let font = fonts[run.fontResource],
-        let glyphs = font.glyphs(run.rawCodes), font.encode(run.text) == run.rawCodes else { return nil }
+        let glyphs = font.glyphs(run.rawCodes), glyphs.map(\.text).joined() == run.text,
+        font.encode(run.text) == run.rawCodes else { return nil }
       format.size *= transform[0]
       format.characterSpacing *= transform[0]
       guard format.isValid else { return nil }

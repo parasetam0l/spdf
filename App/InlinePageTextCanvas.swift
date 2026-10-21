@@ -60,8 +60,8 @@ final class InlinePageTextView: NSTextView {
   var onMagnify: ((NSEvent) -> Void)?
   var toggleBold: (() -> Void)?
   var toggleItalic: (() -> Void)?
-  /// Return true when the canvas inserted an attributed string because the
-  /// active embedded subset needed another verified font from the paragraph.
+  /// Return true when the canvas inserted attributed text to preserve source
+  /// character spacing or use another verified font from the paragraph.
   var insertWithSourceFallback: ((Any, NSRange) -> Bool)?
   override var undoManager: UndoManager? { typingUndo }
   override func paste(_ sender: Any?) { pasteAsPlainText(sender) }
@@ -318,9 +318,7 @@ final class InlinePageTextCanvas: NSView, NSTextViewDelegate {
         NSSound.beep()
         return true
       }
-      guard plan.usesSourceFontFallback, let attributed = plan.attributedText else {
-        return false
-      }
+      guard let attributed = plan.attributedText else { return false }
       textView.insertText(attributed, replacementRange: range)
       return true
     }

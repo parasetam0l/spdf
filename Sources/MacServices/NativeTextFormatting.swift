@@ -107,6 +107,7 @@ public final class NativeTextFormatting {
         issue: "The page text editor is unavailable.")
     }
     let base = Self.format(view.typingAttributes, fallback: fallback)
+    let retainedSpacing = replacementSpacing(text, replacing: range, base: base)
     let visible = text.unicodeScalars.filter { $0 != "\n" && $0 != "\r" }
     let visibleText = String(String.UnicodeScalarView(visible))
     guard PageTextSourceFont.canWriteInline(visibleText) else {
@@ -133,30 +134,38 @@ public final class NativeTextFormatting {
     }
 
     var needsFallback = false
+    var visibleIndex = 0
     for scalar in text.unicodeScalars {
       if scalar == "\n" || scalar == "\r" {
         appendFragment(String(scalar), format: base)
-      } else if let source = base.sourceFont,
-        profiles[source.resource]?.glyphs[String(scalar)] != nil {
-        appendFragment(String(scalar), format: base)
-      } else if let licensed = base.customFont,
-        licensedGlyphs[licensed.identifier]?.contains(Int(scalar.value)) == true {
-        appendFragment(String(scalar), format: base)
-      } else if base.customFont != nil {
-        return .init(usesSourceFontFallback: false, fragments: fragments, attributedText: nil,
-          issue: "The selected licensed font does not contain “\(String(scalar))”. Choose another font before inserting it.")
-      } else if base.sourceFont == nil, StandardTextFont.canEncode(String(scalar)) {
-        appendFragment(String(scalar), format: base)
-      } else if let alternative = sourceFormat(for: scalar, base: base, current: current,
-        insertion: insertion) {
-        needsFallback = true
-        appendFragment(String(scalar), format: alternative)
       } else {
-        return .init(usesSourceFontFallback: false, fragments: fragments, attributedText: nil,
-          issue: "No font already used by this paragraph can represent “\(String(scalar))”. Choose another font or remove that character.")
+        var scalarBase = base
+        if let retainedSpacing, retainedSpacing.indices.contains(visibleIndex) {
+          scalarBase.characterSpacing = retainedSpacing[visibleIndex]
+        }
+        visibleIndex += 1
+        if let source = scalarBase.sourceFont,
+        profiles[source.resource]?.glyphs[String(scalar)] != nil {
+          appendFragment(String(scalar), format: scalarBase)
+        } else if let licensed = scalarBase.customFont,
+        licensedGlyphs[licensed.identifier]?.contains(Int(scalar.value)) == true {
+          appendFragment(String(scalar), format: scalarBase)
+        } else if scalarBase.customFont != nil {
+          return .init(usesSourceFontFallback: false, fragments: fragments, attributedText: nil,
+            issue: "The selected licensed font does not contain “\(String(scalar))”. Choose another font before inserting it.")
+        } else if scalarBase.sourceFont == nil, StandardTextFont.canEncode(String(scalar)) {
+          appendFragment(String(scalar), format: scalarBase)
+        } else if let alternative = sourceFormat(for: scalar, base: scalarBase, current: current,
+          insertion: insertion) {
+          needsFallback = true
+          appendFragment(String(scalar), format: alternative)
+        } else {
+          return .init(usesSourceFontFallback: false, fragments: fragments, attributedText: nil,
+            issue: "No font already used by this paragraph can represent “\(String(scalar))”. Choose another font or remove that character.")
+        }
       }
     }
-    guard needsFallback else {
+    guard needsFallback || retainedSpacing != nil else {
       return .init(usesSourceFontFallback: false, fragments: fragments,
         attributedText: nil, issue: nil)
     }
@@ -167,8 +176,42 @@ public final class NativeTextFormatting {
       if let paragraphStyle { attrs[.paragraphStyle] = paragraphStyle }
       attributed.append(NSAttributedString(string: fragment.text, attributes: attrs))
     }
-    return .init(usesSourceFontFallback: true, fragments: fragments,
+    return .init(usesSourceFontFallback: needsFallback, fragments: fragments,
       attributedText: attributed, issue: nil)
+  }
+
+  private func replacementSpacing(_ text: String, replacing range: NSRange,
+    base: PageTextFormat) -> [Double]? {
+    guard range.length > 0, !text.isEmpty,
+      !text.unicodeScalars.contains(where: { $0 == "\n" || $0 == "\r" }),
+      let view, range.location != NSNotFound,
+      NSMaxRange(range) <= (view.string as NSString).length else { return nil }
+    let selectedText = (view.string as NSString).substring(with: range)
+    guard !selectedText.isEmpty,
+      !selectedText.unicodeScalars.contains(where: { $0 == "\n" || $0 == "\r" }) else { return nil }
+    let pieces = fragments(in: range)
+    guard let first = pieces.first else { return nil }
+    var expectedStyle = base
+    expectedStyle.characterSpacing = 0
+    for piece in pieces {
+      var style = piece.format
+      style.characterSpacing = 0
+      guard style == expectedStyle else { return nil }
+    }
+    let sourceSpacing = pieces.flatMap { piece in
+      piece.text.unicodeScalars.map { _ in piece.format.characterSpacing }
+    }
+    guard sourceSpacing.count == selectedText.unicodeScalars.count,
+      sourceSpacing.count > 0, sourceSpacing.allSatisfy(\.isFinite),
+      sourceSpacing.contains(where: { abs($0 - first.format.characterSpacing) > 1e-6 }) else {
+      return nil
+    }
+    let replacementCount = text.unicodeScalars.count
+    guard replacementCount > 0 else { return nil }
+    if replacementCount == sourceSpacing.count { return sourceSpacing }
+    let average = sourceSpacing.reduce(0, +) / Double(replacementCount)
+    guard average.isFinite, abs(average) <= 144 else { return nil }
+    return Array(repeating: average, count: replacementCount)
   }
 
   private func sourceFormat(for scalar: UnicodeScalar, base: PageTextFormat,

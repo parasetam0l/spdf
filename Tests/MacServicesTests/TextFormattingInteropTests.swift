@@ -27,6 +27,49 @@ struct TextFormattingInteropTests {
     #expect(abs(color.alphaComponent - 0.5) < 0.001)
   }
 
+  @Test @MainActor func sameLengthReplacementRetainsPerCharacterSourceSpacing() throws {
+    let text = "Vestibulum"
+    let spacing = [-0.882, 0.0315, 0.0315, -0.021, -0.0105,
+      -0.0525, 0.042, -0.0105, 0.042, 0.462]
+    let fragments = zip(text, spacing).map { character, value -> PageTextFragment in
+      var format = PageTextFormat(size: 10.5)
+      format.characterSpacing = value
+      return .init(text: String(character), format: format)
+    }
+    let view = FormatTestTextView(frame: .zero)
+    let formatting = NativeTextFormatting(
+      view: view, fragments: fragments, initial: fragments[0].format)
+    let range = NSRange(location: 0, length: (text as NSString).length)
+    let replacement = "mulubitseV"
+    let plan = formatting.insertionPlan(replacement, replacing: range)
+    func spacingPerCharacter(_ fragments: [PageTextFragment]) -> [Double] {
+      fragments.flatMap { fragment in
+        fragment.text.unicodeScalars.map { _ in fragment.format.characterSpacing }
+      }
+    }
+
+    #expect(plan.issue == nil)
+    #expect(!plan.usesSourceFontFallback)
+    #expect(spacingPerCharacter(plan.fragments) == spacing)
+    #expect(plan.attributedText?.length == (replacement as NSString).length)
+    view.insertText(try #require(plan.attributedText), replacementRange: range)
+    #expect(view.string == replacement)
+    #expect(spacingPerCharacter(formatting.fragments()) == spacing)
+
+    let shorter = "short"
+    let shorterPlan = formatting.insertionPlan(shorter, replacing: range)
+    let shorterSpacing = spacingPerCharacter(shorterPlan.fragments)
+    #expect(shorterPlan.issue == nil)
+    #expect(shorterPlan.attributedText?.length == (shorter as NSString).length)
+    #expect(shorterSpacing.count == shorter.unicodeScalars.count)
+    #expect(shorterSpacing.allSatisfy { abs($0 - shorterSpacing[0]) < 1e-12 })
+    #expect(abs(shorterSpacing.reduce(0, +) - spacing.reduce(0, +)) < 1e-9)
+    view.insertText(try #require(shorterPlan.attributedText), replacementRange: range)
+    #expect(view.string == shorter)
+    #expect(abs(spacingPerCharacter(formatting.fragments()).reduce(0, +)
+      - spacing.reduce(0, +)) < 1e-9)
+  }
+
   @Test @MainActor func mixedEmbeddedSubsetsResolvePerCharacterWithoutSubstitution() throws {
     let program = try #require(Data(base64Encoded: FontFixtureData.subsetProgramBase64))
     let inspector = try TrueTypeInspector.inspect(program, requireUnicodeMap: false)

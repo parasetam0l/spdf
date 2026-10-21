@@ -84,6 +84,38 @@ struct FontWritingTests {
     #expect(inspector.italicAngle == 0)
   }
 
+  @Test func simpleSubsetGlyphLookupResolvesCodeCollisionsByWidth() {
+    // A platform-1 cmap keyed by PDF bytes can make U+0020 and U+002C look
+    // like unrelated glyph IDs in the merged Unicode lookup. The source
+    // byte mappings remain usable when exactly one candidate matches /Widths.
+    let inspector = TrueTypeInspector(
+      tables: [:], unitsPerEm: 1_000, ascent: 800, descent: -200,
+      fontBBox: [0, -200, 1_000, 800], italicAngle: 0, glyphCount: 45,
+      embeddingFlags: nil, locaIsLong: false, isCFF: false,
+      unicodeToGlyph: [0x20: 32, 0x2C: 44],
+      platform1CodeToGlyph: [10: 10, 14: 14],
+      advances: [10: 317, 14: 317, 32: 684, 44: 636],
+      glyphOffsets: Array(repeating: 0, count: 45))
+
+    #expect(IndexedTextFont.verifiedSimpleGlyphID(
+      scalar: 0x20, code: 10, width: 317, inspector: inspector) == 10)
+    #expect(IndexedTextFont.verifiedSimpleGlyphID(
+      scalar: 0x2C, code: 14, width: 317, inspector: inspector) == 14)
+    #expect(IndexedTextFont.verifiedSimpleGlyphID(
+      scalar: 0x20, code: 10, width: 318, inspector: inspector) == 10)
+    #expect(IndexedTextFont.verifiedSimpleGlyphID(
+      scalar: 0x20, code: 10, width: 500, inspector: inspector) == nil)
+
+    let ambiguous = TrueTypeInspector(
+      tables: [:], unitsPerEm: 1_000, ascent: 800, descent: -200,
+      fontBBox: [0, -200, 1_000, 800], italicAngle: 0, glyphCount: 45,
+      embeddingFlags: nil, locaIsLong: false, isCFF: false,
+      unicodeToGlyph: [0x20: 32], platform1CodeToGlyph: [10: 10],
+      advances: [10: 317, 32: 317], glyphOffsets: Array(repeating: 0, count: 45))
+    #expect(IndexedTextFont.verifiedSimpleGlyphID(
+      scalar: 0x20, code: 10, width: 317, inspector: ambiguous) == nil)
+  }
+
   @Test func inspectorRefusesTruncatedAndForeignPrograms() throws {
     let program = try fontProgram
     #expect(throws: PDFError.self) {

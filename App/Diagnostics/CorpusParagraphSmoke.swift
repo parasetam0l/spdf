@@ -555,11 +555,27 @@
       defer { reopened.close() }
       let again = try await select(reopened), actual = again.pageLines()
       let positionError = zip(actual, lines).map { max(abs($0.x - $1.x), abs($0.baseline - $1.baseline)) }.max() ?? 0
-      guard again.textView.string == expectedText, abs(again.pageBox().width - box.width) < 0.005,
+      let widthError = abs(again.pageBox().width - box.width)
+      let checksBeforeCommit = [
+        again.textView.string == expectedText, widthError < 0.005,
         actual.count == lines.count, positionError < 0.005,
-        !reopened.viewer!.hasPendingPageTextChanges, again.commit(), !reopened.isDocumentEdited,
-        try Data(contentsOf: source) == sourceBytes else {
-        throw PDFError(.malformed, "Corpus Save/reopen changed text, layout, clean selection or the source file")
+        !reopened.viewer!.hasPendingPageTextChanges,
+      ]
+      let selectionCommitted = checksBeforeCommit.allSatisfy { $0 } && again.commit()
+      let documentClean = !reopened.isDocumentEdited
+      let sourceUnchanged = try Data(contentsOf: source) == sourceBytes
+      try JSONSerialization.data(withJSONObject: [
+        "reopenedTextMatches": checksBeforeCommit[0], "reopenedWidthError": widthError,
+        "reopenedLineCount": actual.count, "expectedLineCount": lines.count,
+        "reopenedPositionError": positionError,
+        "noPendingPageTextChanges": checksBeforeCommit[4],
+        "selectionCommitClean": selectionCommitted, "documentClean": documentClean,
+        "sourceUnchanged": sourceUnchanged,
+      ], options: [.prettyPrinted, .sortedKeys])
+        .write(to: output.appendingPathComponent("reopen-validation.json"))
+      guard checksBeforeCommit.allSatisfy({ $0 }), selectionCommitted,
+        documentClean, sourceUnchanged else {
+        throw PDFError(.malformed, "Corpus Save/reopen consistency check failed: \(checksBeforeCommit), commit=\(selectionCommitted), clean=\(documentClean), source=\(sourceUnchanged), lines=\(actual.count)/\(lines.count), widthError=\(widthError), positionError=\(positionError)")
       }
       try original.write(to: output.appendingPathComponent("before.pdf"))
       try edited.write(to: output.appendingPathComponent("after.pdf"))

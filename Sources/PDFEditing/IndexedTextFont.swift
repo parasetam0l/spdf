@@ -170,10 +170,10 @@ struct IndexedTextFont {
       let scalar = glyph.text.unicodeScalars.first else { return nil }
     let glyphID: Int
     if simple != nil {
-      guard glyph.codes.count == 1 else { return nil }
-      glyphID = inspector.unicodeToGlyph[Int(scalar.value)]
-        ?? inspector.platform1CodeToGlyph[Int(glyph.codes[0])]
-        ?? 0
+      guard glyph.codes.count == 1, let width = glyph.width,
+        let verified = Self.verifiedSimpleGlyphID(scalar: Int(scalar.value),
+          code: Int(glyph.codes[0]), width: width, inspector: inspector) else { return nil }
+      glyphID = verified
     } else {
       guard glyph.codes.count == 2 else { return nil }
       let cid = Int(glyph.codes[0]) * 256 + Int(glyph.codes[1])
@@ -212,6 +212,22 @@ struct IndexedTextFont {
     }
     return result
   }
+
+  static func verifiedSimpleGlyphID(scalar: Int, code: Int, width: Double,
+    inspector: TrueTypeInspector) -> Int? {
+    guard !inspector.isCFF, inspector.unitsPerEm > 0,
+      width.isFinite, width >= 0 else { return nil }
+    let candidates = Set([
+      inspector.unicodeToGlyph[scalar], inspector.platform1CodeToGlyph[code],
+    ].compactMap { $0 }.filter { $0 > 0 && $0 < inspector.glyphCount })
+    let matching = candidates.filter { glyphID in
+      guard let advance = inspector.advances[glyphID] else { return false }
+      return abs(Double(advance) * 1_000 / Double(inspector.unitsPerEm) - width) <= 1.1
+    }
+    guard matching.count == 1 else { return nil }
+    return matching.first
+  }
+
   func advance(of codes: [UInt8], fontSize: Double, charSpacing: Double,
     wordSpacing: Double, horizontalScale: Double) -> Double? {
     guard let glyphs = glyphs(codes) else { return nil }
@@ -238,9 +254,16 @@ struct IndexedTextFont {
           encode(glyph.text) == codes else { continue }
         let gid: Int?
         if simple != nil {
-          gid = glyph.text.unicodeScalars.first.flatMap {
-            inspector.unicodeToGlyph[Int($0.value)]
-          } ?? inspector.platform1CodeToGlyph[code]
+          guard let scalar = glyph.text.unicodeScalars.first else { continue }
+          // Some simple-font subsetters put PDF character codes in a
+          // platform-1 cmap. TrueTypeInspector also merges those entries into
+          // its Unicode map, where a code such as 0x20 can look like a real
+          // U+0020 mapping even though it names a different subset glyph.
+          // Consider both possible mappings, but accept only the unique glyph
+          // whose hmtx advance agrees with this source code's PDF /Widths.
+          gid = Self.verifiedSimpleGlyphID(scalar: Int(scalar.value), code: code,
+            width: width, inspector: inspector)
+          guard gid != nil else { continue }
         }
         else if let gids {
           guard code * 2 + 1 < gids.count else { continue }
