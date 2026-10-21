@@ -154,7 +154,9 @@ public enum PageTextEditing {
       let glyphs = run.text.unicodeScalars.compactMap { profile.glyphs[String($0)] }
       guard glyphs.count == run.text.unicodeScalars.count,
         glyphs.flatMap(\.codes) == run.rawCodes else { return nil }
-      return .init(size: run.fontSize, color: run.fillColor, sourceFont: profile.source,
+      return .init(font: .face(family: .helvetica, bold: profile.source.isBold,
+          italic: profile.source.isItalic),
+        size: run.fontSize, color: run.fillColor, sourceFont: profile.source,
         characterSpacing: run.charSpacing, opacity: run.fillAlpha)
     }
     let standard = standard ?? standardResources(pageID: pageID, in: graph)
@@ -203,6 +205,16 @@ public enum PageTextEditing {
         x: transform[4] + run.textSpaceOffset * transform[0], baseline: transform[5],
         text: run.text, format: format, fragments: fragments, textScale: transform[0])
     }
+  }
+
+  /// Decoded text for every source run, including whitespace runs whose font
+  /// encoding does not provide a native preview mapping. Callers may retain
+  /// these values for complete-instruction validation while reconstructing
+  /// only verified visible glyphs from `sourceRuns`.
+  public static func textRunContents(pageID: PDFObjectID, in graph: PDFGraph) throws -> [Int: String] {
+    let content = try PageContent.load(pageID: pageID, in: graph)
+    let runs = try TextRunIndexer.runs(in: content, graph: graph)
+    return Dictionary(uniqueKeysWithValues: runs.indices.map { ($0, runs[$0].text) })
   }
 
   public static func hidingParagraph(pageID: PDFObjectID, originalText: [Int: String],

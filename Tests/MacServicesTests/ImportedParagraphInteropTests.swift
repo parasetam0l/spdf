@@ -646,6 +646,77 @@ struct ImportedParagraphInteropTests {
     #expect(found.allSatisfy { !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty })
   }
 
+  @Test @MainActor func unmappedSubsetSpacesRemainEditableAndSurviveParagraphRewrite() throws {
+    var (graph, pageID) = try fixture(composite: true)
+    guard case .dictionary(let page)? = graph.objects[pageID],
+      case .dictionary(var descendant)? = graph.objects[PDFObjectID(20)] else {
+      Issue.record("Missing composite font fixture")
+      return
+    }
+    let font = try #require(IndexedTextFont.resolve(resource: PDFName("F1"), page: page, in: graph))
+    let spaceCodes = try #require(font.encode(" "))
+    let spaceCID = Int(spaceCodes[0]) * 256 + Int(spaceCodes[1])
+    let program = try #require(Data(base64Encoded: FontFixtureData.subsetProgramBase64))
+    let inspector = try TrueTypeInspector.inspect(program)
+    let largestCID = try #require([32, 65, 66, 67].compactMap { inspector.unicodeToGlyph[$0] }.max())
+    var cidToGID = [UInt8](repeating: 0, count: (largestCID + 1) * 2)
+    for cid in 1...largestCID where cid != spaceCID {
+      cidToGID[cid * 2] = UInt8((cid >> 8) & 0xFF)
+      cidToGID[cid * 2 + 1] = UInt8(cid & 0xFF)
+    }
+    descendant[PDFName("CIDToGIDMap")] = .reference(PDFObjectID(22))
+    graph.objects[PDFObjectID(20)] = .dictionary(descendant)
+    graph.objects[PDFObjectID(22)] = .stream(PDFStream(bytes: Data(cidToGID)))
+
+    func encoded(_ text: String) throws -> String {
+      let codes = try #require(font.encode(text))
+      return "<" + codes.map { String(format: "%02X", $0) }.joined() + ">"
+    }
+    let words = Array(repeating: "ABC", count: 6)
+    let members = try words.flatMap { [try encoded($0), try encoded(" ")] }.dropLast()
+    graph.objects[PDFObjectID(5)] = .stream(PDFStream(bytes: Data("""
+      BT /F1 16 Tf 1 0 0 1 42 700 Tm [\(members.joined(separator: " "))] TJ ET
+      """.utf8)))
+
+    let target = try #require(targets(graph, pageID: pageID).first { $0.paragraph != nil })
+    let paragraph = try #require(target.paragraph)
+    let original = words.joined(separator: " ")
+    #expect(target.text == original)
+    #expect(paragraph.originalText.values.filter { $0.allSatisfy(\.isWhitespace) }.count == words.count - 1)
+    #expect(paragraph.fragments.filter { $0.text == " " }.count == words.count - 1)
+    #expect(paragraph.fragments.filter { $0.text == " " }.allSatisfy { $0.format.sourceFont == nil })
+
+    var x = target.rect[0]
+    let replacementFragments = paragraph.fragments.enumerated().map { index, fragment -> PageTextFragment in
+      if index < 3 { return .init(text: ["C", "B", "A"][index], format: fragment.format) }
+      return fragment
+    }
+    let segments = try replacementFragments.map { fragment -> PageTextSegment in
+      let segment = PageTextSegment(text: fragment.text, x: x, format: fragment.format)
+      let advance: Double
+      if let source = fragment.format.sourceFont,
+        let glyph = paragraph.fontProfiles[source.resource]?.glyphs[fragment.text] {
+        advance = glyph.width * fragment.format.size / 1_000
+      } else {
+        advance = try #require(NativeParagraphEditing.standardAdvance(fragment.text,
+          family: fragment.format.font.rawValue, size: fragment.format.size))
+      }
+      x += advance + fragment.format.characterSpacing
+      return segment
+    }
+    let edited = try PDFEditingEngine.commit(PDFTransaction([
+      RewritePageTextCommand(pageID: pageID, originalText: paragraph.originalText,
+        lines: [.init(text: "CBA" + String(original.dropFirst(3)), x: target.rect[0],
+          baseline: paragraph.firstBaseline, segments: segments)],
+        fontSize: paragraph.fragments[0].format.size, color: paragraph.fragments[0].format.color,
+        box: .init(x: target.rect[0], firstBaseline: paragraph.firstBaseline,
+          width: 400, lineSpacing: paragraph.lineSpacing, wraps: false))
+    ]), to: graph)
+    let reopened = try targets(PDFParser.parse(PDFWriter.write(edited)).graph, pageID: pageID)
+    #expect(reopened.first { $0.paragraph != nil }?.text == "CBA" + String(original.dropFirst(3)))
+    #expect(edited.objects[PDFObjectID(7)] == graph.objects[PDFObjectID(7)])
+  }
+
   @Test @MainActor func sourceGlyphMismatchAndUnknownEncodingDoNotBecomeEditableParagraphs() throws {
     let (graph, pageID) = try fixture(composite: true)
     for missingEncoding in [false, true] {

@@ -9,6 +9,21 @@ public struct PageTextSourceFont: Sendable, Equatable {
   public let name: String
   public init(resource: PDFName, name: String) { self.resource = resource; self.name = name }
 
+  /// Recover common face traits from the embedded PDF font's PostScript or
+  /// subset name so a replacement font can retain the paragraph's weight.
+  public var isBold: Bool {
+    let face = name.split(separator: "+", maxSplits: 1).last.map(String.init) ?? name
+    let normalized = face.lowercased()
+    return normalized.contains("bold") || normalized.contains("black")
+      || normalized.contains("heavy")
+  }
+
+  public var isItalic: Bool {
+    let face = name.split(separator: "+", maxSplits: 1).last.map(String.init) ?? name
+    let normalized = face.lowercased()
+    return normalized.contains("italic") || normalized.contains("oblique")
+  }
+
   /// This writer reuses individual horizontal glyphs; it does not reorder
   /// bidirectional text or position combining/contextual glyph clusters.
   public static func canWriteInline(_ text: String) -> Bool {

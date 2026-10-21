@@ -109,12 +109,14 @@ public enum ProvisionedFontStore {
         guard let native = coreTextFont(program: data, size: 12) else { continue }
         let actualFamily = CTFontCopyFamilyName(native) as String
         let style = CTFontCopyPostScriptName(native) as String
+        let traits = CTFontGetSymbolicTraits(native)
         let label = "\(actualFamily) · \(style)"
         let id = record.sha256
         guard identifiers.insert(id).inserted else { continue }
         totalBytes += data.count
         result.append(.init(
-          program: data, familyName: package.family, faceName: label, identifier: id))
+          program: data, familyName: package.family, faceName: label, identifier: id,
+          isBold: traits.contains(.boldTrait), isItalic: traits.contains(.italicTrait)))
       }
       if result.count >= maximumLoadedFonts || totalBytes >= maximumLoadedBytes { break }
     }

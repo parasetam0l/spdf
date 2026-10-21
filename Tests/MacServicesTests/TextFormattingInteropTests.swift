@@ -173,6 +173,43 @@ struct TextFormattingInteropTests {
       text: "A", format: PageTextFormat(size: 16, customFont: custom))])
   }
 
+  @Test @MainActor func regularLicensedFontPreservesImportedBoldWeight() throws {
+    let program = try #require(Data(base64Encoded: FontFixtureData.subsetProgramBase64))
+    let source = PageTextSourceFont(resource: PDFName("Subset"), name: "ABCDEF+DejaVuSans-Bold")
+    let custom = CustomTextFont(program: program, familyName: "DejaVuSans",
+      faceName: "DejaVu Sans · Book", identifier: "regular-for-bold-source")
+    let original = PageTextFormat(font: .helveticaBold, size: 16, sourceFont: source)
+    let view = FormatTestTextView(frame: .zero)
+    let formatting = NativeTextFormatting(view: view,
+      fragments: [.init(text: "AB", format: original)], initial: original,
+      licensedFonts: [custom])
+    formatting.render(scale: 1, minimumLineSpacing: 20)
+    view.setSelectedRange(NSRange(location: 0, length: 2))
+
+    #expect(source.isBold)
+    #expect(!source.isItalic)
+    #expect(formatting.apply(.licensedFont(custom), isTyping: true) == nil)
+    let format = try #require(formatting.fragments().first?.format)
+    #expect(format.font.isBold)
+    #expect(format.syntheticBoldStrokeWidth == 0.64)
+    let stroke = try #require(view.textStorage?.attribute(.strokeWidth, at: 0,
+      effectiveRange: nil) as? NSNumber)
+    #expect(stroke.doubleValue == -4)
+
+    let parsed = try PDFParser.parse(BlankPDF.data())
+    let line = PageTextLine(text: "AB", x: 48, baseline: 700,
+      segments: [.init(text: "AB", x: 48, format: format)])
+    let edited = try PDFEditingEngine.commit(PDFTransaction([
+      AddPageTextLinesCommand(pageID: parsed.pageIDs[0], lines: [line],
+        box: .init(x: 48, firstBaseline: 700, width: 120, lineSpacing: 20))
+    ]), to: parsed.graph)
+    let content = try PageContent.load(pageID: parsed.pageIDs[0], in: edited)
+    let operators = String(decoding: content.bytes, as: UTF8.self)
+    #expect(operators.contains("2 Tr"))
+    #expect(operators.contains("0 Tr"))
+    #expect(try PDFDocument(data: PDFWriter.write(edited))?.string?.contains("AB") == true)
+  }
+
   @Test @MainActor func selectedWordsKeepIndependentStylesAndFormattingUndo() throws {
     let view = FormatTestTextView(frame: .zero)
     view.history.groupsByEvent = false

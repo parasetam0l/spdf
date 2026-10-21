@@ -480,12 +480,17 @@ public final class NativeTextFormatting {
     } else if format.sourceFont != nil { font = nil }
     else { font = NSFont(name: format.font.rawValue, size: format.size * scale) }
     guard let font else { return [:] }
-    return [
+    var result: [NSAttributedString.Key: Any] = [
       Self.key: Self.dictionary(format), .font: font, .kern: format.characterSpacing * scale, .ligature: 0,
       .foregroundColor: NSColor(
         srgbRed: format.color[0], green: format.color[1], blue: format.color[2],
         alpha: format.opacity),
     ]
+    if format.syntheticBoldStrokeWidth > 0, format.size > 0 {
+      result[.strokeWidth] = -(format.syntheticBoldStrokeWidth / format.size * 100)
+      result[.strokeColor] = result[.foregroundColor]
+    }
+    return result
   }
   private static func dictionary(_ format: PageTextFormat) -> NSDictionary {
     var result: [String: Any] = ["font": format.font.rawValue, "size": format.size,
@@ -499,6 +504,8 @@ public final class NativeTextFormatting {
       result["customFamily"] = custom.familyName
       result["customFace"] = custom.faceName
       result["customIdentifier"] = custom.identifier
+      result["customBold"] = custom.isBold
+      result["customItalic"] = custom.isItalic
     }
     return result as NSDictionary
   }
@@ -518,7 +525,9 @@ public final class NativeTextFormatting {
       let family = dictionary["customFamily"] as? String {
       custom = .init(program: program, familyName: family,
         faceName: dictionary["customFace"] as? String,
-        identifier: dictionary["customIdentifier"] as? String)
+        identifier: dictionary["customIdentifier"] as? String,
+        isBold: dictionary["customBold"] as? Bool ?? false,
+        isItalic: dictionary["customItalic"] as? Bool ?? false)
     } else { custom = nil }
     return .init(font: font, size: size, color: color, sourceFont: source,
       customFont: custom,

@@ -87,6 +87,13 @@ public struct PageTextFormat: Sendable, Equatable {
   public var customFont: CustomTextFont?
   public var characterSpacing: Double
   public var fontName: String { customFont?.faceName ?? sourceFont?.name ?? font.rawValue }
+  /// A custom regular face has no weight axis in the PDF subset writer. Use a
+  /// small text stroke to preserve a bold source face without changing its
+  /// glyph advances.
+  public var syntheticBoldStrokeWidth: Double {
+    guard let customFont, font.isBold, !customFont.isBold, size.isFinite, size > 0 else { return 0 }
+    return size * 0.04
+  }
   public var size: Double
   public var color: [Double]
   public var opacity: Double
@@ -364,7 +371,8 @@ enum PageTextLineWriter {
             codes, x: segment.x, baseline: line.baseline, resource: resource,
             size: segment.format.size, color: segment.format.color,
             spacing: segment.format.characterSpacing,
-            opacityName: try registerOpacity(segment.format.opacity), to: &bytes)
+            opacityName: try registerOpacity(segment.format.opacity),
+            syntheticBoldStrokeWidth: segment.format.syntheticBoldStrokeWidth, to: &bytes)
           count += 1
         }
       }
@@ -422,6 +430,7 @@ enum PageTextLineWriter {
   private static func emit(
     _ codes: [UInt8], x: Double, baseline: Double, resource: PDFName,
     size: Double, color: [Double], spacing: Double = 0, opacityName: PDFName? = nil,
+    syntheticBoldStrokeWidth: Double = 0,
     to bytes: inout [UInt8]
   ) throws {
     if let opacityName {
@@ -430,11 +439,17 @@ enum PageTextLineWriter {
     bytes += Array("\(AnnotationSupport.number(spacing)) Tc\n".utf8)
     bytes += Array(try PDFWriter.serializedValue(.name(resource)))
     bytes += Array(" \(AnnotationSupport.number(size)) Tf\n".utf8)
-    bytes += Array((color.map(AnnotationSupport.number).joined(separator: " ") + " rg\n").utf8)
+    let colorOperands = color.map(AnnotationSupport.number).joined(separator: " ")
+    bytes += Array((colorOperands + " rg\n").utf8)
+    if syntheticBoldStrokeWidth > 0 {
+      bytes += Array((colorOperands + " RG\n1 j\n"
+        + AnnotationSupport.number(syntheticBoldStrokeWidth) + " w\n2 Tr\n").utf8)
+    }
     bytes += Array(
       "1 0 0 1 \(AnnotationSupport.number(x)) \(AnnotationSupport.number(baseline)) Tm\n".utf8)
     bytes += ReplaceTextCommand.literalStringBytes(codes)
     bytes += Array(" Tj\n".utf8)
+    if syntheticBoldStrokeWidth > 0 { bytes += Array("0 Tr\n".utf8) }
   }
 }
 

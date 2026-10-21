@@ -1074,14 +1074,21 @@ public struct CustomTextFont: Sendable, Equatable {
   /// Stable identity for one installed font file; unlike the family name it
   /// distinguishes regular, italic, and variable files in the same family.
   public let identifier: String
+  /// The face's built-in style. Inline formatting may synthesize a bold stroke
+  /// only when this font program itself is not already bold.
+  public let isBold: Bool
+  public let isItalic: Bool
 
   public init(
-    program: Data, familyName: String, faceName: String? = nil, identifier: String? = nil
+    program: Data, familyName: String, faceName: String? = nil, identifier: String? = nil,
+    isBold: Bool = false, isItalic: Bool = false
   ) {
     self.program = program
     self.familyName = familyName
     self.faceName = faceName ?? familyName
     self.identifier = identifier ?? faceName ?? familyName
+    self.isBold = isBold
+    self.isItalic = isItalic
   }
 }
 

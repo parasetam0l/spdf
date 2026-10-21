@@ -860,11 +860,18 @@ public struct RewritePageTextCommand: PDFEditCommand, Equatable, Sendable {
             standardFamily: standardFamily, customFont: segment.format.customFont,
             size: segment.format.size, spacing: segment.format.characterSpacing,
             x: segment.x, baseline: line.baseline) {
-            editedGlyphBounds += ink
+            let expansion = segment.format.syntheticBoldStrokeWidth / 2
+            editedGlyphBounds += ink.map { bounds in
+              [bounds[0] - expansion, bounds[1] - expansion,
+                bounds[2] + expansion, bounds[3] + expansion]
+            }
           } else {
+            let expansion = segment.format.syntheticBoldStrokeWidth / 2
             editedGlyphBounds.append([
-              segment.x + measured.min, line.baseline - segment.format.size * 0.2,
-              segment.x + measured.max, line.baseline + segment.format.size * 0.85,
+              segment.x + measured.min - expansion,
+              line.baseline - segment.format.size * 0.2 - expansion,
+              segment.x + measured.max + expansion,
+              line.baseline + segment.format.size * 0.85 + expansion,
             ])
           }
         }

@@ -102,12 +102,13 @@ public enum NativeParagraphEditing {
           var bounds = CGRect.zero, advance = CGSize.zero
           _ = CTFontGetBoundingRectsForGlyphs(font, .horizontal, &glyph, &bounds, 1)
           _ = CTFontGetAdvancesForGlyphs(font, .horizontal, &glyph, &advance, 1)
+          let syntheticExpansion = segment.format.syntheticBoldStrokeWidth / 2
           // Empty outlines (spaces) need no clipping margin. A tiny tolerance
           // covers decimal serialization, not intentionally clipped glyphs.
-          if !bounds.isEmpty, (x + bounds.minX < clip[0] - 0.002
-            || x + bounds.maxX > clip[2] + 0.002
-            || line.baseline + bounds.minY < clip[1] - 0.002
-            || line.baseline + bounds.maxY > clip[3] + 0.002) { return issue }
+          if !bounds.isEmpty, (x + bounds.minX - syntheticExpansion < clip[0] - 0.002
+            || x + bounds.maxX + syntheticExpansion > clip[2] + 0.002
+            || line.baseline + bounds.minY - syntheticExpansion < clip[1] - 0.002
+            || line.baseline + bounds.maxY + syntheticExpansion > clip[3] + 0.002) { return issue }
           if let source = segment.format.sourceFont {
             guard let mapping = profiles[source.resource]?.glyphs[String(scalar)] else { return issue }
             advance.width = mapping.width * segment.format.size / 1_000
@@ -370,6 +371,8 @@ public enum NativeParagraphEditing {
       let x: Double
       let width: Double
       let fragments: [PageTextFragment]
+      let wordBoundaryBefore: Bool
+      let wordBoundaryAfter: Bool
     }
     struct Line {
       var spans: [Span]
@@ -381,21 +384,56 @@ public enum NativeParagraphEditing {
       var text: String { fragments.map(\.text).joined().trimmingCharacters(in: .whitespaces) }
     }
     let sources = (try? PageTextEditing.sourceRuns(pageID: pageID, in: graph)) ?? []
+    let sourceTextRuns = (try? PageTextEditing.textRunContents(pageID: pageID, in: graph)) ?? [:]
     var spans: [Span] = []
     for block in blocks {
       let members = sources.filter { block.runIndices.contains($0.index) }
-      guard members.count == block.runIndices.count,
-        members.map(\.text).joined() == block.text else { continue }
+      let sourceText = members.map(\.text).joined()
+      func visibleCharacters(_ text: String) -> String {
+        String(text.filter { !$0.isWhitespace })
+      }
+      // PDFKit can infer word spaces from glyph positions even when a subset
+      // font omits those space codes from its verified source-run map. The
+      // span layout below may reconstruct those separators from measured
+      // advances, but it must never invent, drop or reorder visible characters.
+      let exactSourceText = members.count == block.runIndices.count && sourceText == block.text
+      let sameVisibleCharacters = !members.isEmpty
+        && visibleCharacters(sourceText) == visibleCharacters(block.text)
+      guard exactSourceText || sameVisibleCharacters else {
+        diagnostic?("source-block-unmatched (\(members.count)/\(block.runIndices.count)): block=\(String(reflecting: block.text)), source=\(String(reflecting: sourceText))")
+        continue
+      }
+      if !exactSourceText {
+        diagnostic?("source-block-whitespace-inferred: \(String(block.text.prefix(120)))")
+      }
+      var wordBoundaries = Set<Int>()
+      var visibleCount = 0
+      var sawWhitespace = false
+      for character in block.text {
+        if character.isWhitespace {
+          if visibleCount > 0 { sawWhitespace = true }
+        } else {
+          if sawWhitespace { wordBoundaries.insert(visibleCount) }
+          visibleCount += 1
+          sawWhitespace = false
+        }
+      }
       var candidate: [Span] = []
-      for source in members {
+      var visibleOffset = 0
+      for (memberOffset, source) in members.enumerated() {
         var width = 0.0
         var valid = true
+        var failure: String?
         for piece in source.fragments {
           guard let font = nativeFont(piece.format, embedded: embedded), piece.text.utf16.count == 1,
-            let character = piece.text.utf16.first else { valid = false; break }
+            let character = piece.text.utf16.first else {
+            valid = false; failure = "native font or single-code-unit glyph unavailable"; break
+          }
           var code = character
           var glyph: CGGlyph = 0
-          guard CTFontGetGlyphsForCharacters(font, &code, &glyph, 1), glyph != 0 else { valid = false; break }
+          guard CTFontGetGlyphsForCharacters(font, &code, &glyph, 1), glyph != 0 else {
+            valid = false; failure = "native glyph mapping unavailable"; break
+          }
           var size = CGSize.zero
           _ = CTFontGetAdvancesForGlyphs(font, .horizontal, &glyph, &size, 1)
           var advance = size.width
@@ -403,14 +441,33 @@ public enum NativeParagraphEditing {
             guard let mapping = profiles[reference.resource]?.glyphs[piece.text],
               mapping.id == nil || mapping.id == Int(glyph),
               abs(size.width * 1_000 / piece.format.size - mapping.width) <= 1.1
-            else { valid = false; break }
+            else {
+              valid = false; failure = "source glyph ID or advance mismatch"; break
+            }
             advance = mapping.width * piece.format.size / 1_000
           }
           width += advance + piece.format.characterSpacing
         }
-        guard valid else { candidate = []; break }
+        guard valid else {
+          diagnostic?("source-span-unavailable: run \(source.index) \(String(source.text.prefix(100))): \(failure ?? "unknown mapping issue")")
+          candidate = []; break
+        }
         let x = source.format.sourceFont == nil && source.index == block.runIndices.first ? block.rect[0] : source.x
-        candidate.append(Span(source: source, block: block, x: x, width: width, fragments: source.fragments))
+        let visibleLength = source.text.filter { !$0.isWhitespace }.count
+        let previousHasWhitespace = memberOffset > 0
+          && members[memberOffset - 1].text.last?.isWhitespace == true
+        let nextHasWhitespace = members.indices.contains(memberOffset + 1)
+          && members[memberOffset + 1].text.first?.isWhitespace == true
+        let boundaryBefore = wordBoundaries.contains(visibleOffset)
+          && source.text.first?.isWhitespace != true && !previousHasWhitespace
+        let nextVisibleOffset = visibleOffset + visibleLength
+        let boundaryAfter = wordBoundaries.contains(nextVisibleOffset)
+          || (nextVisibleOffset == visibleCount && block.text.last?.isWhitespace == true)
+        visibleOffset = nextVisibleOffset
+        candidate.append(Span(source: source, block: block, x: x, width: width,
+          fragments: source.fragments,
+          wordBoundaryBefore: boundaryBefore && source.text.first?.isWhitespace != true,
+          wordBoundaryAfter: boundaryAfter && source.text.last?.isWhitespace != true && !nextHasWhitespace))
       }
       spans += candidate
     }
@@ -419,9 +476,17 @@ public enum NativeParagraphEditing {
     var lines: [Line] = []
     for span in spans {
       if let last = lines.last, let previous = last.spans.last,
-        abs(last.y - span.source.baseline) < 0.02,
-        abs(span.x - previous.x - previous.width) <= max(0.75, span.source.format.size * 0.3) {
-        lines[lines.count - 1].spans.append(span)
+        abs(last.y - span.source.baseline) < 0.02 {
+        let gap = span.x - previous.x - previous.width
+        let tolerance = max(0.75, span.source.format.size * 0.3)
+        let inferredWordGap = previous.wordBoundaryAfter || span.wordBoundaryBefore
+        if abs(gap) <= tolerance
+          || (inferredWordGap && gap >= -tolerance && gap <= span.source.format.size * 1.5) {
+          lines[lines.count - 1].spans.append(span)
+        } else {
+          diagnostic?("same-baseline-split gap=\(gap) tolerance=\(tolerance): \(String(previous.block.text.prefix(80))) -> \(String(span.block.text.prefix(80)))")
+          lines.append(Line(spans: [span]))
+        }
       } else { lines.append(Line(spans: [span])) }
     }
     for index in lines.indices {
@@ -432,11 +497,26 @@ public enum NativeParagraphEditing {
         }
         return standardAdvance(text, family: format.font.rawValue, size: format.size)
       }
+      func inferredSpaceFormat(_ format: PageTextFormat, gap: Double) -> PageTextFormat? {
+        guard gap > 0, gap <= format.size * 1.5 else { return nil }
+        let face = format.sourceFont.map {
+          StandardTextFont.face(family: .helvetica, bold: $0.isBold, italic: $0.isItalic)
+        } ?? format.font
+        guard let width = standardAdvance(" ", family: face.rawValue, size: format.size) else { return nil }
+        var result = format
+        result.font = face
+        result.sourceFont = nil
+        result.customFont = nil
+        result.characterSpacing = gap - width
+        return result.isValid ? result : nil
+      }
       let gaps = zip(spans, spans.dropFirst()).map { $1.x - $0.x - $0.width }
       let wordGaps = gaps.indices.map { index -> Bool in
+        let boundaryEvidence = spans[index].wordBoundaryAfter || spans[index + 1].wordBoundaryBefore
         guard let last = spans[index].fragments.last, let next = spans[index + 1].fragments.first,
-          last.text.last?.isWhitespace == false, next.text.first?.isWhitespace == false,
-          let space = spaceWidth(last.format), space > 0 else { return false }
+          last.text.last?.isWhitespace == false, next.text.first?.isWhitespace == false else { return false }
+        if boundaryEvidence { return inferredSpaceFormat(last.format, gap: gaps[index]) != nil }
+        guard let space = spaceWidth(last.format), space > 0 else { return false }
         return gaps[index] >= space * 0.6 && gaps[index] <= space * 1.4
       }
       // Uniform, widely tracked individual letters are ambiguous. Preserve
@@ -447,12 +527,20 @@ public enum NativeParagraphEditing {
       for (index, span) in spans.enumerated() {
         var pieces = span.fragments
         if index < gaps.count, let last = pieces.popLast() {
-          if wordGaps[index], !tracking, let width = spaceWidth(last.format) {
+          if wordGaps[index], !tracking {
             pieces.append(last)
-            var format = last.format
-            format.characterSpacing = gaps[index] - width
-            if abs(format.characterSpacing) < 1e-6 { format.characterSpacing = 0 }
-            pieces.append(.init(text: " ", format: format))
+            if let width = spaceWidth(last.format) {
+              var format = last.format
+              format.characterSpacing = gaps[index] - width
+              if abs(format.characterSpacing) < 1e-6 { format.characterSpacing = 0 }
+              pieces.append(.init(text: " ", format: format))
+            } else if let format = inferredSpaceFormat(last.format, gap: gaps[index]) {
+              pieces.append(.init(text: " ", format: format))
+            } else {
+              var format = last.format
+              if abs(gaps[index]) > 1e-6 { format.characterSpacing += gaps[index] }
+              pieces[pieces.count - 1] = .init(text: last.text, format: format)
+            }
           } else {
             var format = last.format
             if abs(gaps[index]) > 1e-6 { format.characterSpacing += gaps[index] }
@@ -559,11 +647,28 @@ public enum NativeParagraphEditing {
           diagnostic?("native-layout-baseline: \(String(label.prefix(120)))")
           return nil
         }
-        let original = Dictionary(uniqueKeysWithValues: all.map { ($0.source.index, $0.source.text) })
+        var original = Dictionary(uniqueKeysWithValues: all.map { ($0.source.index, $0.source.text) })
+        for span in all {
+          for index in span.block.runIndices where original[index] == nil {
+            guard let text = sourceTextRuns[index], text.allSatisfy(\.isWhitespace) else {
+              diagnostic?("unmapped-source-run: \(index)=\(String(reflecting: sourceTextRuns[index])) in \(String(label.prefix(100)))")
+              return nil
+            }
+            original[index] = text
+          }
+        }
         var advances: [Int: Double] = [:]
         for span in all where span.source.format.sourceFont == nil {
           advances[span.source.index] = standardAdvance(span.source.text,
             family: span.source.format.font.rawValue, size: span.source.format.size / span.source.textScale)
+        }
+        for span in all where span.source.format.sourceFont == nil {
+          for index in span.block.runIndices where advances[index] == nil {
+            guard let text = sourceTextRuns[index],
+              let value = standardAdvance(text, family: span.source.format.font.rawValue,
+                size: span.source.format.size / span.source.textScale) else { continue }
+            advances[index] = value
+          }
         }
         do {
           try validator.validate(originalText: original,
@@ -602,10 +707,11 @@ public enum NativeParagraphEditing {
         diagnostic?("accepted: \(String(label.prefix(120)))")
         let rect = paragraphBounds(lines: sourceLines, firstBaseline: first.y,
           initialFontSize: initial.size, x: first.x, width: width, embedded: embedded)
-        return PageTextTarget(pageIndex: all[0].block.pageIndex, runIndex: all[0].source.index,
+        let runIndices = original.keys.sorted()
+        return PageTextTarget(pageIndex: all[0].block.pageIndex, runIndex: runIndices[0],
           rect: rect, text: fragments.map(\.text).joined(),
           style: .init(fontFamily: initial.fontName, fontSize: initial.size, fillColor: initial.color),
-          runIndices: all.map { $0.source.index }, paragraph: .init(originalText: original,
+          runIndices: runIndices, paragraph: .init(originalText: original,
             lineSpacing: spacing, firstBaseline: first.y, standardFontAdvances: advances,
             fragments: fragments, wraps: members.count > 1, fontProfiles: profiles, clippingRect: clippingRect))
       }

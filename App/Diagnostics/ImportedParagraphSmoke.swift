@@ -11,6 +11,10 @@
     static func survey(directory: URL, output: URL) {
       do {
         var rows: [[String: Any]] = []
+        let filterIndex = CommandLine.arguments.firstIndex(of: "--diagnostic-contains")
+        let diagnosticFilter = filterIndex.flatMap {
+          CommandLine.arguments.indices.contains($0 + 1) ? CommandLine.arguments[$0 + 1] : nil
+        }
         let files = try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
           .filter { $0.pathExtension.lowercased() == "pdf" }.sorted { $0.lastPathComponent < $1.lastPathComponent }
         for (index, file) in files.enumerated() {
@@ -18,6 +22,8 @@
             let parsed = try PDFParser.parse(Data(contentsOf: file))
             guard let reader = PDFDocument(url: file), !reader.isLocked else { continue }
             var targets: [[String: Any]] = []
+            var diagnostics: [String] = []
+            var diagnosticBlocks: [[String: Any]] = []
             var sourceRuns = 0
             var profiles: [[String: Any]] = []
             for pageIndex in 0..<min(3, parsed.pageIDs.count) {
@@ -31,17 +37,31 @@
                 PageTextTarget(pageIndex: pageIndex, runIndex: $0.runIndices[0], rect: $0.rect,
                   text: $0.text, style: $0.style, runIndices: $0.runIndices)
               }
+              if let diagnosticFilter, !diagnosticFilter.isEmpty {
+                let seeds = blocks.filter { $0.text.localizedCaseInsensitiveContains(diagnosticFilter) }
+                diagnosticBlocks += blocks.filter { block in
+                  seeds.contains { abs(block.rect[1] - $0.rect[1]) <= 24 }
+                }.map { block in
+                  ["page": pageIndex + 1, "rect": block.rect, "runs": block.runIndices,
+                    "font": block.style?.fontFamily ?? "", "text": block.text] as [String: Any]
+                }
+              }
               let paragraphs = NativeParagraphEditing.targets(from: blocks, pageID: pageID,
-                graph: parsed.graph, page: page).filter { $0.paragraph != nil }
+                graph: parsed.graph, page: page, diagnostic: { message in
+                  if let diagnosticFilter, message.localizedCaseInsensitiveContains(diagnosticFilter) {
+                    diagnostics.append("page \(pageIndex + 1): \(message)")
+                  }
+                }).filter { $0.paragraph != nil }
               targets += paragraphs.map { target in
                 ["page": pageIndex, "rect": target.rect, "runs": target.runIndices,
                   "font": target.style?.fontFamily ?? "", "characters": target.text.count,
-                  "multiline": target.paragraph?.wraps ?? false] as [String: Any]
+                  "multiline": target.paragraph?.wraps ?? false, "text": target.text] as [String: Any]
               }
             }
             rows.append(["id": String(format: "document-%02d", index + 1),
               "file": file.lastPathComponent, "pagesSampled": min(3, parsed.pageIDs.count),
-              "sourceRuns": sourceRuns, "targets": targets, "profiles": profiles])
+              "sourceRuns": sourceRuns, "targets": targets, "profiles": profiles,
+              "diagnostics": diagnostics, "diagnosticBlocks": diagnosticBlocks])
           } catch { rows.append(["id": String(format: "document-%02d", index + 1), "error": String(describing: error)]) }
         }
         try FileManager.default.createDirectory(at: output.deletingLastPathComponent(), withIntermediateDirectories: true)
