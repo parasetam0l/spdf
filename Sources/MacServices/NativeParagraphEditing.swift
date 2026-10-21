@@ -103,10 +103,14 @@ public enum NativeParagraphEditing {
           _ = CTFontGetBoundingRectsForGlyphs(font, .horizontal, &glyph, &bounds, 1)
           _ = CTFontGetAdvancesForGlyphs(font, .horizontal, &glyph, &advance, 1)
           let syntheticExpansion = segment.format.syntheticBoldStrokeWidth / 2
+          let lowerShear = segment.format.obliqueness * Double(bounds.minY)
+          let upperShear = segment.format.obliqueness * Double(bounds.maxY)
+          let minShear = min(lowerShear, upperShear)
+          let maxShear = max(lowerShear, upperShear)
           // Empty outlines (spaces) need no clipping margin. A tiny tolerance
           // covers decimal serialization, not intentionally clipped glyphs.
-          if !bounds.isEmpty, (x + bounds.minX - syntheticExpansion < clip[0] - 0.002
-            || x + bounds.maxX + syntheticExpansion > clip[2] + 0.002
+          if !bounds.isEmpty, (x + bounds.minX + minShear - syntheticExpansion < clip[0] - 0.002
+            || x + bounds.maxX + maxShear + syntheticExpansion > clip[2] + 0.002
             || line.baseline + bounds.minY - syntheticExpansion < clip[1] - 0.002
             || line.baseline + bounds.maxY + syntheticExpansion > clip[3] + 0.002) { return issue }
           if let source = segment.format.sourceFont {

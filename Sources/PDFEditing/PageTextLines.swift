@@ -440,8 +440,7 @@ public struct RewritePageTextCommand: PDFEditCommand, Equatable, Sendable {
       }
       guard run.text == originalText[index], ["Tj", "TJ"].contains(instruction.operatorName),
         run.fontSize.isFinite, run.fontSize > 0,
-        transform[0] > 0, abs(transform[0] - transform[3]) < 1e-6,
-        abs(transform[1]) < 1e-6, abs(transform[2]) < 1e-6,
+        TextCanvasSupport.inlineObliqueness(for: transform) != nil,
         run.charSpacing.isFinite, abs(run.charSpacing) <= 144,
         run.wordSpacing.isFinite, abs(run.wordSpacing) <= 144,
         abs(run.horizontalScale - 100) < 1e-6, abs(run.rise) < 1e-6,
@@ -576,11 +575,25 @@ public struct RewritePageTextCommand: PDFEditCommand, Equatable, Sendable {
     /// box even when the glyphs themselves remain separated.
     func inkBounds(of text: String, font: IndexedTextFont?, standardFamily: String? = nil,
       customFont: CustomTextFont? = nil, size: Double, spacing: Double,
-      x: Double, baseline: Double) -> [[Double]]?
+      x: Double, baseline: Double, obliqueness: Double = 0) -> [[Double]]?
     {
       guard size.isFinite, size > 0, spacing.isFinite,
-        x.isFinite, baseline.isFinite else { return nil }
+        x.isFinite, baseline.isFinite, obliqueness.isFinite,
+        abs(obliqueness) <= 0.35 else { return nil }
       if text.isEmpty { return [] }
+
+      func pageBounds(_ rect: [Double], pen: Double, scale: Double) -> [Double]? {
+        guard rect.count == 4, rect.allSatisfy(\.isFinite), scale.isFinite else { return nil }
+        let lowerShift = obliqueness * rect[1] * scale
+        let upperShift = obliqueness * rect[3] * scale
+        let bounds = [
+          x + pen + rect[0] * scale + min(lowerShift, upperShift),
+          baseline + rect[1] * scale,
+          x + pen + rect[2] * scale + max(lowerShift, upperShift),
+          baseline + rect[3] * scale,
+        ]
+        return bounds.allSatisfy(\.isFinite) ? bounds : nil
+      }
 
       if let font {
         guard let metrics = outlineMetrics(for: font),
@@ -597,13 +610,7 @@ public struct RewritePageTextCommand: PDFEditCommand, Equatable, Sendable {
             return nil
           }
           if let box = metrics.bounds(glyphID: glyphID) {
-            let bounds = [
-              x + pen + Double(box[0]) * unitScale,
-              baseline + Double(box[1]) * unitScale,
-              x + pen + Double(box[2]) * unitScale,
-              baseline + Double(box[3]) * unitScale,
-            ]
-            guard bounds.allSatisfy(\.isFinite) else { return nil }
+            guard let bounds = pageBounds(box.map(Double.init), pen: pen, scale: unitScale) else { return nil }
             result.append(bounds)
           }
           pen += width * size / 1_000 + spacing
@@ -622,13 +629,7 @@ public struct RewritePageTextCommand: PDFEditCommand, Equatable, Sendable {
             glyphID > 0, glyphID < metrics.inspector.glyphCount,
             let advance = metrics.inspector.advances[glyphID], advance >= 0 else { return nil }
           if let box = metrics.bounds(glyphID: glyphID) {
-            let bounds = [
-              x + pen + Double(box[0]) * unitScale,
-              baseline + Double(box[1]) * unitScale,
-              x + pen + Double(box[2]) * unitScale,
-              baseline + Double(box[3]) * unitScale,
-            ]
-            guard bounds.allSatisfy(\.isFinite) else { return nil }
+            guard let bounds = pageBounds(box.map(Double.init), pen: pen, scale: unitScale) else { return nil }
             result.append(bounds)
           }
           pen += Double(advance) * unitScale + spacing
@@ -653,13 +654,9 @@ public struct RewritePageTextCommand: PDFEditCommand, Equatable, Sendable {
       for (index, rect) in rects.enumerated() {
         if !rect.isNull, rect.width > 0, rect.height > 0 {
           let scale = size / 1_000
-          let bounds = [
-            x + pen + Double(rect.minX) * scale,
-            baseline + Double(rect.minY) * scale,
-            x + pen + Double(rect.maxX) * scale,
-            baseline + Double(rect.maxY) * scale,
-          ]
-          guard bounds.allSatisfy(\.isFinite) else { return nil }
+          guard let bounds = pageBounds(
+            [Double(rect.minX), Double(rect.minY), Double(rect.maxX), Double(rect.maxY)],
+            pen: pen, scale: scale) else { return nil }
           result.append(bounds)
         }
         pen += widths[index] * size / 1_000 + spacing
@@ -859,7 +856,8 @@ public struct RewritePageTextCommand: PDFEditCommand, Equatable, Sendable {
           if let ink = inkBounds(of: segment.text, font: segmentFont,
             standardFamily: standardFamily, customFont: segment.format.customFont,
             size: segment.format.size, spacing: segment.format.characterSpacing,
-            x: segment.x, baseline: line.baseline) {
+            x: segment.x, baseline: line.baseline,
+            obliqueness: segment.format.obliqueness) {
             let expansion = segment.format.syntheticBoldStrokeWidth / 2
             editedGlyphBounds += ink.map { bounds in
               [bounds[0] - expansion, bounds[1] - expansion,
@@ -867,11 +865,15 @@ public struct RewritePageTextCommand: PDFEditCommand, Equatable, Sendable {
             }
           } else {
             let expansion = segment.format.syntheticBoldStrokeWidth / 2
+            let lower = -segment.format.size * 0.2
+            let upper = segment.format.size * 0.85
+            let lowerShift = segment.format.obliqueness * lower
+            let upperShift = segment.format.obliqueness * upper
             editedGlyphBounds.append([
-              segment.x + measured.min - expansion,
-              line.baseline - segment.format.size * 0.2 - expansion,
-              segment.x + measured.max + expansion,
-              line.baseline + segment.format.size * 0.85 + expansion,
+              segment.x + measured.min + min(lowerShift, upperShift) - expansion,
+              line.baseline + lower - expansion,
+              segment.x + measured.max + max(lowerShift, upperShift) + expansion,
+              line.baseline + upper + expansion,
             ])
           }
         }

@@ -615,6 +615,59 @@ struct ImportedParagraphInteropTests {
     #expect(try targets(graph, pageID: pageID).contains { $0.paragraph?.originalText.count == 2 })
   }
 
+  @Test @MainActor func syntheticItalicTextMatricesRemainEditableAndRoundTrip() throws {
+    var (graph, pageID) = try fixture(composite: true)
+    guard case .stream(let stream)? = graph.objects[PDFObjectID(5)] else {
+      Issue.record("Missing source content")
+      return
+    }
+    let source = String(decoding: stream.bytes, as: UTF8.self)
+      .replacingOccurrences(of: "1 0 0 1 42", with: "1 0 0.26794 1 42")
+    graph.objects[PDFObjectID(5)] = .stream(PDFStream(bytes: Data(source.utf8)))
+
+    let target = try #require(targets(graph, pageID: pageID).first {
+      $0.paragraph?.originalText.count == 2
+    })
+    let paragraph = try #require(target.paragraph)
+    let format = try #require(paragraph.fragments.first?.format)
+    #expect(abs(format.obliqueness - 0.26794) < 1e-6)
+    let view = NSTextView(frame: .init(x: 0, y: 0, width: 600, height: 400))
+    let formatting = NativeTextFormatting(view: view, fragments: paragraph.fragments,
+      initial: format, profiles: paragraph.fontProfiles)
+    formatting.render(scale: 1, minimumLineSpacing: paragraph.lineSpacing)
+    let previewShear = try #require(
+      view.textStorage?.attribute(.obliqueness, at: 0, effectiveRange: nil) as? CGFloat)
+    #expect(abs(Double(previewShear) - 0.26794) < 1e-6)
+
+    let sourceLines = paragraph.originalText.keys.sorted().enumerated().map { offset, index in
+      let text = paragraph.originalText[index]!
+      return PageTextLine(text: text, x: target.rect[0],
+        baseline: paragraph.firstBaseline - Double(offset) * paragraph.lineSpacing,
+        segments: [.init(text: text, x: target.rect[0], format: format)])
+    }
+    let edited = try PDFEditingEngine.commit(PDFTransaction([
+      RewritePageTextCommand(pageID: pageID, originalText: paragraph.originalText,
+        lines: sourceLines, fontSize: format.size, color: format.color,
+        box: .init(x: target.rect[0], firstBaseline: paragraph.firstBaseline,
+          width: target.rect[2] - target.rect[0], lineSpacing: paragraph.lineSpacing))
+    ]), to: graph)
+    let bytes = try PDFWriter.write(edited)
+    let reopened = try PDFParser.parse(bytes)
+    let reopenedTarget = try #require(targets(reopened.graph, pageID: reopened.pageIDs[0])
+      .first { $0.paragraph?.originalText.count == 2 })
+    let reopenedFormats = try #require(reopenedTarget.paragraph?.fragments.map(\.format))
+    #expect(reopenedFormats.allSatisfy { abs($0.obliqueness - 0.26794) < 1e-6 })
+    #expect(edited.objects[PDFObjectID(7)] == graph.objects[PDFObjectID(7)])
+
+    let output = try PageContent.load(pageID: reopened.pageIDs[0], in: reopened.graph)
+    let outputRuns = try TextRunIndexer.runs(in: output, graph: reopened.graph)
+    #expect(outputRuns.filter {
+      abs($0.matrix[0] - 1) < 1e-6 && abs($0.matrix[1]) < 1e-6
+        && abs($0.matrix[2] - 0.26794) < 1e-6 && abs($0.matrix[3] - 1) < 1e-6
+    }.count >= 2)
+    #expect(PDFDocument(data: bytes)?.string?.contains("ABC ABC ABC ABC ABC ABC") == true)
+  }
+
   @Test @MainActor func paintedRulesSeparateRowsButUnpaintedPathsDoNot() throws {
     let (base, pageID) = try fixture(composite: true)
     for painted in [true, false] {

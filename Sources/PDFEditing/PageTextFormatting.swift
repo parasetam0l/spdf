@@ -82,6 +82,9 @@ public enum StandardTextFont: String, CaseIterable, Sendable {
 public struct PageTextFormat: Sendable, Equatable {
   public var font: StandardTextFont
   public var sourceFont: PageTextSourceFont?
+  /// Horizontal PDF text-space shear used by synthetic italic source runs.
+  /// Glyph x coordinates are shifted by this factor times their y coordinate.
+  public var obliqueness: Double
   /// A user-provisioned, explicitly licensed font program for inline writing.
   /// Existing PDF fonts remain represented by `sourceFont` and are reused.
   public var customFont: CustomTextFont?
@@ -99,9 +102,10 @@ public struct PageTextFormat: Sendable, Equatable {
   public var opacity: Double
   public init(font: StandardTextFont = .helvetica, size: Double = 12, color: [Double] = [0, 0, 0],
     sourceFont: PageTextSourceFont? = nil, customFont: CustomTextFont? = nil,
-    characterSpacing: Double = 0, opacity: Double = 1) {
+    characterSpacing: Double = 0, opacity: Double = 1, obliqueness: Double = 0) {
     self.font = font
     self.sourceFont = sourceFont
+    self.obliqueness = obliqueness
     self.customFont = customFont
     self.characterSpacing = characterSpacing
     self.size = size
@@ -112,6 +116,7 @@ public struct PageTextFormat: Sendable, Equatable {
     size.isFinite && (2...144).contains(size) && characterSpacing.isFinite
       && abs(characterSpacing) <= 144 && color.count == 3
       && color.allSatisfy { $0.isFinite && (0...1).contains($0) }
+      && obliqueness.isFinite && abs(obliqueness) <= 0.35
       && opacity.isFinite && (0...1).contains(opacity)
   }
 }
@@ -373,6 +378,7 @@ enum PageTextLineWriter {
             size: segment.format.size, color: segment.format.color,
             spacing: segment.format.characterSpacing,
             opacityName: try registerOpacity(segment.format.opacity),
+            obliqueness: segment.format.obliqueness,
             syntheticBoldStrokeWidth: segment.format.syntheticBoldStrokeWidth, to: &bytes)
           count += 1
         }
@@ -431,6 +437,7 @@ enum PageTextLineWriter {
   private static func emit(
     _ codes: [UInt8], x: Double, baseline: Double, resource: PDFName,
     size: Double, color: [Double], spacing: Double = 0, opacityName: PDFName? = nil,
+    obliqueness: Double = 0,
     syntheticBoldStrokeWidth: Double = 0,
     to bytes: inout [UInt8]
   ) throws {
@@ -447,7 +454,7 @@ enum PageTextLineWriter {
         + AnnotationSupport.number(syntheticBoldStrokeWidth) + " w\n2 Tr\n").utf8)
     }
     bytes += Array(
-      "1 0 0 1 \(AnnotationSupport.number(x)) \(AnnotationSupport.number(baseline)) Tm\n".utf8)
+      "1 0 \(AnnotationSupport.number(obliqueness)) 1 \(AnnotationSupport.number(x)) \(AnnotationSupport.number(baseline)) Tm\n".utf8)
     bytes += ReplaceTextCommand.literalStringBytes(codes)
     bytes += Array(" Tj\n".utf8)
     if syntheticBoldStrokeWidth > 0 { bytes += Array("0 Tr\n".utf8) }
@@ -564,8 +571,8 @@ public enum AuthoredPageTextBoxes {
         original.keys.allSatisfy({ index in
           let run = allRuns[index]
           return content.instructions[run.instructionIndex].operatorName == "Tj"
-            && run.ctm == [1, 0, 0, 1, 0, 0] && run.matrix[0] == 1 && run.matrix[3] == 1
-            && run.matrix[1] == 0 && run.matrix[2] == 0
+            && TextCanvasSupport.inlineObliqueness(
+              for: TextCanvasSupport.concatenate(run.ctm, run.matrix)) != nil
         })
       else { continue }
       boxes.append(.init(box: box, lines: lines, originalText: original))

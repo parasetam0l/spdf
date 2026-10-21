@@ -529,6 +529,9 @@ public final class NativeTextFormatting {
         srgbRed: format.color[0], green: format.color[1], blue: format.color[2],
         alpha: format.opacity),
     ]
+    if abs(format.obliqueness) > 1e-9 {
+      result[.obliqueness] = CGFloat(format.obliqueness)
+    }
     if format.syntheticBoldStrokeWidth > 0, format.size > 0 {
       result[.strokeWidth] = -(format.syntheticBoldStrokeWidth / format.size * 100)
       result[.strokeColor] = result[.foregroundColor]
@@ -537,7 +540,8 @@ public final class NativeTextFormatting {
   }
   private static func dictionary(_ format: PageTextFormat) -> NSDictionary {
     var result: [String: Any] = ["font": format.font.rawValue, "size": format.size,
-      "color": format.color, "spacing": format.characterSpacing, "opacity": format.opacity]
+      "color": format.color, "spacing": format.characterSpacing, "opacity": format.opacity,
+      "obliqueness": format.obliqueness]
     if let source = format.sourceFont {
       result["resource"] = String(decoding: source.resource.bytes, as: UTF8.self)
       result["sourceName"] = source.name
@@ -575,7 +579,8 @@ public final class NativeTextFormatting {
     return .init(font: font, size: size, color: color, sourceFont: source,
       customFont: custom,
       characterSpacing: dictionary["spacing"] as? Double ?? 0,
-      opacity: dictionary["opacity"] as? Double ?? 1)
+      opacity: dictionary["opacity"] as? Double ?? 1,
+      obliqueness: dictionary["obliqueness"] as? Double ?? fallback.obliqueness)
   }
 
   private static func nativeFont(_ font: CustomTextFont, size: Double) -> NSFont? {

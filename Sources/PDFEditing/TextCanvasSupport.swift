@@ -149,6 +149,8 @@ public enum PageTextEditing {
 
   static func format(for run: TextRun, family: String, pageID: PDFObjectID, in graph: PDFGraph,
     standard: Set<PDFName>? = nil, profiles: [PDFName: PageTextFontProfile]? = nil) -> PageTextFormat? {
+    let transform = TextCanvasSupport.concatenate(run.ctm, run.matrix)
+    guard let obliqueness = TextCanvasSupport.inlineObliqueness(for: transform) else { return nil }
     if let profile = (profiles ?? (try? fontProfiles(pageID: pageID, in: graph)) ?? [:])[run.fontResource] {
       guard PageTextSourceFont.canWriteInline(run.text) else { return nil }
       guard case .dictionary(let page)? = graph.objects[pageID],
@@ -158,12 +160,14 @@ public enum PageTextEditing {
       return .init(font: .face(family: .helvetica, bold: profile.source.isBold,
           italic: profile.source.isItalic),
         size: run.fontSize, color: run.fillColor, sourceFont: profile.source,
-        characterSpacing: run.charSpacing, opacity: run.fillAlpha)
+        characterSpacing: run.charSpacing, opacity: run.fillAlpha,
+        obliqueness: obliqueness)
     }
     let standard = standard ?? standardResources(pageID: pageID, in: graph)
     guard let face = StandardTextFont(rawValue: family), standard.contains(run.fontResource) else { return nil }
     return .init(font: face, size: run.fontSize, color: run.fillColor,
-      characterSpacing: run.charSpacing, opacity: run.fillAlpha)
+      characterSpacing: run.charSpacing, opacity: run.fillAlpha,
+      obliqueness: obliqueness)
   }
   private static func standardResources(pageID: PDFObjectID, in graph: PDFGraph) -> Set<PDFName> {
     guard let content = try? PageContent.load(pageID: pageID, in: graph),
@@ -185,8 +189,7 @@ public enum PageTextEditing {
     return runs.indices.compactMap { index in
       let run = runs[index]
       let transform = TextCanvasSupport.concatenate(run.ctm, run.matrix)
-      guard transform[0] > 0, abs(transform[0] - transform[3]) < 1e-6,
-        abs(transform[1]) < 1e-6, abs(transform[2]) < 1e-6,
+      guard TextCanvasSupport.inlineObliqueness(for: transform) != nil,
         run.horizontalScale == 100, run.rise == 0,
         TextCanvasSupport.renderingMode(at: run.instructionIndex, in: content) == 0 else { return nil }
       let style = TextEditTargeting.inputStyle(runIndex: index, runs: runs, in: graph)
@@ -310,9 +313,7 @@ public enum PageTextEditing {
       detail = assessment.reasons.joined(separator: "; ")
     } else {
       let transform = TextCanvasSupport.concatenate(run.ctm, run.matrix)
-      let ordinaryTransform = transform[0] > 0
-        && abs(transform[0] - transform[3]) < 1e-6
-        && abs(transform[1]) < 1e-6 && abs(transform[2]) < 1e-6
+      let ordinaryTransform = TextCanvasSupport.inlineObliqueness(for: transform) != nil
       let ordinarySpacing = abs(run.charSpacing) < 1e-6
         && abs(run.wordSpacing) < 1e-6 && abs(run.horizontalScale - 100) < 1e-6
       if !ordinaryTransform {
@@ -358,9 +359,7 @@ public enum PageTextEditing {
     }
     let instruction = content.instructions[run.instructionIndex]
     let transform = TextCanvasSupport.concatenate(run.ctm, run.matrix)
-    let ordinaryTransform =
-      transform[0] > 0 && abs(transform[0] - transform[3]) < 1e-6
-      && abs(transform[1]) < 1e-6 && abs(transform[2]) < 1e-6
+    let ordinaryTransform = TextCanvasSupport.inlineObliqueness(for: transform) != nil
     let ordinarySpacing =
       abs(run.charSpacing) < 1e-6 && abs(run.wordSpacing) < 1e-6
       && abs(run.horizontalScale - 100) < 1e-6
@@ -411,6 +410,19 @@ enum TextCanvasSupport {
       a[0] * b[2] + a[2] * b[3], a[1] * b[2] + a[3] * b[3],
       a[0] * b[4] + a[2] * b[5] + a[4], a[1] * b[4] + a[3] * b[5] + a[5],
     ]
+  }
+
+  /// Inline paragraph output uses a page-space baseline and can faithfully
+  /// retain positive uniform scale plus a bounded horizontal synthetic italic
+  /// shear. Rotation, vertical shear, nonuniform scaling and stronger skew
+  /// remain outside the supported profile.
+  static func inlineObliqueness(for transform: [Double]) -> Double? {
+    guard transform.count == 6, transform.allSatisfy(\.isFinite),
+      transform[0] > 0, abs(transform[0] - transform[3]) < 1e-6,
+      abs(transform[1]) < 1e-6 else { return nil }
+    let obliqueness = transform[2] / transform[0]
+    guard obliqueness.isFinite, abs(obliqueness) <= 0.35 else { return nil }
+    return obliqueness
   }
 
   static func localDelta(dx: Double, dy: Double, ctm: [Double]) throws -> (Double, Double) {
