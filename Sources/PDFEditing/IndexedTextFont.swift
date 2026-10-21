@@ -75,6 +75,10 @@ struct IndexedTextFont {
   let resource: PDFName
   let fontID: PDFObjectID
   let baseFont: String
+  /// A Standard-14 face whose PDF font dictionary omits metrics and carries
+  /// no overrides. These fonts still have defined advances, so CoreText may
+  /// supply their canonical widths when a TJ array needs source positioning.
+  private let standardMetricFace: StandardTextFont?
   private let mapping: [Int: String]
   private let encoding: [String: Int]
   private let multiScalarEncoding: [MultiScalarMapping]
@@ -259,7 +263,29 @@ struct IndexedTextFont {
     multiScalarEncoding.sort {
       $0.scalars.count == $1.scalars.count ? $0.code < $1.code : $0.scalars.count > $1.scalars.count
     }
+    let standardMetricFace: StandardTextFont?
+    if let simple, !simple.isType3, simple.widths == nil, simple.missingWidth == nil,
+      simple.differences.isEmpty, !simple.hasUnknownDifferences, simple.toUnicode == nil,
+      font[PDFName("Subtype")] == .name(PDFName("Type1")),
+      font[PDFName("FontDescriptor")] == nil, font[PDFName("Widths")] == nil,
+      font[PDFName("ToUnicode")] == nil
+    {
+      let face = StandardTextFont(rawValue: name)
+      let canonicalEncoding: Bool
+      switch font[PDFName("Encoding")] {
+      case nil: canonicalEncoding = true
+      case .name(let encoding)?:
+        canonicalEncoding = ["WinAnsiEncoding", "MacRomanEncoding", "StandardEncoding"]
+          .contains(String(decoding: encoding.bytes, as: UTF8.self))
+      default: canonicalEncoding = false
+      }
+      standardMetricFace = canonicalEncoding ? face : nil
+    } else {
+      standardMetricFace = nil
+    }
+
     return Self(simple: simple, resource: resource, fontID: fontID, baseFont: name,
+      standardMetricFace: standardMetricFace,
       mapping: mappings, encoding: encoding, multiScalarEncoding: multiScalarEncoding,
       verifiedCompositeGlyphs: verifiedCompositeGlyphs,
       equivalentCompositeGlyphIDs: equivalentCompositeGlyphIDs,
@@ -390,6 +416,37 @@ struct IndexedTextFont {
       guard let width = glyph.width else { return nil }
       total += width * fontSize / 1_000 + charSpacing
       // Word spacing applies only to the single-byte code32 (ISO32000-1 9.3.3).
+      if glyph.codes == [32] { total += wordSpacing }
+    }
+    return total * horizontalScale / 100
+  }
+
+  /// Fallback used only by paragraph-editor discovery after a verified
+  /// Standard-14 rewrite. General page indexing remains conservative for
+  /// fonts without explicit source widths.
+  func standard14Advance(of codes: [UInt8], fontSize: Double, charSpacing: Double,
+    wordSpacing: Double, horizontalScale: Double) -> Double? {
+    guard let glyphs = glyphs(codes), glyphs.allSatisfy({ $0.width == nil }),
+      let simple, let face = standardMetricFace else { return nil }
+    var total = 0.0
+    let text = glyphs.map(\.text).joined()
+    guard StandardTextFont.canEncode(text), simple.encode(text) == codes,
+      fontSize.isFinite, charSpacing.isFinite, wordSpacing.isFinite,
+      horizontalScale.isFinite else { return nil }
+    let scalars = Array(text.unicodeScalars)
+    let characters = Array(text.utf16)
+    guard scalars.count == characters.count, scalars.count == glyphs.count else { return nil }
+    let coreTextFont = CTFontCreateWithName(face.rawValue as CFString, 1_000, nil)
+    var coreTextGlyphs = [CGGlyph](repeating: 0, count: characters.count)
+    guard CTFontGetGlyphsForCharacters(
+      coreTextFont, characters, &coreTextGlyphs, coreTextGlyphs.count),
+      coreTextGlyphs.allSatisfy({ $0 != 0 }) else { return nil }
+    var advances = [CGSize](repeating: .zero, count: coreTextGlyphs.count)
+    _ = CTFontGetAdvancesForGlyphs(
+      coreTextFont, .horizontal, coreTextGlyphs, &advances, coreTextGlyphs.count)
+    guard advances.allSatisfy({ $0.width.isFinite && $0.width >= 0 }) else { return nil }
+    for (index, glyph) in glyphs.enumerated() {
+      total += advances[index].width.rounded() * fontSize / 1_000 + charSpacing
       if glyph.codes == [32] { total += wordSpacing }
     }
     return total * horizontalScale / 100

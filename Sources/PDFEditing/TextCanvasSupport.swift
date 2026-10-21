@@ -178,7 +178,8 @@ public enum PageTextEditing {
 
   public static func sourceRuns(pageID: PDFObjectID, in graph: PDFGraph) throws -> [SourceRun] {
     let content = try PageContent.load(pageID: pageID, in: graph)
-    let runs = try TextRunIndexer.runs(in: content, graph: graph)
+    let runs = try TextRunIndexer.runs(
+      in: content, graph: graph, allowStandard14MetricFallback: true)
     guard case .dictionary(let page)? = graph.objects[pageID] else { return [] }
     let profiles = try fontProfiles(pageID: pageID, in: graph)
     let standard = standardResources(pageID: pageID, in: graph)
@@ -232,7 +233,8 @@ public enum PageTextEditing {
   public static func hidingParagraph(pageID: PDFObjectID, originalText: [Int: String],
     standardFontAdvances: [Int: Double], in graph: PDFGraph) throws -> PDFGraph {
     try RewritePageTextCommand(pageID: pageID, originalText: originalText, lines: [],
-      fontSize: 12, color: [0, 0, 0], standardFontAdvances: standardFontAdvances).validate(in: graph)
+      fontSize: 12, color: [0, 0, 0], standardFontAdvances: standardFontAdvances)
+      .validateSource(in: graph)
     let graph = try PageContentCopy.makePrivate(pageID: pageID, in: graph)
     let content = try PageContent.load(pageID: pageID, in: graph)
     let runs = try TextRunIndexer.runs(in: content, graph: graph)
@@ -250,8 +252,9 @@ public enum PageTextEditing {
   }
   public static func blocks(pageID: PDFObjectID, in graph: PDFGraph) throws -> [PageTextBlock] {
     let content = try PageContent.load(pageID: pageID, in: graph)
-    let runs = try TextRunIndexer.runs(in: content, graph: graph)
-    let layout = try PageTextLayout.build(pageID: pageID, in: graph)
+    let runs = try TextRunIndexer.runs(
+      in: content, graph: graph, allowStandard14MetricFallback: true)
+    let layout = try PageTextLayout.buildForParagraphEditing(pageID: pageID, in: graph)
     guard case .dictionary(let page)? = graph.objects[pageID] else { return [] }
     var fonts: [PDFName: IndexedTextFont] = [:]
     for resource in Set(runs.map(\.fontResource)) {

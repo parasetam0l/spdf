@@ -688,11 +688,19 @@ public enum NativeParagraphEditing {
           diagnostic?("missing-format: \(String(label.prefix(120)))")
           return nil
         }
+        let candidateRuns = Array(Set(all.flatMap { span in
+          [span.source.index] + span.block.runIndices
+        })).sorted()
+        // Nearby same-style show fragments can make one ordinary line. On
+        // tagged pages, only expose the combined target when its reading
+        // order can stay in one marked-content scope.
+        let canJoinFragments = all.count > 1
+          && validator.canKeepSingleMarkedContentScope(runIndices: candidateRuns)
         guard formats.contains(where: {
           $0.sourceFont != nil || $0 != initial || $0.characterSpacing != 0
         }) || all.contains(where: {
           $0.block.runIndices.count > 1 || abs($0.source.textScale - 1) > 1e-6
-        }) else {
+        }) || canJoinFragments else {
           diagnostic?("uniform-unverified-format: \(String(label.prefix(120)))")
           return nil
         }

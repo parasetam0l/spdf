@@ -43,9 +43,20 @@ public struct PageTextLayout: Sendable {
       limits: limits)
   }
 
+  /// Paragraph editing needs verified Standard-14 metrics to recover source
+  /// positions after its own tagged per-glyph rewrites. General layout keeps
+  /// the conservative missing-width behavior of the public entry point.
+  static func buildForParagraphEditing(
+    pageID: PDFObjectID, in graph: PDFGraph, limits: PDFLimits = PDFLimits()
+  ) throws -> PageTextLayout {
+    try build(
+      in: PageContent.load(pageID: pageID, in: graph, limits: limits), graph: graph,
+      limits: limits, allowStandard14MetricFallback: true)
+  }
+
   static func build(
     in content: PageContent, graph: PDFGraph, limits: PDFLimits = PDFLimits(),
-    resources: [PDFName: PDFValue]? = nil
+    resources: [PDFName: PDFValue]? = nil, allowStandard14MetricFallback: Bool = false
   ) throws -> PageTextLayout {
     guard case .dictionary(let page)? = graph.objects[content.pageID] else {
       throw PDFError(.malformed, "Page is missing")
@@ -59,7 +70,8 @@ public struct PageTextLayout: Sendable {
       effectivePage = page
     }
     let runs = try TextRunIndexer.runs(
-      in: content, graph: graph, limits: limits, resources: resources)
+      in: content, graph: graph, limits: limits, resources: resources,
+      allowStandard14MetricFallback: allowStandard14MetricFallback)
     // P14-016: parse each embedded program once per build; misses are
     // cached too so a missing program is not re-resolved per glyph.
     var metricsCache: [PDFObjectID: TrueTypeOutlineMetrics?] = [:]
@@ -88,6 +100,11 @@ public struct PageTextLayout: Sendable {
         let advance = font.advance(
           of: glyph.codes, fontSize: run.fontSize, charSpacing: run.charSpacing,
           wordSpacing: run.wordSpacing, horizontalScale: run.horizontalScale)
+          ?? (allowStandard14MetricFallback
+            ? font.standard14Advance(of: glyph.codes, fontSize: run.fontSize,
+              charSpacing: run.charSpacing, wordSpacing: run.wordSpacing,
+              horizontalScale: run.horizontalScale)
+            : nil)
         let base = run.hasKnownOffset ? run.textSpaceOffset : 0
         let origin = [
           matrix[4] + (base + position) * matrix[0] + run.rise * matrix[2],

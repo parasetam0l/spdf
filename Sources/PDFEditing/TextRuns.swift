@@ -52,7 +52,7 @@ enum TextRunIndexer {
 
   static func runs(
     in content: PageContent, graph: PDFGraph, limits: PDFLimits = PDFLimits(),
-    resources: [PDFName: PDFValue]? = nil
+    resources: [PDFName: PDFValue]? = nil, allowStandard14MetricFallback: Bool = false
   ) throws -> [TextRun] {
     let page: [PDFName: PDFValue]
     if let resources {
@@ -104,10 +104,20 @@ enum TextRunIndexer {
           textSpaceOffset: textSpaceOffset, hasKnownOffset: hasKnownOffset))
     }
 
-    func advancePen(_ codes: [UInt8]) {
-      guard let amount = state.font?.advance(of: codes, fontSize: state.fontSize,
+    func advance(_ codes: [UInt8]) -> Double? {
+      guard let font = state.font else { return nil }
+      return font.advance(of: codes, fontSize: state.fontSize,
         charSpacing: state.charSpacing, wordSpacing: state.wordSpacing,
-        horizontalScale: state.horizontalScale) else { return }
+        horizontalScale: state.horizontalScale)
+        ?? (allowStandard14MetricFallback
+          ? font.standard14Advance(of: codes, fontSize: state.fontSize,
+            charSpacing: state.charSpacing, wordSpacing: state.wordSpacing,
+            horizontalScale: state.horizontalScale)
+          : nil)
+    }
+
+    func advancePen(_ codes: [UInt8]) {
+      guard let amount = advance(codes) else { return }
       matrix[4] += amount * matrix[0]
       matrix[5] += amount * matrix[1]
     }
@@ -231,12 +241,7 @@ enum TextRunIndexer {
                   instructionIndex: index, path: [0, memberIndex], span: spans[memberIndex],
                   codes: [UInt8](codes), textSpaceOffset: offset, hasKnownOffset: offsetKnown)
               }
-              if let font = state.font,
-                let advance = font.advance(
-                  of: [UInt8](codes), fontSize: state.fontSize,
-                  charSpacing: state.charSpacing, wordSpacing: state.wordSpacing,
-                  horizontalScale: state.horizontalScale)
-              {
+              if let advance = advance([UInt8](codes)) {
                 offset += advance
               } else {
                 offsetKnown = false
