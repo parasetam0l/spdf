@@ -15,8 +15,12 @@
         let diagnosticFilter = filterIndex.flatMap {
           CommandLine.arguments.indices.contains($0 + 1) ? CommandLine.arguments[$0 + 1] : nil
         }
+        let allPages = CommandLine.arguments.contains("--survey-all-pages")
         let files = try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
           .filter { $0.pathExtension.lowercased() == "pdf" }.sorted { $0.lastPathComponent < $1.lastPathComponent }
+        if allPages && files.count != 1 {
+          throw PDFError(.unsupported, "All-pages survey accepts one PDF per run to bound memory")
+        }
         for (index, file) in files.enumerated() {
           do {
             let parsed = try PDFParser.parse(Data(contentsOf: file))
@@ -26,7 +30,8 @@
             var diagnosticBlocks: [[String: Any]] = []
             var sourceRuns = 0
             var profiles: [[String: Any]] = []
-            for pageIndex in 0..<min(3, parsed.pageIDs.count) {
+            let pageCount = allPages ? parsed.pageIDs.count : min(3, parsed.pageIDs.count)
+            for pageIndex in 0..<pageCount {
               guard let page = reader.page(at: pageIndex) else { continue }
               let pageID = parsed.pageIDs[pageIndex]
               profiles += try PageTextEditing.fontProfiles(pageID: pageID, in: parsed.graph).values.map {
@@ -59,13 +64,16 @@
               }
             }
             rows.append(["id": String(format: "document-%02d", index + 1),
-              "file": file.lastPathComponent, "pagesSampled": min(3, parsed.pageIDs.count),
+              "file": file.lastPathComponent, "pagesSampled": pageCount,
               "sourceRuns": sourceRuns, "targets": targets, "profiles": profiles,
               "diagnostics": diagnostics, "diagnosticBlocks": diagnosticBlocks])
           } catch { rows.append(["id": String(format: "document-%02d", index + 1), "error": String(describing: error)]) }
         }
         try FileManager.default.createDirectory(at: output.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try JSONSerialization.data(withJSONObject: ["scope": "read-only first-three-page font/paragraph survey", "documents": rows],
+        let scope = allPages
+          ? "read-only all-pages font/paragraph survey"
+          : "read-only first-three-page font/paragraph survey"
+        try JSONSerialization.data(withJSONObject: ["scope": scope, "documents": rows],
           options: [.prettyPrinted, .sortedKeys]).write(to: output)
         print("Imported paragraph survey recorded \(rows.count) documents privately")
         exit(0)

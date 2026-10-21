@@ -281,7 +281,14 @@
       var chosen: PageTextTarget?
       var targetInventory: [[String: Any]] = []
       var pageDiagnostics: [[String: Any]] = []
-      for index in 0..<min(3, document.editSession.pageIDs.count) {
+      let allPages = CommandLine.arguments.contains("--corpus-all-pages")
+      if allPages && matching == nil {
+        throw PDFError(.unsupported, "All-pages corpus diagnostics require a target prefix")
+      }
+      let pageLimit = allPages
+        ? document.editSession.pageIDs.count
+        : min(3, document.editSession.pageIDs.count)
+      for index in 0..<pageLimit {
         guard let page = reader.page(at: index) else { continue }
         let pageID = document.editSession.pageIDs[index]
         let blocks = try PageTextEditing.blocks(pageID: pageID, in: graph)
@@ -529,7 +536,9 @@
           throw PDFError(.malformed, "Native corpus typing did not insert the covered glyphs")
         }
       }
-      canvas.setTextWidth(originalBox.width + 6)
+      if !CommandLine.arguments.contains("--corpus-keep-width") {
+        canvas.setTextWidth(originalBox.width + 6)
+      }
       let expectedText = canvas.textView.string, lines = canvas.pageLines(), box = canvas.pageBox()
       let savedCharacters = characters(canvas, document: document)
       guard canvas.commit() else { throw PDFError(.malformed, "Corpus paragraph did not commit") }
