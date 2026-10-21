@@ -1,5 +1,6 @@
 import Foundation
 import CoreGraphics
+import CoreText
 import PDFCore
 
 /// The page's existing font resource. Reusing it never embeds a replacement
@@ -53,6 +54,18 @@ public struct PageTextFontProfile: Sendable, Equatable {
 /// Shared indexing/measurement for simple fonts and horizontal Identity-H
 /// TrueType subsets. Legacy simple-font commands keep their own edit gates.
 struct IndexedTextFont {
+  private struct VerifiedCompositeGlyph {
+    let text: String
+    let id: Int
+    let width: Double
+  }
+
+  private struct MultiScalarMapping {
+    let text: String
+    let scalars: [UInt32]
+    let code: Int
+  }
+
   struct Glyph {
     let text: String
     let codes: [UInt8]
@@ -64,6 +77,9 @@ struct IndexedTextFont {
   let baseFont: String
   private let mapping: [Int: String]
   private let encoding: [String: Int]
+  private let multiScalarEncoding: [MultiScalarMapping]
+  private let verifiedCompositeGlyphs: [Int: VerifiedCompositeGlyph]
+  private let equivalentCompositeGlyphIDs: [Int: Set<Int>]
   private let widths: [Int: Double]
   private let defaultWidth: Double
   private let gids: [UInt8]?
@@ -140,13 +156,114 @@ struct IndexedTextFont {
         }
       }
     }
+    let program = stream(descriptor?[PDFName("FontFile2")])
+      ?? stream(descriptor?[PDFName("FontFile3")])
+    var verifiedCompositeGlyphs: [Int: VerifiedCompositeGlyph] = [:]
+    var compositeInspector: TrueTypeInspector?
+    if simple == nil, let program,
+      let inspector = try? TrueTypeInspector.inspect(program, requireUnicodeMap: false),
+      !inspector.isCFF, inspector.unitsPerEm > 0 {
+      compositeInspector = inspector
+      for code in mappings.keys.sorted() {
+        guard (0...65_535).contains(code), let text = mappings[code], !text.isEmpty else { continue }
+        let glyphID: Int
+        if let gids {
+          guard code * 2 + 1 < gids.count else { continue }
+          glyphID = Int(gids[code * 2]) * 256 + Int(gids[code * 2 + 1])
+        } else {
+          glyphID = code
+        }
+        guard glyphID > 0, glyphID < inspector.glyphCount,
+          let advance = inspector.advances[glyphID] else { continue }
+        let width = widths[code] ?? fallback
+        guard abs(Double(advance) * 1_000 / Double(inspector.unitsPerEm) - width) <= 1.1 else {
+          continue
+        }
+        verifiedCompositeGlyphs[code] = .init(text: text, id: glyphID, width: width)
+      }
+    }
+    var outlineFont: CTFont?
+    var triedOutlineFont = false
+    func sameOutline(_ left: Int, _ right: Int) -> Bool {
+      guard left != right else { return true }
+      if !triedOutlineFont {
+        triedOutlineFont = true
+        if let program, let provider = CGDataProvider(data: program as CFData),
+          let graphics = CGFont(provider) {
+          outlineFont = CTFontCreateWithGraphicsFont(graphics, 1_000, nil, nil)
+        }
+      }
+      guard let outlineFont else { return false }
+      let leftPath = CTFontCreatePathForGlyph(outlineFont, CGGlyph(left), nil)
+      let rightPath = CTFontCreatePathForGlyph(outlineFont, CGGlyph(right), nil)
+      return leftPath == rightPath
+    }
+
     var encoding: [String: Int] = [:]
-    for (code, text) in mappings.sorted(by: { $0.key < $1.key })
-      where text.unicodeScalars.count == 1 && encoding[text] == nil { encoding[text] = code }
+    var multiScalarBySequence: [[UInt32]: (text: String, code: Int)] = [:]
+    var equivalentCompositeGlyphIDs: [Int: Set<Int>] = [:]
+    let codesByText = Dictionary(grouping: mappings.keys.sorted(), by: { mappings[$0] ?? "" })
+    for text in codesByText.keys.sorted() {
+      let scalars = text.unicodeScalars.map(\.value)
+      let codes = codesByText[text] ?? []
+      let candidates = codes.filter { verifiedCompositeGlyphs[$0] != nil }
+      guard !candidates.isEmpty else { continue }
+      let firstMapping = verifiedCompositeGlyphs[candidates[0]]!
+      let sameAdvance = candidates.allSatisfy {
+        guard let width = verifiedCompositeGlyphs[$0]?.width else { return false }
+        return abs(width - firstMapping.width) <= 0.001
+      }
+      let sameVisualGlyph = sameAdvance && candidates.allSatisfy {
+        guard let mapping = verifiedCompositeGlyphs[$0] else { return false }
+        return sameOutline(firstMapping.id, mapping.id)
+      }
+      let equivalentIDs = sameVisualGlyph
+        ? Set(candidates.compactMap { verifiedCompositeGlyphs[$0]?.id })
+        : []
+      for code in candidates {
+        let id = verifiedCompositeGlyphs[code]!.id
+        equivalentCompositeGlyphIDs[code] = equivalentIDs.isEmpty ? [id] : equivalentIDs
+      }
+
+      var reverseCandidates = candidates
+      if scalars.count == 1,
+        let expectedGlyph = compositeInspector?.unicodeToGlyph[Int(scalars[0])] {
+        // A matching advance alone cannot distinguish duplicate ToUnicode
+        // entries that point to different outlines. Prefer the font's cmap
+        // mapping for ordinary single-scalar text.
+        let matching = candidates.filter { verifiedCompositeGlyphs[$0]?.id == expectedGlyph }
+        if !matching.isEmpty {
+          reverseCandidates = matching
+        } else if candidates.count > 1 {
+          continue
+        }
+      } else if candidates.count > 1 && !sameVisualGlyph {
+        // Without a direct Unicode cmap entry, reverse-map a sequence only
+        // when the alternatives have identical outlines and advances.
+        continue
+      }
+      guard let code = reverseCandidates.first else { continue }
+      if scalars.count == 1 {
+        encoding[text] = code
+      } else if scalars.count > 1 {
+        if multiScalarBySequence[scalars] == nil {
+          multiScalarBySequence[scalars] = (text, code)
+        }
+      }
+    }
+    var multiScalarEncoding: [MultiScalarMapping] = []
+    for value in multiScalarBySequence.values {
+      let scalars = value.text.unicodeScalars.map { $0.value }
+      multiScalarEncoding.append(.init(text: value.text, scalars: scalars, code: value.code))
+    }
+    multiScalarEncoding.sort {
+      $0.scalars.count == $1.scalars.count ? $0.code < $1.code : $0.scalars.count > $1.scalars.count
+    }
     return Self(simple: simple, resource: resource, fontID: fontID, baseFont: name,
-      mapping: mappings, encoding: encoding, widths: widths, defaultWidth: fallback, gids: gids,
-      program: stream(descriptor?[PDFName("FontFile2")])
-        ?? stream(descriptor?[PDFName("FontFile3")]))
+      mapping: mappings, encoding: encoding, multiScalarEncoding: multiScalarEncoding,
+      verifiedCompositeGlyphs: verifiedCompositeGlyphs,
+      equivalentCompositeGlyphIDs: equivalentCompositeGlyphIDs,
+      widths: widths, defaultWidth: fallback, gids: gids, program: program)
   }
 
   private static func number(_ value: PDFValue) -> Double? {
@@ -174,7 +291,6 @@ struct IndexedTextFont {
           code: Int(glyph.codes[0]), width: width, inspector: inspector) else { return nil }
       glyphID = verified
     } else {
-      guard glyph.text.unicodeScalars.count == 1 else { return nil }
       guard glyph.codes.count == 2 else { return nil }
       let cid = Int(glyph.codes[0]) * 256 + Int(glyph.codes[1])
       if let gids {
@@ -202,13 +318,40 @@ struct IndexedTextFont {
     }
     return result
   }
+  func sourceGlyphsMatchProfile(_ glyphs: [Glyph], profile: PageTextFontProfile) -> Bool {
+    glyphs.allSatisfy { glyph in
+      guard let expected = profile.glyphs[glyph.text] else { return false }
+      if simple != nil { return expected.codes == glyph.codes }
+      guard glyph.codes.count == 2 else { return false }
+      let code = Int(glyph.codes[0]) * 256 + Int(glyph.codes[1])
+      guard let actual = verifiedCompositeGlyphs[code], actual.text == glyph.text,
+        let expectedID = expected.id,
+        equivalentCompositeGlyphIDs[code]?.contains(expectedID) == true else { return false }
+      return abs(expected.width - actual.width) <= 0.001
+    }
+  }
   func decode(_ codes: [UInt8]) -> String { glyphs(codes)?.map(\.text).joined() ?? "\u{FFFD}" }
   func encode(_ text: String) -> [UInt8]? {
     if let simple { return simple.encode(text) }
     var result: [UInt8] = []
-    for scalar in text.unicodeScalars {
-      guard let code = encoding[String(scalar)] else { return nil }
+    let scalars = Array(text.unicodeScalars.map(\.value))
+    var offset = 0
+    while offset < scalars.count {
+      var matched = false
+      for mapping in multiScalarEncoding {
+        guard offset + mapping.scalars.count <= scalars.count,
+          scalars[offset..<offset + mapping.scalars.count].elementsEqual(mapping.scalars) else { continue }
+        let code = mapping.code
+        result += [UInt8(code >> 8), UInt8(code & 255)]
+        offset += mapping.scalars.count
+        matched = true
+        break
+      }
+      if matched { continue }
+      guard let scalar = UnicodeScalar(scalars[offset]),
+        let code = encoding[String(scalar)] else { return nil }
       result += [UInt8(code >> 8), UInt8(code & 255)]
+      offset += 1
     }
     return result
   }
@@ -276,11 +419,9 @@ struct IndexedTextFont {
           guard gid != nil else { continue }
         }
         else if let gids {
-          guard glyph.text.unicodeScalars.count == 1 else { continue }
           guard code * 2 + 1 < gids.count else { continue }
           gid = Int(gids[code * 2]) * 256 + Int(gids[code * 2 + 1])
         } else {
-          guard glyph.text.unicodeScalars.count == 1 else { continue }
           gid = code
         }
         guard let gid, gid > 0, gid < inspector.glyphCount,

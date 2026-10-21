@@ -20,6 +20,45 @@ public struct PageTextParagraph: Sendable, Equatable {
 /// native wrapping. A nearby label, heading or column is not enough evidence.
 @MainActor
 public enum NativeParagraphEditing {
+  private struct SourceGlyphPiece {
+    let text: String
+    let mapping: PageTextFontProfile.Glyph
+    let range: NSRange
+  }
+
+  /// Match decoded text using the longest verified PDF glyph sequence first.
+  /// A ToUnicode ligature such as `fl` is one source glyph even though the
+  /// native string contains two Unicode scalars.
+  private static func sourceGlyphPieces(in text: String,
+    profile: PageTextFontProfile) -> [SourceGlyphPiece]? {
+    if let mapping = profile.glyphs[text] {
+      return [.init(text: text, mapping: mapping,
+        range: NSRange(location: 0, length: (text as NSString).length))]
+    }
+    let candidates = profile.glyphs.map { value, mapping in
+      (text: value, mapping: mapping, scalars: value.unicodeScalars.map(\.value))
+    }.filter { !$0.scalars.isEmpty }.sorted {
+      if $0.scalars.count != $1.scalars.count { return $0.scalars.count > $1.scalars.count }
+      return $0.text < $1.text
+    }
+    let scalars = Array(text.unicodeScalars.map(\.value))
+    var scalarOffset = 0
+    var utf16Offset = 0
+    var pieces: [SourceGlyphPiece] = []
+    while scalarOffset < scalars.count {
+      guard let candidate = candidates.first(where: { value in
+        scalarOffset + value.scalars.count <= scalars.count
+          && scalars[scalarOffset..<scalarOffset + value.scalars.count].elementsEqual(value.scalars)
+      }) else { return nil }
+      let length = candidate.text.utf16.count
+      pieces.append(.init(text: candidate.text, mapping: candidate.mapping,
+        range: NSRange(location: utf16Offset, length: length)))
+      scalarOffset += candidate.scalars.count
+      utf16Offset += length
+    }
+    return pieces
+  }
+
   /// Returns the text-bearing range of a visual line. TextKit includes the
   /// separator space that caused a soft wrap in the preceding line's range;
   /// that separator should not be serialized as trailing PDF text. Explicit
@@ -95,29 +134,45 @@ public enum NativeParagraphEditing {
       for segment in line.segments {
         guard let font = nativeFont(segment.format, embedded: embedded) else { return issue }
         var x = segment.x
-        for scalar in segment.text.unicodeScalars {
-          guard scalar.value <= 0xFFFF else { return issue }
-          var code = UInt16(scalar.value), glyph: CGGlyph = 0
-          guard CTFontGetGlyphsForCharacters(font, &code, &glyph, 1), glyph != 0 else { return issue }
-          var bounds = CGRect.zero, advance = CGSize.zero
-          _ = CTFontGetBoundingRectsForGlyphs(font, .horizontal, &glyph, &bounds, 1)
-          _ = CTFontGetAdvancesForGlyphs(font, .horizontal, &glyph, &advance, 1)
-          let syntheticExpansion = segment.format.syntheticBoldStrokeWidth / 2
-          let lowerShear = segment.format.obliqueness * Double(bounds.minY)
-          let upperShear = segment.format.obliqueness * Double(bounds.maxY)
-          let minShear = min(lowerShear, upperShear)
-          let maxShear = max(lowerShear, upperShear)
-          // Empty outlines (spaces) need no clipping margin. A tiny tolerance
-          // covers decimal serialization, not intentionally clipped glyphs.
-          if !bounds.isEmpty, (x + bounds.minX + minShear - syntheticExpansion < clip[0] - 0.002
-            || x + bounds.maxX + maxShear + syntheticExpansion > clip[2] + 0.002
-            || line.baseline + bounds.minY - syntheticExpansion < clip[1] - 0.002
-            || line.baseline + bounds.maxY + syntheticExpansion > clip[3] + 0.002) { return issue }
-          if let source = segment.format.sourceFont {
-            guard let mapping = profiles[source.resource]?.glyphs[String(scalar)] else { return issue }
-            advance.width = mapping.width * segment.format.size / 1_000
+        if let source = segment.format.sourceFont {
+          guard let profile = profiles[source.resource],
+            let pieces = sourceGlyphPieces(in: segment.text, profile: profile) else { return issue }
+          for piece in pieces {
+            guard let id = piece.mapping.id, id > 0, id <= Int(UInt16.max) else { return issue }
+            var glyph = CGGlyph(id), bounds = CGRect.zero
+            _ = CTFontGetBoundingRectsForGlyphs(font, .horizontal, &glyph, &bounds, 1)
+            let syntheticExpansion = segment.format.syntheticBoldStrokeWidth / 2
+            let lowerShear = segment.format.obliqueness * Double(bounds.minY)
+            let upperShear = segment.format.obliqueness * Double(bounds.maxY)
+            let minShear = min(lowerShear, upperShear)
+            let maxShear = max(lowerShear, upperShear)
+            // Empty outlines (spaces) need no clipping margin. A tiny tolerance
+            // covers decimal serialization, not intentionally clipped glyphs.
+            if !bounds.isEmpty, (x + bounds.minX + minShear - syntheticExpansion < clip[0] - 0.002
+              || x + bounds.maxX + maxShear + syntheticExpansion > clip[2] + 0.002
+              || line.baseline + bounds.minY - syntheticExpansion < clip[1] - 0.002
+              || line.baseline + bounds.maxY + syntheticExpansion > clip[3] + 0.002) { return issue }
+            x += piece.mapping.width * segment.format.size / 1_000 + segment.format.characterSpacing
           }
-          x += advance.width + segment.format.characterSpacing
+        } else {
+          for scalar in segment.text.unicodeScalars {
+            guard scalar.value <= 0xFFFF else { return issue }
+            var code = UInt16(scalar.value), glyph: CGGlyph = 0
+            guard CTFontGetGlyphsForCharacters(font, &code, &glyph, 1), glyph != 0 else { return issue }
+            var bounds = CGRect.zero, advance = CGSize.zero
+            _ = CTFontGetBoundingRectsForGlyphs(font, .horizontal, &glyph, &bounds, 1)
+            _ = CTFontGetAdvancesForGlyphs(font, .horizontal, &glyph, &advance, 1)
+            let syntheticExpansion = segment.format.syntheticBoldStrokeWidth / 2
+            let lowerShear = segment.format.obliqueness * Double(bounds.minY)
+            let upperShear = segment.format.obliqueness * Double(bounds.maxY)
+            let minShear = min(lowerShear, upperShear)
+            let maxShear = max(lowerShear, upperShear)
+            if !bounds.isEmpty, (x + bounds.minX + minShear - syntheticExpansion < clip[0] - 0.002
+              || x + bounds.maxX + maxShear + syntheticExpansion > clip[2] + 0.002
+              || line.baseline + bounds.minY - syntheticExpansion < clip[1] - 0.002
+              || line.baseline + bounds.maxY + syntheticExpansion > clip[3] + 0.002) { return issue }
+            x += advance.width + segment.format.characterSpacing
+          }
         }
       }
     }
@@ -341,15 +396,22 @@ public enum NativeParagraphEditing {
     format: PageTextFormat, font: NSFont, profiles: [PDFName: PageTextFontProfile], scale: Double = 1) {
     guard let source = format.sourceFont, let profile = profiles[source.resource] else { return }
     let string = text.string as NSString
-    for index in range.location..<NSMaxRange(range) {
-      let value = string.substring(with: NSRange(location: index, length: 1))
-      guard let mapping = profile.glyphs[value], let code = value.utf16.first else { continue }
-      var character = code, glyph: CGGlyph = 0, advance = CGSize.zero
-      guard CTFontGetGlyphsForCharacters(font, &character, &glyph, 1), glyph != 0 else { continue }
-      _ = CTFontGetAdvancesForGlyphs(font, .horizontal, &glyph, &advance, 1)
-      let correction = mapping.width * format.size * scale / 1_000 - advance.width
-      text.addAttribute(.kern, value: format.characterSpacing * scale + correction,
-        range: NSRange(location: index, length: 1))
+    guard range.location >= 0, range.length >= 0, NSMaxRange(range) <= string.length,
+      let pieces = sourceGlyphPieces(in: string.substring(with: range), profile: profile) else { return }
+    for piece in pieces {
+      guard let id = piece.mapping.id, id > 0, id <= Int(UInt16.max) else { continue }
+      let glyph = CGGlyph(id)
+      if piece.text.unicodeScalars.count > 1 {
+        guard let glyphInfo = NSGlyphInfo(cgGlyph: glyph, for: font, baseString: piece.text) else { continue }
+        text.addAttribute(.glyphInfo, value: glyphInfo,
+          range: NSRange(location: range.location + piece.range.location, length: piece.range.length))
+      }
+      var measuredGlyph = glyph, advance = CGSize.zero
+      _ = CTFontGetAdvancesForGlyphs(font, .horizontal, &measuredGlyph, &advance, 1)
+      guard advance.width.isFinite else { continue }
+      let adjustedRange = NSRange(location: range.location + piece.range.location, length: piece.range.length)
+      let correction = piece.mapping.width * format.size * scale / 1_000 - advance.width
+      text.addAttribute(.kern, value: format.characterSpacing * scale + correction, range: adjustedRange)
     }
   }
 

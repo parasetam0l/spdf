@@ -156,7 +156,7 @@ public enum PageTextEditing {
       guard case .dictionary(let page)? = graph.objects[pageID],
         let font = IndexedTextFont.resolve(resource: run.fontResource, page: page, in: graph),
         let glyphs = font.glyphs(run.rawCodes), glyphs.map(\.text).joined() == run.text,
-        glyphs.allSatisfy({ profile.glyphs[$0.text]?.codes == $0.codes }) else { return nil }
+        font.sourceGlyphsMatchProfile(glyphs, profile: profile) else { return nil }
       return .init(font: .face(family: .helvetica, bold: profile.source.isBold,
           italic: profile.source.isItalic),
         size: run.fontSize, color: run.fillColor, sourceFont: profile.source,
@@ -196,8 +196,15 @@ public enum PageTextEditing {
       guard var format = format(for: run, family: style.fontFamily ?? "", pageID: pageID,
         in: graph, standard: standard, profiles: profiles), run.hasKnownOffset,
         let font = fonts[run.fontResource],
-        let glyphs = font.glyphs(run.rawCodes), glyphs.map(\.text).joined() == run.text,
-        font.encode(run.text) == run.rawCodes else { return nil }
+        let glyphs = font.glyphs(run.rawCodes), glyphs.map(\.text).joined() == run.text else { return nil }
+      if let profile = profiles[run.fontResource] {
+        guard font.sourceGlyphsMatchProfile(glyphs, profile: profile) else { return nil }
+      } else {
+        // Standard fonts can be editable without an embedded-font profile.
+        // Keep their original strict reverse-code check; the outline alias
+        // exception applies only when an embedded source program is verified.
+        guard font.encode(run.text) == run.rawCodes else { return nil }
+      }
       format.size *= transform[0]
       format.characterSpacing *= transform[0]
       guard format.isValid else { return nil }

@@ -101,11 +101,73 @@ struct ImportedParagraphInteropTests {
     return (graph, pageID)
   }
 
+  private func compositeLigatureFixture() throws -> (PDFGraph, PDFObjectID, Int) {
+    var (graph, pageID) = try fixture(composite: true)
+    guard case .dictionary(var descendant)? = graph.objects[PDFObjectID(20)] else {
+      throw PDFError(.malformed, "Missing composite fixture font")
+    }
+    let program = try #require(Data(base64Encoded: FontFixtureData.subsetProgramBase64))
+    let inspector = try TrueTypeInspector.inspect(program)
+    let ligatureID = try #require(inspector.unicodeToGlyph[0xFB01])
+    let scalarValues = [0x20, 0x41, 0x42, 0x43]
+    var mappings = try scalarValues.map { scalar -> (Int, String) in
+      (try #require(inspector.unicodeToGlyph[scalar]), String(try #require(UnicodeScalar(scalar))))
+    }
+    mappings.append((ligatureID, "fi"))
+    mappings.sort { $0.0 < $1.0 }
+    let widths: [PDFValue] = try mappings.flatMap { cid, _ -> [PDFValue] in
+      let advance = try #require(inspector.advances[cid])
+      return [.integer(Int64(cid)), .array([.real(
+        (Double(advance) * 1_000 / Double(inspector.unitsPerEm)).rounded())])]
+    }
+    descendant[PDFName("W")] = .array(widths)
+    graph.objects[PDFObjectID(20)] = .dictionary(descendant)
+    let entries = mappings.map { cid, text in
+      let destination = text.unicodeScalars.map { String(format: "%04X", $0.value) }.joined()
+      return String(format: "<%04X> <%@>", cid, destination)
+    }.joined(separator: "\n")
+    graph.objects[PDFObjectID(21)] = .stream(PDFStream(bytes: Data("""
+      /CIDInit /ProcSet findresource begin 12 dict begin begincmap
+      1 begincodespacerange <0000> <FFFF> endcodespacerange
+      \(mappings.count) beginbfchar
+      \(entries)
+      endbfchar endcmap end end
+      """.utf8)))
+
+    // Keep one real trailing source space so paragraph reconstruction has
+    // enough width for the separator it inserts between PDF text lines.
+    let lines = ["ABC ABC ABC fi ABC ABC ", "ABC ABC ABC fi ABC ABC "]
+    func operand(_ value: String) throws -> String {
+      let scalars = Array(value.unicodeScalars.map(\.value))
+      var cids: [Int] = []
+      var offset = 0
+      while offset < scalars.count {
+        if offset + 1 < scalars.count, scalars[offset] == 0x66, scalars[offset + 1] == 0x69 {
+          cids.append(ligatureID)
+          offset += 2
+        } else {
+          guard let cid = inspector.unicodeToGlyph[Int(scalars[offset])] else {
+            throw PDFError(.unsupported, "Fixture font lacks a required test glyph")
+          }
+          cids.append(cid)
+          offset += 1
+        }
+      }
+      return "<" + cids.map { String(format: "%04X", $0) }.joined() + ">"
+    }
+    let content = try lines.enumerated().map { index, line in
+      "BT /F1 16 Tf 1 0 0 1 42 \(700 - index * 22) Tm \(try operand(line)) Tj ET"
+    }.joined(separator: "\n")
+    graph.objects[PDFObjectID(5)] = .stream(PDFStream(bytes: Data(content.utf8)))
+    return (graph, pageID, ligatureID)
+  }
+
   @MainActor private func targets(_ graph: PDFGraph, pageID: PDFObjectID) throws -> [PageTextTarget] {
     let reader = try #require(PDFDocument(data: PDFWriter.write(graph)))
     let page = try #require(reader.page(at: 0))
     let blocks = try PageTextEditing.blocks(pageID: pageID, in: graph)
-    return NativeParagraphEditing.targets(from: blocks, pageID: pageID, graph: graph, page: page, pageIndex: 0)
+    return NativeParagraphEditing.targets(from: blocks, pageID: pageID, graph: graph,
+      page: page, pageIndex: 0)
   }
 
   private func removingUnicodeCmap(from program: Data) throws -> Data {
@@ -240,6 +302,180 @@ struct ImportedParagraphInteropTests {
           lines: [missing], fontSize: 16, color: [0, 0, 0]).validate(in: graph)
       }
     }
+  }
+
+  @Test @MainActor func compositeMultiScalarCIDParagraphsKeepTheirSourceGlyphAndReopen() throws {
+    let (graph, pageID, ligatureID) = try compositeLigatureFixture()
+    guard case .dictionary(let page)? = graph.objects[pageID] else {
+      Issue.record("Missing composite fixture page")
+      return
+    }
+    let sourceFont = try #require(IndexedTextFont.resolve(resource: PDFName("F1"), page: page, in: graph))
+    let encoded = try #require(sourceFont.encode("fi"))
+    #expect(encoded == [UInt8(ligatureID >> 8), UInt8(ligatureID & 255)])
+    #expect(sourceFont.decode(encoded) == "fi")
+
+    let profiles = try #require(PageTextEditing.fontProfiles(pageID: pageID, in: graph)[PDFName("F1")])
+    let ligature = try #require(profiles.glyphs["fi"])
+    #expect(ligature.id == ligatureID)
+    let inspector = try TrueTypeInspector.inspect(try #require(Data(base64Encoded: FontFixtureData.subsetProgramBase64)))
+    let hmtxWidth = Double(try #require(inspector.advances[ligatureID])) * 1_000 / Double(inspector.unitsPerEm)
+    #expect(abs(ligature.width - hmtxWidth) < 1.1)
+
+    let sourceRuns = try PageTextEditing.sourceRuns(pageID: pageID, in: graph)
+    let sourceRun = try #require(sourceRuns.first { $0.text.contains("fi") })
+    let sourceFormat = try #require(sourceRun.fragments.first?.format)
+    let sourcePreviewFont = CTFontCreateCopyWithAttributes(
+      try #require(NativeParagraphEditing.fonts(profiles: [PDFName("F1"): profiles])[PDFName("F1")]),
+      sourceFormat.size, nil, nil) as NSFont
+    let sourcePreview = NSMutableAttributedString(string: sourceRun.text, attributes: [
+      .font: sourcePreviewFont, .ligature: 0,
+    ])
+    NativeParagraphEditing.applySourceAdvances(to: sourcePreview,
+      range: NSRange(location: 0, length: sourcePreview.length), format: sourceFormat,
+      font: sourcePreviewFont, profiles: [PDFName("F1"): profiles])
+    let sourcePreviewWidth = CTLineGetTypographicBounds(
+      CTLineCreateWithAttributedString(sourcePreview), nil, nil, nil)
+    let expectedSourceWidth = sourceRun.fragments.reduce(0.0) { width, fragment in
+      width + (profiles.glyphs[fragment.text]?.width ?? 0) * sourceFormat.size / 1_000
+        + fragment.format.characterSpacing
+    }
+    #expect(abs(sourcePreviewWidth - expectedSourceWidth) < 0.01)
+    let format = try #require(sourceRuns.flatMap(\.fragments).first { $0.text == "fi" }?.format)
+    let embedded = try #require(NativeParagraphEditing.fonts(profiles: [PDFName("F1"): profiles])[PDFName("F1")])
+    let previewFont = CTFontCreateCopyWithAttributes(embedded, format.size, nil, nil) as NSFont
+    let preview = NSMutableAttributedString(string: "fi", attributes: [
+      .font: previewFont, .ligature: 0,
+    ])
+    NativeParagraphEditing.applySourceAdvances(to: preview,
+      range: NSRange(location: 0, length: preview.length), format: format,
+      font: previewFont, profiles: [PDFName("F1"): profiles])
+    let glyphInfo = try #require(preview.attribute(.glyphInfo, at: 0, effectiveRange: nil) as? NSGlyphInfo)
+    #expect(glyphInfo.baseString == "fi")
+    let previewLine = CTLineCreateWithAttributedString(preview)
+    let previewRuns = CTLineGetGlyphRuns(previewLine) as! [CTRun]
+    #expect(previewRuns.count == 1)
+    var previewGlyph = CGGlyph(0)
+    CTRunGetGlyphs(previewRuns[0], CFRange(location: 0, length: 1), &previewGlyph)
+    #expect(previewGlyph == CGGlyph(ligatureID))
+    let previewWidth = CTLineGetTypographicBounds(previewLine, nil, nil, nil)
+    #expect(abs(previewWidth - ligature.width * format.size / 1_000) < 0.01)
+
+    let target = try #require(targets(graph, pageID: pageID).first {
+      $0.paragraph?.originalText.count == 2 && $0.paragraph?.wraps == true
+    })
+    let paragraph = try #require(target.paragraph)
+    #expect(target.text == "ABC ABC ABC fi ABC ABC ABC ABC ABC fi ABC ABC")
+    #expect(paragraph.fragments.contains { $0.text == "fi" })
+
+    let replacements = ["CBA ABC ABC fi ABC ABC ", "ABC ABC ABC fi ABC ABC "]
+    let lines = replacements.enumerated().map { index, text in
+      PageTextLine(text: text, x: target.rect[0],
+        baseline: paragraph.firstBaseline - Double(index) * paragraph.lineSpacing,
+        segments: [.init(text: text, x: target.rect[0], format: format)])
+    }
+    let edited = try PDFEditingEngine.commit(PDFTransaction([
+      RewritePageTextCommand(pageID: pageID, originalText: paragraph.originalText,
+        lines: lines, fontSize: format.size, color: format.color,
+        box: .init(x: target.rect[0], firstBaseline: paragraph.firstBaseline,
+          width: 260, lineSpacing: paragraph.lineSpacing, wraps: true))
+    ]), to: graph)
+    #expect(edited.objects[PDFObjectID(7)] == graph.objects[PDFObjectID(7)])
+    let saved = try PDFWriter.write(edited)
+    #expect(PDFDocument(data: saved)?.string?.contains("CBA ABC ABC fi ABC ABC") == true)
+    let outputGraph = try PDFParser.parse(saved).graph
+    let outputFont = try #require(IndexedTextFont.resolve(resource: PDFName("F1"), page: page, in: outputGraph))
+    #expect(outputFont.encode("fi") == encoded)
+    let outputRuns = try PageTextEditing.sourceRuns(pageID: pageID, in: outputGraph)
+    #expect(outputRuns.contains { $0.fragments.contains { $0.text == "fi" } })
+    let reopened = try targets(outputGraph, pageID: pageID).first {
+      $0.paragraph?.originalText.count == 2 && $0.paragraph?.wraps == true
+    }
+    #expect(reopened?.text == "CBA ABC ABC fi ABC ABC ABC ABC ABC fi ABC ABC ")
+  }
+
+  @Test @MainActor func compositeDuplicateCIDChoosesMetricVerifiedGlyphAndKeepsEquivalentSourceCode() throws {
+    var (graph, pageID) = try fixture(composite: true)
+    let program = try #require(Data(base64Encoded: FontFixtureData.subsetProgramBase64))
+    let inspector = try TrueTypeInspector.inspect(program)
+    let aGlyph = try #require(inspector.unicodeToGlyph[0x41])
+    let aliasCID = 1
+    #expect(aGlyph != aliasCID)
+
+    guard case .dictionary(var descendant)? = graph.objects[PDFObjectID(20)] else {
+      Issue.record("Missing composite fixture font")
+      return
+    }
+    let scalars = [0x20, 0x41, 0x42, 0x43]
+    var mappings = try scalars.map { scalar -> (cid: Int, text: String, glyph: Int) in
+      let glyph = try #require(inspector.unicodeToGlyph[scalar])
+      return (glyph, String(try #require(UnicodeScalar(scalar))), glyph)
+    }
+    // The lower CID is an alternate code for the same actual glyph. It must
+    // win only after its /W width and CIDToGIDMap entry have been verified.
+    mappings.append((aliasCID, "A", aGlyph))
+    mappings.sort { $0.cid < $1.cid }
+    let invalidCID = 0
+    let widths: [PDFValue] = [.integer(Int64(invalidCID)), .array([.real(1_234)])]
+      + (try mappings.flatMap { mapping -> [PDFValue] in
+      let advance = try #require(inspector.advances[mapping.glyph])
+      return [.integer(Int64(mapping.cid)), .array([.real(
+        (Double(advance) * 1_000 / Double(inspector.unitsPerEm)).rounded())])]
+      })
+    descendant[PDFName("W")] = .array(widths)
+    let highestCID = try #require(mappings.map { $0.cid }.max())
+    var cidToGID = Data(repeating: 0, count: (highestCID + 1) * 2)
+    for cid in 0...highestCID {
+      let glyph = cid == aliasCID || cid == invalidCID ? aGlyph : cid
+      cidToGID[cid * 2] = UInt8((glyph >> 8) & 255)
+      cidToGID[cid * 2 + 1] = UInt8(glyph & 255)
+    }
+    descendant[PDFName("CIDToGIDMap")] = .reference(PDFObjectID(22))
+    graph.objects[PDFObjectID(20)] = .dictionary(descendant)
+    graph.objects[PDFObjectID(22)] = .stream(PDFStream(bytes: cidToGID))
+    let entries = [(cid: invalidCID, text: "A")] + mappings.map { mapping in
+      (cid: mapping.cid, text: mapping.text)
+    }
+    let cmapEntries = entries.map { mapping in
+      let destination = mapping.text.unicodeScalars.map { String(format: "%04X", $0.value) }.joined()
+      return String(format: "<%04X> <%@>", mapping.cid, destination)
+    }.joined(separator: "\n")
+    graph.objects[PDFObjectID(21)] = .stream(PDFStream(bytes: Data("""
+      /CIDInit /ProcSet findresource begin 12 dict begin begincmap
+      1 begincodespacerange <0000> <FFFF> endcodespacerange
+      \(entries.count) beginbfchar
+      \(cmapEntries)
+      endbfchar endcmap end end
+      """.utf8)))
+
+    let lines = ["ABC ABC ABC A ABC ", "ABC ABC ABC A ABC "]
+    func operand(_ text: String) throws -> String {
+      let cids = try text.unicodeScalars.map { scalar -> Int in
+        try #require(inspector.unicodeToGlyph[Int(scalar.value)])
+      }
+      return "<" + cids.map { String(format: "%04X", $0) }.joined() + ">"
+    }
+    let content = try lines.enumerated().map { index, line in
+      "BT /F1 16 Tf 1 0 0 1 42 \(700 - index * 22) Tm \(try operand(line)) Tj ET"
+    }.joined(separator: "\n")
+    graph.objects[PDFObjectID(5)] = .stream(PDFStream(bytes: Data(content.utf8)))
+
+    guard case .dictionary(let page)? = graph.objects[pageID] else {
+      Issue.record("Missing composite fixture page")
+      return
+    }
+    let font = try #require(IndexedTextFont.resolve(resource: PDFName("F1"), page: page, in: graph))
+    let encoded = try #require(font.encode("A"))
+    #expect(encoded == [UInt8(aliasCID >> 8), UInt8(aliasCID & 255)])
+    let profile = try #require(font.profile)
+    let aMapping = try #require(profile.glyphs["A"])
+    #expect(aMapping.id == aGlyph)
+    #expect(aMapping.codes == encoded)
+    let invalidSourceGlyph = try #require(font.glyphs([0, 0])?.first)
+    #expect(!font.sourceGlyphsMatchProfile([invalidSourceGlyph], profile: profile))
+
+    let sourceRuns = try PageTextEditing.sourceRuns(pageID: pageID, in: graph)
+    #expect(sourceRuns.contains { $0.text.contains("A") })
   }
 
   @Test @MainActor func rawType1CParagraphPreviewsAndRewritesWithItsOriginalFont() throws {
