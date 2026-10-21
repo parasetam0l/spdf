@@ -23,7 +23,8 @@
         }
         for (index, file) in files.enumerated() {
           do {
-            let parsed = try PDFParser.parse(Data(contentsOf: file))
+            let sourceData = try SPDFDocumentResourcePolicy.readPDFData(at: file)
+            let parsed = try PDFParser.parse(sourceData, limits: SPDFDocumentResourcePolicy.parsingLimits)
             guard let reader = PDFDocument(url: file), !reader.isLocked else { continue }
             var targets: [[String: Any]] = []
             var diagnostics: [String] = []

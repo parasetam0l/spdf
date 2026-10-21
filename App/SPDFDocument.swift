@@ -7,7 +7,7 @@ import PDFKit
 import SwiftUI
 import UniformTypeIdentifiers
 
-private enum SPDFDocumentResourcePolicy {
+enum SPDFDocumentResourcePolicy {
   // The NSDocument URL path already accepts this bound; keep parsing, editing
   // and save verification consistent without widening PDFCore's default.
   static let maximumPDFBytes = 256 * 1_024 * 1_024
