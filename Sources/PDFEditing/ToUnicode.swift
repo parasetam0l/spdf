@@ -86,8 +86,21 @@ struct ToUnicodeCMap: Equatable {
 
   /// Reverse lookup for reflow: the code that decodes to `text`.
   func code(for text: String) -> UInt8? {
-    for (code, mapped) in map where mapped == text { return code }
-    return nil
+    map.filter { $0.value == text }.keys.min()
+  }
+
+  /// Multi-scalar source glyphs such as `ffi`, ordered longest-first and then
+  /// by code so simple-font re-encoding is deterministic.
+  func multiScalarMappings(prefixOf text: Substring) -> [(code: UInt8, text: String)] {
+    map.compactMap { code, mapped in
+      guard mapped.unicodeScalars.count > 1, text.hasPrefix(mapped) else { return nil }
+      return (code, mapped)
+    }.sorted {
+      let leftCount = $0.text.unicodeScalars.count
+      let rightCount = $1.text.unicodeScalars.count
+      if leftCount != rightCount { return leftCount > rightCount }
+      return $0.code < $1.code
+    }
   }
 
   /// `<0041>` -> 0x41; multi-byte sources keep their last byte in this

@@ -116,6 +116,44 @@ struct FontWritingTests {
       scalar: 0x20, code: 10, width: 317, inspector: ambiguous) == nil)
   }
 
+  @Test func simpleSubsetProfileAcceptsWidthVerifiedMultiscalarLigatures() throws {
+    let inspector = TrueTypeInspector(
+      tables: [:], unitsPerEm: 1_000, ascent: 800, descent: -200,
+      fontBBox: [0, -200, 1_000, 800], italicAngle: 0, glyphCount: 45,
+      embeddingFlags: nil, locaIsLong: false, isCFF: false,
+      unicodeToGlyph: [:], platform1CodeToGlyph: [0x22: 34],
+      advances: [34: 684], glyphOffsets: Array(repeating: 0, count: 45))
+
+    #expect(IndexedTextFont.verifiedSimpleGlyphID(
+      text: "ffi", code: 0x22, width: 684, inspector: inspector) == 34)
+    #expect(IndexedTextFont.verifiedSimpleGlyphID(
+      text: "ffi", code: 0x22, width: 700, inspector: inspector) == nil)
+
+    let cmapBytes = Data("""
+      1 begincodespacerange
+      <00> <FF>
+      endcodespacerange
+      4 beginbfchar
+      <01> <0065>
+      <22> <006600660069>
+      <03> <0066>
+      <04> <0069>
+      endbfchar
+      endcmap
+      """.utf8)
+    let cmap = try #require(ToUnicodeCMap(bytes: Array(cmapBytes)))
+    let font = SimpleFont(
+      resource: PDFName("F1"), fontID: PDFObjectID(1), baseFont: "Subset",
+      baseEncoding: .winAnsi, differences: [:], hasUnknownDifferences: false,
+      firstChar: 0, widths: Array(repeating: 684, count: 35), missingWidth: nil,
+      isType3: false, differenceNames: [:], charProcNames: nil, toUnicode: cmap)
+
+    #expect(font.decode([0x01, 0x22]) == "effi")
+    #expect(font.encode("effi") == [0x01, 0x22])
+    #expect(font.decode(try #require(font.encode("effi"))) == "effi")
+    #expect(font.encode("fi") == [0x03, 0x04])
+  }
+
   @Test func inspectorRefusesTruncatedAndForeignPrograms() throws {
     let program = try fontProgram
     #expect(throws: PDFError.self) {

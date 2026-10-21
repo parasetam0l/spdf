@@ -151,9 +151,10 @@ public enum PageTextEditing {
     standard: Set<PDFName>? = nil, profiles: [PDFName: PageTextFontProfile]? = nil) -> PageTextFormat? {
     if let profile = (profiles ?? (try? fontProfiles(pageID: pageID, in: graph)) ?? [:])[run.fontResource] {
       guard PageTextSourceFont.canWriteInline(run.text) else { return nil }
-      let glyphs = run.text.unicodeScalars.compactMap { profile.glyphs[String($0)] }
-      guard glyphs.count == run.text.unicodeScalars.count,
-        glyphs.flatMap(\.codes) == run.rawCodes else { return nil }
+      guard case .dictionary(let page)? = graph.objects[pageID],
+        let font = IndexedTextFont.resolve(resource: run.fontResource, page: page, in: graph),
+        let glyphs = font.glyphs(run.rawCodes), glyphs.map(\.text).joined() == run.text,
+        glyphs.allSatisfy({ profile.glyphs[$0.text]?.codes == $0.codes }) else { return nil }
       return .init(font: .face(family: .helvetica, bold: profile.source.isBold,
           italic: profile.source.isItalic),
         size: run.fontSize, color: run.fillColor, sourceFont: profile.source,

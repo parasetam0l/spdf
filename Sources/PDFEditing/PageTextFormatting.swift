@@ -199,13 +199,14 @@ enum PageTextLineWriter {
       }
       if let source = segment.format.sourceFont {
         guard let font = IndexedTextFont.resolve(resource: source.resource, page: page, in: graph),
-          font.isInlineEditable, font.encode(segment.text) != nil,
+          font.isInlineEditable, let encoded = font.encode(segment.text),
+          let glyphs = font.glyphs(encoded),
           PageTextSourceFont.canWriteInline(segment.text) else {
           throw PDFError(.unsupported, "The embedded font does not contain these characters. Choose another font for them.")
         }
         if profiles[source.resource] == nil { profiles[source.resource] = font.profile }
         guard let profile = profiles[source.resource],
-          segment.text.unicodeScalars.allSatisfy({ profile.glyphs[String($0)] != nil }) else {
+          glyphs.allSatisfy({ profile.glyphs[$0.text]?.codes == $0.codes }) else {
           throw PDFError(.unsupported, "The embedded font does not contain these characters. Choose another font for them.")
         }
       } else if let custom = segment.format.customFont {

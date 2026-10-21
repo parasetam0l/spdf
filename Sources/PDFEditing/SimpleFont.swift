@@ -258,8 +258,8 @@ struct SimpleFont: Equatable {
         reverse[character, default: []].append(byte)
       }
     }
-    func verified(_ code: UInt8, for character: Character) -> UInt8? {
-      guard decode([code]) == String(character) else { return nil }
+    func verified(_ code: UInt8, mapsTo text: String) -> UInt8? {
+      guard decode([code]) == text else { return nil }
       guard isType3 else { return code }
       guard let name = differenceNames[code], let charProcNames,
         charProcNames.contains(name)
@@ -269,22 +269,39 @@ struct SimpleFont: Equatable {
       return code
     }
     var codes: [UInt8] = []
-    for character in text {
+    var remaining = text[...]
+    while !remaining.isEmpty {
+      var encodedLigature = false
+      if let toUnicode {
+        for mapping in toUnicode.multiScalarMappings(prefixOf: remaining) {
+          guard let code = verified(mapping.code, mapsTo: mapping.text) else { continue }
+          codes.append(code)
+          remaining = remaining.dropFirst(mapping.text.count)
+          encodedLigature = true
+          break
+        }
+      }
+      if encodedLigature { continue }
+
+      guard let character = remaining.first else { break }
+      let characterText = String(character)
       // P19-007: an explicit ToUnicode CMap is the reverse map of choice.
-      if let toUnicode, let code = toUnicode.code(for: String(character)),
-        let code = verified(code, for: character)
+      if let toUnicode, let code = toUnicode.code(for: characterText),
+        let code = verified(code, mapsTo: characterText)
       {
         codes.append(code)
+        remaining = remaining.dropFirst()
         continue
       }
-      if let code = reverse[character]?.lazy.compactMap({ verified($0, for: character) }).first {
+      if let code = reverse[character]?.lazy.compactMap({ verified($0, mapsTo: characterText) }).first {
         codes.append(code)
+        remaining = remaining.dropFirst()
         continue
       }
       switch baseEncoding {
       case .winAnsi:
         guard let data = String(character).data(using: .windowsCP1252), data.count == 1,
-          let code = verified(data[0], for: character)
+          let code = verified(data[0], mapsTo: characterText)
         else {
           return nil
         }
@@ -294,6 +311,7 @@ struct SimpleFont: Equatable {
       case .unsupportedName:
         return nil
       }
+      remaining = remaining.dropFirst()
     }
     return codes
   }

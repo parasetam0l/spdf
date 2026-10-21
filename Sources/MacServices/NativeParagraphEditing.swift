@@ -425,20 +425,33 @@ public enum NativeParagraphEditing {
         var valid = true
         var failure: String?
         for piece in source.fragments {
-          guard let font = nativeFont(piece.format, embedded: embedded), piece.text.utf16.count == 1,
-            let character = piece.text.utf16.first else {
+          guard let font = nativeFont(piece.format, embedded: embedded), !piece.text.isEmpty else {
             valid = false; failure = "native font or single-code-unit glyph unavailable"; break
           }
-          var code = character
-          var glyph: CGGlyph = 0
-          guard CTFontGetGlyphsForCharacters(font, &code, &glyph, 1), glyph != 0 else {
-            valid = false; failure = "native glyph mapping unavailable"; break
+          let mapping = piece.format.sourceFont.flatMap {
+            profiles[$0.resource]?.glyphs[piece.text]
+          }
+          var glyph: CGGlyph
+          if piece.text.utf16.count == 1, let character = piece.text.utf16.first {
+            var code = character
+            glyph = 0
+            guard CTFontGetGlyphsForCharacters(font, &code, &glyph, 1), glyph != 0 else {
+              valid = false; failure = "native glyph mapping unavailable"; break
+            }
+          } else if let id = mapping?.id, id > 0, id <= Int(UInt16.max) {
+            // ToUnicode can map one painted subset glyph to several Unicode
+            // scalars (for example, an `ffi` ligature). The verified profile
+            // retains that source glyph ID, so measure the actual embedded
+            // glyph instead of rejecting the whole paragraph as uneditable.
+            glyph = CGGlyph(id)
+          } else {
+            valid = false; failure = "verified multi-scalar source glyph unavailable"; break
           }
           var size = CGSize.zero
           _ = CTFontGetAdvancesForGlyphs(font, .horizontal, &glyph, &size, 1)
           var advance = size.width
-          if let reference = piece.format.sourceFont {
-            guard let mapping = profiles[reference.resource]?.glyphs[piece.text],
+          if piece.format.sourceFont != nil {
+            guard let mapping,
               mapping.id == nil || mapping.id == Int(glyph),
               abs(size.width * 1_000 / piece.format.size - mapping.width) <= 1.1
             else {
