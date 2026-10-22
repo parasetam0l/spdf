@@ -281,10 +281,24 @@ struct ParagraphGraphicsStateTests {
   @Test func aTextInstructionCrossingStreamBoundariesCanBePreviewedAndEdited() throws {
     var (graph, id) = try fixture(["BT /F1 16 Tf 42 700 Td (AB)"])
     guard case .dictionary(var page)? = graph.objects[id] else { return }
-    graph.objects[PDFObjectID(6)] = .stream(PDFStream(bytes: Data(" Tj ET".utf8)))
-    page[PDFName("Contents")] = .array([.reference(PDFObjectID(5)), .reference(PDFObjectID(6))])
+    graph.objects[PDFObjectID(5)] = .stream(
+      PDFStream(bytes: Data("BT /F1 16 Tf 42 700 Td (".utf8)))
+    let middle = Data("A".utf8)
+    graph.objects[PDFObjectID(6)] = .stream(PDFStream(
+      dictionary: [PDFName("Filter"): .name(PDFName("FlateDecode")),
+        PDFName("DL"): .integer(Int64(middle.count))],
+      bytes: try PDFFilters.encodeFlate(middle)))
+    graph.objects[PDFObjectID(7)] = .stream(PDFStream(bytes: Data("B) Tj ET".utf8)))
+    page[PDFName("Contents")] = .array([
+      .reference(PDFObjectID(5)), .reference(PDFObjectID(6)), .reference(PDFObjectID(7)),
+    ])
     graph.objects[id] = .dictionary(page)
+    let original = try PageContent.load(pageID: id, in: graph)
     #expect(try editable(graph, id) == [true])
+    let textShow = try #require(original.instructions.first { $0.operatorName == "Tj" })
+    let textShowStart = textShow.operands.first?.span.lowerBound ?? textShow.span.lowerBound
+    let textShowSpan = textShowStart..<textShow.span.upperBound
+    #expect(original.segmentIndices(for: textShowSpan) == [0, 1, 2])
 
     let hidden = try PageTextEditing.hidingParagraph(pageID: id, originalText: [0: "AB"],
       standardFontAdvances: [:], in: graph)
@@ -304,6 +318,10 @@ struct ParagraphGraphicsStateTests {
     let editedReopened = try PDFParser.parse(PDFWriter.write(edited))
     let editedContent = try PageContent.load(pageID: id, in: editedReopened.graph)
     let editedRuns = try TextRunIndexer.runs(in: editedContent, graph: editedReopened.graph)
+    guard case .stream(let editedMiddle)? = edited.objects[PDFObjectID(6)] else { return }
+    #expect(editedMiddle.dictionary[PDFName("Filter")] == .name(PDFName("FlateDecode")))
+    #expect(editedMiddle.dictionary[PDFName("DL")] == .integer(
+      Int64(try PDFFilters.decoded(editedMiddle).count)))
     #expect(editedRuns.map(\.text) == ["CD"])
     let editedModes = editedRuns.map {
       TextCanvasSupport.renderingMode(at: $0.instructionIndex, in: editedContent)
