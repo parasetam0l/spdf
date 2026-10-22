@@ -367,6 +367,47 @@ struct ParagraphGraphicsStateTests {
     #expect(throws: PDFError.self) { try changedPrefix.validate(in: graph) }
   }
 
+  @Test func taggedFirstInstructionCanShortenByRemovingItsLeadingPrefix() throws {
+    let (graph, pageID) = try taggedFinalRunFixture()
+    let runs = try TextRunIndexer.runs(in: PageContent.load(pageID: pageID, in: graph), graph: graph)
+    #expect(runs.map(\.text) == ["ABC ABC ", "ABC"])
+    let originalText = Dictionary(uniqueKeysWithValues: runs.enumerated().map {
+      ($0.offset, $0.element.text)
+    })
+    let edit = RewritePageTextCommand(pageID: pageID, originalText: originalText,
+      lines: [.init(text: "C ABC ABC", x: 42, baseline: 660)],
+      fontSize: 12, color: runs[0].fillColor)
+
+    try edit.validate(in: graph)
+    let edited = try PDFEditingEngine.commit(PDFTransaction([edit]), to: graph)
+    let reparsed = try PDFParser.parse(PDFWriter.write(edited))
+    let content = try PageContent.load(pageID: pageID, in: reparsed.graph)
+    let savedRuns = try TextRunIndexer.runs(in: content, graph: reparsed.graph)
+    #expect(savedRuns.map(\.text).joined() == "C ABC ABC")
+
+    let markedRanges = StructureTaggingAssistant.markedRanges(in: content)
+      .filter { $0.mcid != nil }
+      .sorted { $0.instructions.lowerBound < $1.instructions.lowerBound }
+    #expect(markedRanges.compactMap(\.mcid) == [0, 1])
+    let textByMCID = markedRanges.map { range in
+      savedRuns.filter { range.instructions.contains($0.instructionIndex) }
+        .map(\.text).joined()
+    }
+    #expect(textByMCID == ["C ABC ", "ABC"])
+
+    let inventory = try PDFStructureInspector.inspect(in: reparsed.graph, pageIDs: reparsed.pageIDs)
+    #expect(inventory.issues.isEmpty)
+    let layout = try PageTextLayout.build(pageID: pageID, in: reparsed.graph)
+    let order = try #require(TextReadingOrder.structureClusterOrder(
+      pageID: pageID, layout: layout, in: reparsed.graph, limits: PDFLimits()))
+    #expect(order.map { layout.clusters[$0].text }.joined() == "C ABC ABC")
+
+    let nonPrefixShortening = RewritePageTextCommand(pageID: pageID, originalText: originalText,
+      lines: [.init(text: "C ABC AB", x: 42, baseline: 660)],
+      fontSize: 12, color: runs[0].fillColor)
+    #expect(throws: PDFError.self) { try nonPrefixShortening.validate(in: graph) }
+  }
+
   @Test func oneLineTaggedParagraphPreservesExplicitWordSpacing() throws {
     let (graph, pageID) = try taggedFinalRunFixture(singleScopeWordSpacing: 2)
     let runs = try TextRunIndexer.runs(in: PageContent.load(pageID: pageID, in: graph), graph: graph)

@@ -10,6 +10,16 @@
   /// reports stay outside source; CI uses the distributable fixture suite.
   @MainActor
   enum CorpusParagraphSmoke {
+    private struct CharacterPosition {
+      let text: String
+      let x: Double
+      let baseline: Double
+
+      var json: [String: Any] {
+        ["text": text, "x": x, "baseline": baseline]
+      }
+    }
+
     /// Report actual document/canvas access, including view-only files and
     /// native images that the canvas cannot safely manipulate. Never turn a
     /// refusal into a successful image-edit count. Optional structure Save
@@ -483,7 +493,7 @@
             }] as [String: Any]
         }
       }
-      func characters(_ canvas: InlinePageTextCanvas, document: SPDFDocument) -> [[String: Any]] {
+      func characters(_ canvas: InlinePageTextCanvas, document: SPDFDocument) -> [CharacterPosition] {
         guard let viewer = document.viewer, let page = viewer.view.document?.page(at: pageIndex),
           let manager = canvas.textView.layoutManager else { return [] }
         let text = canvas.textView.string as NSString
@@ -495,8 +505,25 @@
           let origin = manager.location(forGlyphAt: glyph)
           let viewPoint = canvas.textView.convert(NSPoint(x: rect.minX + origin.x, y: rect.minY + origin.y), to: viewer.view)
           let point = viewer.view.convert(viewPoint, to: page)
-          return ["text": value, "x": point.x, "baseline": point.y]
+          return CharacterPosition(text: value, x: Double(point.x), baseline: Double(point.y))
         }
+      }
+      func compareCharacterPositions(
+        _ expected: [CharacterPosition], _ actual: [CharacterPosition]
+      ) -> (error: Double?, failure: String?) {
+        guard expected.count == actual.count else {
+          return (nil, "character count changed from \(expected.count) to \(actual.count)")
+        }
+        var maximum = 0.0
+        for (index, pair) in zip(expected, actual).enumerated() {
+          let (expected, actual) = pair
+          guard expected.text == actual.text else {
+            return (nil, "character text order changed at index \(index)")
+          }
+          maximum = max(maximum, max(abs(expected.x - actual.x),
+            abs(expected.baseline - actual.baseline)))
+        }
+        return (maximum, nil)
       }
       let original = try document.editSession.bytesForSave()
       let canvas = try await select(document)
@@ -596,26 +623,36 @@
       let positionError = zip(actual, lines).map { max(abs($0.x - $1.x), abs($0.baseline - $1.baseline)) }.max() ?? 0
       let reopenedBox = again.pageBox()
       let widthError = abs(reopenedBox.width - box.width)
-      // Longer imported text can add a sub-point of TextKit line-box padding
-      // after reopen. Keep that measured delta in the evidence, while ensuring
-      // the reopened box never narrows the committed line and stays within 1 pt.
-      let grewWithoutClipping = expectedText.unicodeScalars.count > target.text.unicodeScalars.count
-        && reopenedBox.width >= box.width - 0.005 && widthError <= 1
-      let widthMatches = widthError < 0.005 || grewWithoutClipping
+      // PDFs do not persist a paragraph box width. A glyph-advance change can
+      // legitimately change the content-derived selection width after reopen;
+      // compare saved glyph positions and clipping bounds instead.
+      let reopenedCharacters = characters(again, document: reopened)
+      let characterComparison = compareCharacterPositions(savedCharacters, reopenedCharacters)
+      let reopenedCharacterPositionError = characterComparison.error
+      let reopenedBoxFitsClip = clippingRect.map {
+        reopenedBox.x >= $0[0] - 0.005
+          && reopenedBox.x + reopenedBox.width <= $0[2] + 0.005
+      } ?? true
       let checksBeforeCommit = [
-        again.textView.string == expectedText, widthMatches,
+        again.textView.string == expectedText, reopenedBoxFitsClip,
         actual.count == lines.count, positionError < 0.005,
+        reopenedCharacterPositionError.map { $0 < 0.005 } == true,
         !reopened.viewer!.hasPendingPageTextChanges,
       ]
       let selectionCommitted = checksBeforeCommit.allSatisfy { $0 } && again.commit()
       let documentClean = !reopened.isDocumentEdited
       let sourceUnchanged = try Data(contentsOf: source) == sourceBytes
       try JSONSerialization.data(withJSONObject: [
-        "reopenedTextMatches": checksBeforeCommit[0], "reopenedWidthDelta": widthError,
+        "reopenedTextMatches": checksBeforeCommit[0], "reopenedBoxFitsClip": reopenedBoxFitsClip,
+        "reopenedWidthDelta": widthError,
         "reopenedBoxWidth": reopenedBox.width, "preSaveBoxWidth": box.width,
         "reopenedLineCount": actual.count, "expectedLineCount": lines.count,
         "reopenedPositionError": positionError,
-        "noPendingPageTextChanges": checksBeforeCommit[4],
+        "reopenedCharacterPositionError": reopenedCharacterPositionError as Any? ?? NSNull(),
+        "reopenedCharacterPositionFailure": characterComparison.failure as Any? ?? NSNull(),
+        "reopenedCharacterCount": reopenedCharacters.count,
+        "expectedCharacterCount": savedCharacters.count,
+        "noPendingPageTextChanges": checksBeforeCommit[5],
         "selectionCommitClean": selectionCommitted, "documentClean": documentClean,
         "sourceUnchanged": sourceUnchanged,
       ], options: [.prettyPrinted, .sortedKeys])
@@ -629,7 +666,8 @@
       try JSONSerialization.data(withJSONObject: ["status": "passed", "page": pageIndex,
         "sourceRect": target.rect, "originalText": target.text, "originalLines": encode(beforeLines),
         "nativeLines": encode(lines), "savedText": expectedText, "savedWidth": box.width,
-        "originalCharacters": beforeCharacters, "nativeCharacters": savedCharacters,
+        "originalCharacters": beforeCharacters.map(\.json),
+        "nativeCharacters": savedCharacters.map(\.json),
         "sourceRuns": selectedRuns, "reopenPositionError": positionError,
         "clippingRect": clippingRect as Any? ?? NSNull(),
         "clippedOverflowBlockedAndRepaired": clippingRect != nil,
