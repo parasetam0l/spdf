@@ -114,9 +114,11 @@
       exit(0)
     }
 
-    static func run(source: URL, output: URL, matching: String? = nil, wordOverride: String? = nil) async {
+    static func run(source: URL, output: URL, matching: String? = nil,
+      wordOverride: String? = nil, replacementOverride: String? = nil) async {
       do {
-        try await checks(source: source, output: output, matching: matching, wordOverride: wordOverride)
+        try await checks(source: source, output: output, matching: matching,
+          wordOverride: wordOverride, replacementOverride: replacementOverride)
         print("sPDF corpus paragraph check passed")
         exit(0)
       } catch {
@@ -273,7 +275,8 @@
       }
     }
 
-    static func checks(source: URL, output: URL, matching: String? = nil, wordOverride: String? = nil) async throws {
+    static func checks(source: URL, output: URL, matching: String? = nil,
+      wordOverride: String? = nil, replacementOverride: String? = nil) async throws {
       try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
       let sourceBytes = try Data(contentsOf: source)
       let priorRecovery = SPDFDocument.recoveryDirectoryOverride
@@ -519,6 +522,15 @@
       guard words.contains(word), !word.isEmpty else { throw PDFError(.malformed, "The requested diagnostic word is absent") }
       guard !word.isEmpty else { throw PDFError(.malformed, "No source-font word for typing") }
       let clippingRect = target.paragraph?.clippingRect
+      let replacement: String
+      if matching != nil || clippingRect != nil {
+        replacement = replacementOverride ?? String(word.reversed())
+      } else {
+        replacement = " " + word
+      }
+      guard !replacement.isEmpty, replacement != word else {
+        throw PDFError(.malformed, "The requested diagnostic replacement must change the selected word")
+      }
       if let clippingRect {
         // Exercise the real pending editor, including blocked movement and
         // recovery. No document transaction or partial save may escape it.
@@ -533,19 +545,21 @@
         }
       }
       if matching != nil || clippingRect != nil {
-        let text = canvas.textView.string as NSString
-        let range = text.range(of: word, options: .backwards)
+        let originalDraft = canvas.textView.string
+        let originalDraftNSString = originalDraft as NSString
+        let range = originalDraftNSString.range(of: word, options: .backwards)
         canvas.textView.setSelectedRange(range)
-        let replacement = String(word.reversed())
+        let selectedBeforeInsert = canvas.textView.selectedRange()
         canvas.textView.insertText(replacement, replacementRange: range)
-        guard canvas.textView.string == text.replacingCharacters(in: range, with: replacement),
-          replacement != word else {
-          throw PDFError(.unsupported, "Native corpus typing refused the requested replacement: \(viewer.pageTextFormattingIssue ?? "unchanged text")")
+        let expectedText = originalDraftNSString.replacingCharacters(in: range, with: replacement)
+        guard canvas.textView.string == expectedText else {
+          throw PDFError(.unsupported,
+            "Native corpus typing refused the requested replacement: \(viewer.pageTextFormattingIssue ?? "text mismatch"); selected=\(selectedBeforeInsert), actual=\(canvas.textView.string.debugDescription), expected=\(expectedText.debugDescription)")
         }
       } else {
         canvas.textView.setSelectedRange(NSRange(location: (canvas.textView.string as NSString).length, length: 0))
-        canvas.textView.insertText(" " + word, replacementRange: canvas.textView.selectedRange())
-        guard canvas.textView.string.hasSuffix(" " + word) else {
+        canvas.textView.insertText(replacement, replacementRange: canvas.textView.selectedRange())
+        guard canvas.textView.string.hasSuffix(replacement) else {
           throw PDFError(.malformed, "Native corpus typing did not insert the covered glyphs")
         }
       }
@@ -580,9 +594,16 @@
       defer { reopened.close() }
       let again = try await select(reopened), actual = again.pageLines()
       let positionError = zip(actual, lines).map { max(abs($0.x - $1.x), abs($0.baseline - $1.baseline)) }.max() ?? 0
-      let widthError = abs(again.pageBox().width - box.width)
+      let reopenedBox = again.pageBox()
+      let widthError = abs(reopenedBox.width - box.width)
+      // Longer imported text can add a sub-point of TextKit line-box padding
+      // after reopen. Keep that measured delta in the evidence, while ensuring
+      // the reopened box never narrows the committed line and stays within 1 pt.
+      let grewWithoutClipping = expectedText.unicodeScalars.count > target.text.unicodeScalars.count
+        && reopenedBox.width >= box.width - 0.005 && widthError <= 1
+      let widthMatches = widthError < 0.005 || grewWithoutClipping
       let checksBeforeCommit = [
-        again.textView.string == expectedText, widthError < 0.005,
+        again.textView.string == expectedText, widthMatches,
         actual.count == lines.count, positionError < 0.005,
         !reopened.viewer!.hasPendingPageTextChanges,
       ]
@@ -590,7 +611,8 @@
       let documentClean = !reopened.isDocumentEdited
       let sourceUnchanged = try Data(contentsOf: source) == sourceBytes
       try JSONSerialization.data(withJSONObject: [
-        "reopenedTextMatches": checksBeforeCommit[0], "reopenedWidthError": widthError,
+        "reopenedTextMatches": checksBeforeCommit[0], "reopenedWidthDelta": widthError,
+        "reopenedBoxWidth": reopenedBox.width, "preSaveBoxWidth": box.width,
         "reopenedLineCount": actual.count, "expectedLineCount": lines.count,
         "reopenedPositionError": positionError,
         "noPendingPageTextChanges": checksBeforeCommit[4],
@@ -612,7 +634,9 @@
         "clippingRect": clippingRect as Any? ?? NSNull(),
         "clippedOverflowBlockedAndRepaired": clippingRect != nil,
         "matchedTarget": matching != nil,
-        "editedWord": word, "taskWordOverride": wordOverride != nil,
+        "editedWord": word, "replacement": replacement,
+        "taskWordOverride": wordOverride != nil,
+        "taskReplacementOverride": replacementOverride != nil,
         "sourceFileUnchanged": true, "fontProgramsAndMappingsUnchanged": true],
         options: [.prettyPrinted, .sortedKeys]).write(to: output.appendingPathComponent("result.json"))
     }

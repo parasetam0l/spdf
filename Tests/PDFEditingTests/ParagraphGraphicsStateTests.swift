@@ -34,6 +34,57 @@ struct ParagraphGraphicsStateTests {
     }
   }
 
+  private func taggedFinalRunFixture() throws -> (PDFGraph, PDFObjectID) {
+    let parsed = try PDFParser.parse(PDFFixtures.fontEmbeddedPages())
+    let pageID = try #require(parsed.pageIDs.first)
+    var graph = parsed.graph
+    let prefix = "ABC ABC "
+    guard case .dictionary(let page)? = graph.objects[pageID] else {
+      throw PDFError(.malformed, "Tagged fixture page is missing")
+    }
+    let font = try #require(IndexedTextFont.resolve(resource: PDFName("F1"), page: page, in: graph))
+    let codes = try #require(font.encode(prefix))
+    let prefixWidth = try #require(font.advance(of: codes, fontSize: 12,
+      charSpacing: 0, wordSpacing: 0, horizontalScale: 100))
+    let finalRunX = 42 + prefixWidth
+    graph.objects[PDFObjectID(5)] = .stream(PDFStream(bytes: Data("""
+      /P <</MCID 0>> BDC
+      BT /F1 12 Tf 42 660 Td (ABC ABC ) Tj ET
+      EMC
+      /P <</MCID 1>> BDC
+      BT /F1 12 Tf \(finalRunX) 660 Td (ABC) Tj ET
+      EMC
+      """.utf8)))
+
+    guard case .dictionary(var catalog)? = graph.objects[PDFObjectID(1)],
+      case .dictionary(var page)? = graph.objects[pageID]
+    else { throw PDFError(.malformed, "Tagged fixture catalog or page is missing") }
+    catalog[PDFName("StructTreeRoot")] = .reference(PDFObjectID(90))
+    catalog[PDFName("MarkInfo")] = .dictionary([PDFName("Marked"): .boolean(true)])
+    graph.objects[PDFObjectID(1)] = .dictionary(catalog)
+    page[PDFName("StructParents")] = .integer(0)
+    graph.objects[pageID] = .dictionary(page)
+    graph.objects[PDFObjectID(90)] = .dictionary([
+      PDFName("Type"): .name(PDFName("StructTreeRoot")),
+      PDFName("K"): .reference(PDFObjectID(91)),
+      PDFName("ParentTree"): .reference(PDFObjectID(92)),
+      PDFName("ParentTreeNextKey"): .integer(1),
+    ])
+    graph.objects[PDFObjectID(91)] = .dictionary([
+      PDFName("Type"): .name(PDFName("StructElem")),
+      PDFName("S"): .name(PDFName("P")),
+      PDFName("P"): .reference(PDFObjectID(90)),
+      PDFName("Pg"): .reference(pageID),
+      PDFName("K"): .array([.integer(0), .integer(1)]),
+    ])
+    graph.objects[PDFObjectID(92)] = .dictionary([
+      PDFName("Nums"): .array([
+        .integer(0), .array([.reference(PDFObjectID(91)), .reference(PDFObjectID(91))]),
+      ]),
+    ])
+    return (graph, pageID)
+  }
+
   @Test(arguments: ["0 g", "0.2 0.3 0.4 rg"])
   func deviceColorResetRecoversOnlyFillColor(reset: String) throws {
     let (graph, id) = try fixture(["/Custom cs 0 0 1 scn", show("AB"), reset, show("CD", y: 678)])
@@ -143,6 +194,49 @@ struct ParagraphGraphicsStateTests {
       color: runs[0].fillColor)
 
     try command.validate(in: graph)
+  }
+
+  @Test func taggedFinalInstructionCanGrowAndShrinkAfterExactPrefix() throws {
+    let (graph, pageID) = try taggedFinalRunFixture()
+    let runs = try TextRunIndexer.runs(in: PageContent.load(pageID: pageID, in: graph), graph: graph)
+    let selected = runs.enumerated().filter {
+      $0.element.text == "ABC ABC " || $0.element.text == "ABC"
+    }
+    #expect(selected.map(\.element.text) == ["ABC ABC ", "ABC"])
+    let originalText = Dictionary(uniqueKeysWithValues: selected.map { ($0.offset, $0.element.text) })
+    let replacement = "ABC ABC ABC ABC"
+    let edit = RewritePageTextCommand(pageID: pageID, originalText: originalText,
+      lines: [.init(text: replacement, x: 42, baseline: 660)], fontSize: 12, color: [0, 0, 0])
+    let validator = try PageTextRewriteValidator(pageID: pageID, in: graph)
+    #expect(validator.canPreserveMarkedContentOrder(runIndices: selected.map(\.offset)))
+    try edit.validateSource(in: graph)
+    let edited = try PDFEditingEngine.commit(PDFTransaction([edit]), to: graph)
+    let reparsed = try PDFParser.parse(PDFWriter.write(edited))
+    let savedRuns = try TextRunIndexer.runs(
+      in: PageContent.load(pageID: pageID, in: reparsed.graph), graph: reparsed.graph)
+    #expect(savedRuns.map(\.text).joined() == replacement)
+    let inventory = try PDFStructureInspector.inspect(in: reparsed.graph, pageIDs: reparsed.pageIDs)
+    #expect(inventory.issues.isEmpty)
+    let layout = try PageTextLayout.build(pageID: pageID, in: reparsed.graph)
+    let order = try #require(TextReadingOrder.structureClusterOrder(
+      pageID: pageID, layout: layout, in: reparsed.graph, limits: PDFLimits()))
+    #expect(order.map { layout.clusters[$0].text }.joined().contains(replacement))
+
+    let grownSource = Dictionary(uniqueKeysWithValues: savedRuns.enumerated().map {
+      ($0.offset, $0.element.text)
+    })
+    let shrink = RewritePageTextCommand(pageID: pageID, originalText: grownSource,
+      lines: [.init(text: "ABC ABC ABC", x: 42, baseline: 660)],
+      fontSize: 12, color: [0, 0, 0])
+    let shortened = try PDFEditingEngine.commit(PDFTransaction([shrink]), to: reparsed.graph)
+    let shortenedRuns = try TextRunIndexer.runs(
+      in: PageContent.load(pageID: pageID, in: shortened), graph: shortened)
+    #expect(shortenedRuns.map(\.text).joined() == "ABC ABC ABC")
+
+    let changedPrefix = RewritePageTextCommand(pageID: pageID, originalText: originalText,
+      lines: [.init(text: "CBC ABC ABC ABC", x: 42, baseline: 660)],
+      fontSize: 12, color: [0, 0, 0])
+    #expect(throws: PDFError.self) { try changedPrefix.validate(in: graph) }
   }
 
   @Test func paragraphPreviewAcrossStreamsKeepsSharedContentAndNeighbors() throws {

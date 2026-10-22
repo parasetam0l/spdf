@@ -39,10 +39,14 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
         let matching = matchIndex.flatMap { CommandLine.arguments.indices.contains($0 + 1) ? CommandLine.arguments[$0 + 1] : nil }
         let wordIndex = CommandLine.arguments.firstIndex(of: "--edit-word")
         let word = wordIndex.flatMap { CommandLine.arguments.indices.contains($0 + 1) ? CommandLine.arguments[$0 + 1] : nil }
+        let replacementIndex = CommandLine.arguments.firstIndex(of: "--replace-word")
+        let replacement = replacementIndex.flatMap {
+          CommandLine.arguments.indices.contains($0 + 1) ? CommandLine.arguments[$0 + 1] : nil
+        }
         Task { await CorpusParagraphSmoke.run(
           source: URL(fileURLWithPath: CommandLine.arguments[sourceIndex]),
           output: URL(fileURLWithPath: CommandLine.arguments[outputIndex]),
-          matching: matching, wordOverride: word) }
+          matching: matching, wordOverride: word, replacementOverride: replacement) }
         return
       }
       if let index = CommandLine.arguments.firstIndex(of: "--test-corpus-image"),
