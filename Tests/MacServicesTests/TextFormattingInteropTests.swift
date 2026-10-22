@@ -101,39 +101,43 @@ struct TextFormattingInteropTests {
   @Test @MainActor func mixedEmbeddedSubsetsResolvePerCharacterWithoutSubstitution() throws {
     let program = try #require(Data(base64Encoded: FontFixtureData.subsetProgramBase64))
     let inspector = try TrueTypeInspector.inspect(program, requireUnicodeMap: false)
-    let first = PageTextSourceFont(resource: PDFName("TT1"), name: "DejaVuSans")
-    let second = PageTextSourceFont(resource: PDFName("TT2"), name: "DejaVuSans")
-    let unrelated = PageTextSourceFont(resource: PDFName("C1"), name: "OtherSans")
+    let first = PageTextSourceFont(resource: PDFName("TT1"), name: "ABCDEF+DejaVuSans")
+    let second = PageTextSourceFont(resource: PDFName("TT2"), name: "UVWXYZ+DejaVuSans")
+    let unrelated = PageTextSourceFont(resource: PDFName("C1"), name: "UVWXYZ+OtherSans")
     let glyphA = PageTextFontProfile.Glyph(
       id: inspector.unicodeToGlyph[0x41]!, width: 700, codes: [0x41])
     let glyphB = PageTextFontProfile.Glyph(
       id: inspector.unicodeToGlyph[0x42]!, width: 700, codes: [0x42])
-    let firstProfile = PageTextFontProfile(source: first, program: program, glyphs: ["A": glyphA])
-    let secondProfile = PageTextFontProfile(source: second, program: program, glyphs: ["B": glyphB])
+    let glyphC = PageTextFontProfile.Glyph(
+      id: inspector.unicodeToGlyph[0x43]!, width: 700, codes: [0x43])
+    let firstProfile = PageTextFontProfile(
+      source: first, program: program, glyphs: ["A": glyphA, "B": glyphB])
+    let secondProfile = PageTextFontProfile(
+      source: second, program: program, glyphs: ["A": glyphA, "B": glyphB, "C": glyphC])
     let unrelatedProfile = PageTextFontProfile(
-      source: unrelated, program: program, glyphs: ["B": glyphB])
+      source: unrelated, program: program, glyphs: ["A": glyphA, "B": glyphB, "C": glyphC])
     let base = PageTextFormat(size: 16, sourceFont: first)
     let view = FormatTestTextView(frame: .zero)
     let formatting = NativeTextFormatting(
-      view: view, fragments: [.init(text: "A", format: base)], initial: base,
+      view: view, fragments: [.init(text: "AB", format: base)], initial: base,
       profiles: [firstProfile.source.resource: firstProfile, secondProfile.source.resource: secondProfile])
     formatting.render(scale: 1, minimumLineSpacing: 19)
-    view.setSelectedRange(NSRange(location: 1, length: 0))
-    let plan = formatting.insertionPlan("BA", replacing: view.selectedRange())
+    view.setSelectedRange(NSRange(location: 2, length: 0))
+    let plan = formatting.insertionPlan("C", replacing: view.selectedRange())
     #expect(plan.issue == nil)
     #expect(plan.usesSourceFontFallback)
-    #expect(plan.fragments.map(\.text) == ["B", "A"])
-    #expect(plan.fragments.map { $0.format.sourceFont?.resource } == [PDFName("TT2"), PDFName("TT1")])
-    #expect(plan.attributedText?.length == 2)
+    #expect(plan.fragments.map(\.text) == ["C"])
+    #expect(plan.fragments.map { $0.format.sourceFont?.resource } == [PDFName("TT2")])
+    #expect(plan.attributedText?.length == 1)
 
     let unrelatedView = FormatTestTextView(frame: .zero)
     let unrelatedFormatting = NativeTextFormatting(
-      view: unrelatedView, fragments: [.init(text: "A", format: base)], initial: base,
+      view: unrelatedView, fragments: [.init(text: "AB", format: base)], initial: base,
       profiles: [firstProfile.source.resource: firstProfile,
         unrelatedProfile.source.resource: unrelatedProfile])
     unrelatedFormatting.render(scale: 1, minimumLineSpacing: 19)
-    unrelatedView.setSelectedRange(NSRange(location: 1, length: 0))
-    let refused = unrelatedFormatting.insertionPlan("B", replacing: unrelatedView.selectedRange())
+    unrelatedView.setSelectedRange(NSRange(location: 2, length: 0))
+    let refused = unrelatedFormatting.insertionPlan("C", replacing: unrelatedView.selectedRange())
     #expect(refused.issue != nil)
     #expect(!refused.usesSourceFontFallback)
     #expect(refused.attributedText == nil)

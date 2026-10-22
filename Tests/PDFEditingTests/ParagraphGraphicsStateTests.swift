@@ -98,6 +98,121 @@ struct ParagraphGraphicsStateTests {
     return (graph, pageID)
   }
 
+  private func taggedSubsetFallbackFixture() throws -> (PDFGraph, PDFObjectID) {
+    var (graph, pageID) = try taggedFinalRunFixture()
+    guard case .dictionary(var page)? = graph.objects[pageID],
+      case .dictionary(var resources)? = page[PDFName("Resources")],
+      case .dictionary(var fonts)? = resources[PDFName("Font")],
+      case .reference(let originalFontID)? = fonts[PDFName("F1")],
+      case .dictionary(var sourceFont)? = graph.objects[originalFontID],
+      case .dictionary(var encoding)? = sourceFont[PDFName("Encoding")],
+      case .dictionary(var structureElement)? = graph.objects[PDFObjectID(91)],
+      case .dictionary(var parentTree)? = graph.objects[PDFObjectID(92)]
+    else {
+      throw PDFError(.malformed, "Tagged subset fixture is incomplete")
+    }
+
+    // F1 cannot encode C because its encoding maps that code to space and its
+    // ToUnicode map omits C. F2 is a separate Type0 subset of the same face,
+    // so it exercises fallback across distinct embedded font programs and
+    // different WinAnsi / Identity-H encodings.
+    encoding[PDFName("Differences")] = .array([
+      .integer(1), .name(PDFName("fi")), .integer(67), .name(PDFName("space")),
+    ])
+    sourceFont[PDFName("Encoding")] = .dictionary(encoding)
+    sourceFont[PDFName("ToUnicode")] = .reference(PDFObjectID(93))
+    graph.objects[PDFObjectID(93)] = .stream(PDFStream(bytes: Data("""
+      /CIDInit /ProcSet findresource begin
+      12 dict begin
+      begincmap
+      /CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def
+      /CMapName /SubsetSource def
+      /CMapType 2 def
+      1 begincodespacerange
+      <00> <FF>
+      endcodespacerange
+      3 beginbfchar
+      <20> <0020>
+      <41> <0041>
+      <42> <0042>
+      endbfchar
+      endcmap
+      CMapName currentdict /CMap defineresource pop
+      end
+      end
+      """.utf8)))
+    guard case .stream(let sourceProgram)? = graph.objects[PDFObjectID(7)] else {
+      throw PDFError(.malformed, "Tagged subset font program is missing")
+    }
+    let composite = try CompositeFontWriter.write(
+      program: sourceProgram.bytes, baseName: "DejaVuSans", covering: "ABC ")
+    guard composite.fontFile.bytes != sourceProgram.bytes else {
+      throw PDFError(.malformed, "Tagged fallback fixture subsets must use distinct programs")
+    }
+    guard let compositeAB = composite.encode("AB") else {
+      throw PDFError(.malformed, "Tagged composite subset cannot encode its source text")
+    }
+    let compositeABHex = compositeAB.map { String(format: "%02X", $0) }.joined()
+    let compositeFontID = PDFObjectID(95)
+    let compositeDescendantID = PDFObjectID(96)
+    let compositeDescriptorID = PDFObjectID(97)
+    let compositeProgramID = PDFObjectID(98)
+    let compositeToUnicodeID = PDFObjectID(99)
+    let compositeCIDToGIDID = PDFObjectID(100)
+    guard case .dictionary(var compositeFont) = composite.type0Dictionary(
+      descendant: compositeDescendantID, toUnicode: compositeToUnicodeID,
+      baseName: composite.baseName),
+      case .dictionary(var compositeDescendant) = composite.descendant,
+      case .dictionary(var compositeDescriptor) = composite.descriptor
+    else {
+      throw PDFError(.malformed, "Tagged composite subset could not be assembled")
+    }
+    let subsetInspector = try TrueTypeInspector.inspect(composite.fontFile.bytes)
+    var cidToGIDBytes = [UInt8](repeating: 0, count: composite.encoding.count * 2)
+    for (scalar, cid) in composite.encoding {
+      guard let glyphID = subsetInspector.unicodeToGlyph[scalar],
+        cid >= 0, cid < composite.encoding.count,
+        glyphID >= 0, glyphID <= Int(UInt16.max)
+      else { throw PDFError(.malformed, "Tagged composite subset mapping is incomplete") }
+      cidToGIDBytes[cid * 2] = UInt8((glyphID >> 8) & 0xFF)
+      cidToGIDBytes[cid * 2 + 1] = UInt8(glyphID & 0xFF)
+    }
+    compositeDescendant[PDFName("FontDescriptor")] = .reference(compositeDescriptorID)
+    compositeDescriptor[PDFName("FontFile2")] = .reference(compositeProgramID)
+    compositeDescendant[PDFName("CIDToGIDMap")] = .reference(compositeCIDToGIDID)
+    compositeFont[PDFName("DescendantFonts")] = .array([.reference(compositeDescendantID)])
+    compositeFont[PDFName("ToUnicode")] = .reference(compositeToUnicodeID)
+    graph.objects[PDFObjectID(94)] = .dictionary(sourceFont)
+    graph.objects[compositeFontID] = .dictionary(compositeFont)
+    graph.objects[compositeDescendantID] = .dictionary(compositeDescendant)
+    graph.objects[compositeDescriptorID] = .dictionary(compositeDescriptor)
+    graph.objects[compositeProgramID] = .stream(composite.fontFile)
+    graph.objects[compositeToUnicodeID] = .stream(composite.toUnicode)
+    graph.objects[compositeCIDToGIDID] = .stream(PDFStream(bytes: Data(cidToGIDBytes)))
+    graph.objects[PDFObjectID(5)] = .stream(PDFStream(bytes: Data("""
+      /P <</MCID 0>> BDC
+      BT /F1 12 Tf
+      1 0 0 1 42 660 Tm (AB) Tj
+      1 0 0 1 42 640 Tm (AB) Tj
+      /F2 12 Tf
+      1 0 0 1 42 620 Tm <\(compositeABHex)> Tj
+      ET
+      EMC
+      """.utf8)))
+    fonts[PDFName("F1")] = .reference(PDFObjectID(94))
+    fonts[PDFName("F2")] = .reference(compositeFontID)
+    resources[PDFName("Font")] = .dictionary(fonts)
+    page[PDFName("Resources")] = .dictionary(resources)
+    graph.objects[pageID] = .dictionary(page)
+    structureElement[PDFName("K")] = .integer(0)
+    graph.objects[PDFObjectID(91)] = .dictionary(structureElement)
+    parentTree[PDFName("Nums")] = .array([
+      .integer(0), .array([.reference(PDFObjectID(91))]),
+    ])
+    graph.objects[PDFObjectID(92)] = .dictionary(parentTree)
+    return (graph, pageID)
+  }
+
   @Test(arguments: ["0 g", "0.2 0.3 0.4 rg"])
   func deviceColorResetRecoversOnlyFillColor(reset: String) throws {
     let (graph, id) = try fixture(["/Custom cs 0 0 1 scn", show("AB"), reset, show("CD", y: 678)])
@@ -277,6 +392,122 @@ struct ParagraphGraphicsStateTests {
     let order = try #require(TextReadingOrder.structureClusterOrder(
       pageID: pageID, layout: layout, in: reparsed.graph, limits: PDFLimits()))
     #expect(order.map { layout.clusters[$0].text }.joined().contains("CBA CBA"))
+  }
+
+  @Test func taggedParagraphUsesAnotherSameFaceSubsetForMissingGlyph() throws {
+    let (graph, pageID) = try taggedSubsetFallbackFixture()
+    let runs = try TextRunIndexer.runs(
+      in: PageContent.load(pageID: pageID, in: graph), graph: graph)
+    #expect(runs.map(\.text) == ["AB", "AB", "AB"])
+    #expect(runs.map(\.fontResource) == [PDFName("F1"), PDFName("F1"), PDFName("F2")])
+    guard case .dictionary(let page)? = graph.objects[pageID] else {
+      throw PDFError(.malformed, "Tagged subset page is missing")
+    }
+    let sourceFont = try #require(IndexedTextFont.resolve(
+      resource: PDFName("F1"), page: page, in: graph))
+    let candidateFont = try #require(IndexedTextFont.resolve(
+      resource: PDFName("F2"), page: page, in: graph))
+    #expect(sourceFont.encode("C") == nil)
+    #expect(candidateFont.encode("C") != nil)
+
+    let selected = Dictionary(uniqueKeysWithValues: runs.enumerated().map {
+      ($0.offset, $0.element.text)
+    })
+    let sourceStyle = PageTextFormat(size: 12, color: runs[0].fillColor,
+      sourceFont: .init(resource: PDFName("F1"), name: sourceFont.baseFont))
+    let edit = RewritePageTextCommand(pageID: pageID, originalText: selected, lines: [
+      .init(text: "AC", x: 42, baseline: 660,
+        segments: [.init(text: "AC", x: 42, format: sourceStyle)]),
+      .init(text: "AB", x: 42, baseline: 640),
+      .init(text: "AB", x: 42, baseline: 620),
+    ], fontSize: 12, color: runs[0].fillColor)
+    try edit.validate(in: graph)
+
+    let edited = try PDFEditingEngine.commit(PDFTransaction([edit]), to: graph)
+    let reparsed = try PDFParser.parse(PDFWriter.write(edited))
+    let savedRuns = try TextRunIndexer.runs(
+      in: PageContent.load(pageID: pageID, in: reparsed.graph), graph: reparsed.graph)
+    #expect(savedRuns.map(\.text) == ["A", "C", "AB", "AB"])
+    #expect(savedRuns.map(\.fontResource) == [
+      PDFName("F1"), PDFName("F2"), PDFName("F1"), PDFName("F2"),
+    ])
+    let inventory = try PDFStructureInspector.inspect(
+      in: reparsed.graph, pageIDs: reparsed.pageIDs)
+    #expect(inventory.issues.isEmpty)
+    let layout = try PageTextLayout.build(pageID: pageID, in: reparsed.graph)
+    let order = try #require(TextReadingOrder.structureClusterOrder(
+      pageID: pageID, layout: layout, in: reparsed.graph, limits: PDFLimits()))
+    #expect(order.map { layout.clusters[$0].text }.joined() == "ACABAB")
+  }
+
+  @Test func oneLineTaggedParagraphUsesSameFaceSubsetForMissingGlyph() throws {
+    var (graph, pageID) = try taggedSubsetFallbackFixture()
+    graph.objects[PDFObjectID(5)] = .stream(PDFStream(bytes: Data("""
+      /P <</MCID 0>> BDC
+      BT /F1 12 Tf 1 0 0 1 42 660 Tm (AB) Tj ET
+      EMC
+      """.utf8)))
+    let runs = try TextRunIndexer.runs(
+      in: PageContent.load(pageID: pageID, in: graph), graph: graph)
+    #expect(runs.map(\.text) == ["AB"])
+    guard case .dictionary(let page)? = graph.objects[pageID] else {
+      throw PDFError(.malformed, "Tagged subset page is missing")
+    }
+    let sourceFont = try #require(IndexedTextFont.resolve(
+      resource: PDFName("F1"), page: page, in: graph))
+    let sourceStyle = PageTextFormat(size: 12, color: runs[0].fillColor,
+      sourceFont: .init(resource: PDFName("F1"), name: sourceFont.baseFont))
+    let edit = RewritePageTextCommand(pageID: pageID, originalText: [0: "AB"], lines: [
+      .init(text: "AC", x: 42, baseline: 660,
+        segments: [.init(text: "AC", x: 42, format: sourceStyle)]),
+    ], fontSize: 12, color: runs[0].fillColor)
+    try edit.validate(in: graph)
+
+    let edited = try PDFEditingEngine.commit(PDFTransaction([edit]), to: graph)
+    let reparsed = try PDFParser.parse(PDFWriter.write(edited))
+    let savedRuns = try TextRunIndexer.runs(
+      in: PageContent.load(pageID: pageID, in: reparsed.graph), graph: reparsed.graph)
+    #expect(savedRuns.map(\.text) == ["A", "C"])
+    #expect(savedRuns.map(\.fontResource) == [PDFName("F1"), PDFName("F2")])
+    let inventory = try PDFStructureInspector.inspect(
+      in: reparsed.graph, pageIDs: reparsed.pageIDs)
+    #expect(inventory.issues.isEmpty)
+    let layout = try PageTextLayout.build(pageID: pageID, in: reparsed.graph)
+    let order = try #require(TextReadingOrder.structureClusterOrder(
+      pageID: pageID, layout: layout, in: reparsed.graph, limits: PDFLimits()))
+    #expect(order.map { layout.clusters[$0].text }.joined() == "AC")
+  }
+
+  @Test func collisionPreflightMeasuresCompatibleSubsetGlyphs() throws {
+    var (graph, pageID) = try taggedSubsetFallbackFixture()
+    guard case .stream(let stream)? = graph.objects[PDFObjectID(5)],
+      case .dictionary(var page)? = graph.objects[pageID],
+      case .dictionary(var catalog)? = graph.objects[PDFObjectID(1)] else {
+      throw PDFError(.malformed, "Subset collision fixture is incomplete")
+    }
+    graph.objects[PDFObjectID(5)] = .stream(PDFStream(
+      bytes: stream.bytes + Data("\nBT /F1 12 Tf 350 500 Tm (AB) Tj ET\n".utf8)))
+    page.removeValue(forKey: PDFName("StructParents"))
+    catalog.removeValue(forKey: PDFName("StructTreeRoot"))
+    catalog.removeValue(forKey: PDFName("MarkInfo"))
+    graph.objects[pageID] = .dictionary(page)
+    graph.objects[PDFObjectID(1)] = .dictionary(catalog)
+
+    let runs = try TextRunIndexer.runs(
+      in: PageContent.load(pageID: pageID, in: graph), graph: graph)
+    #expect(runs.count == 4)
+    guard case .dictionary(let updatedPage)? = graph.objects[pageID] else {
+      throw PDFError(.malformed, "Subset collision page is missing")
+    }
+    let sourceFont = try #require(IndexedTextFont.resolve(
+      resource: PDFName("F1"), page: updatedPage, in: graph))
+    let format = PageTextFormat(size: 12, color: runs[0].fillColor,
+      sourceFont: .init(resource: PDFName("F1"), name: sourceFont.baseFont))
+    let edit = RewritePageTextCommand(pageID: pageID, originalText: [0: "AB"], lines: [
+      .init(text: "AC", x: 42, baseline: 660,
+        segments: [.init(text: "AC", x: 42, format: format)]),
+    ], fontSize: 12, color: runs[0].fillColor)
+    try edit.validate(in: graph)
   }
 
   @Test func paragraphPreviewAcrossStreamsKeepsSharedContentAndNeighbors() throws {

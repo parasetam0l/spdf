@@ -114,9 +114,10 @@ public final class NativeTextFormatting {
       ?? NSRange(location: 0, length: 0)).issue
   }
 
-  /// Resolve each inserted scalar against verified fonts already present in
-  /// this paragraph. A subset that lacks a character is never allowed to
-  /// borrow an unrelated installed font silently.
+  /// Resolve each inserted scalar against verified embedded fonts already
+  /// referenced on this page. A subset may fill a glyph gap only when its
+  /// face and shared source metrics match; installed fonts are never borrowed
+  /// silently.
   public func insertionPlan(_ text: String, replacing range: NSRange) -> NativeTextInsertionPlan {
     guard let view else {
       return .init(usesSourceFontFallback: false, fragments: [], attributedText: nil,
@@ -233,12 +234,17 @@ public final class NativeTextFormatting {
   private func sourceFormat(for scalar: UnicodeScalar, base: PageTextFormat,
     current: [(range: NSRange, format: PageTextFormat)], insertion: Int) -> PageTextFormat? {
     let value = String(scalar)
+    let sourceText = original.map(\.text).joined()
     let candidates = profiles.compactMap { resource, profile
       -> (resource: PDFName, source: PageTextSourceFont, distance: Int, order: String)? in
       guard profile.glyphs[value] != nil, sourceFonts[resource] != nil,
         PageTextSourceFont.canWriteInline(value) else { return nil }
-      if let baseName = base.sourceFont?.name, profile.source.name != baseName {
-        return nil
+      if let baseSource = base.sourceFont {
+        guard let sourceProfile = profiles[baseSource.resource],
+          Self.normalizedEmbeddedFace(profile.source.name)
+            == Self.normalizedEmbeddedFace(baseSource.name),
+          Self.hasMatchingSharedGlyphMetrics(
+            source: sourceProfile, candidate: profile, sourceText: sourceText) else { return nil }
       }
       let nearest = current.compactMap { entry -> Int? in
         guard entry.format.sourceFont?.resource == resource else { return nil }
@@ -264,6 +270,30 @@ public final class NativeTextFormatting {
     var result = base
     result.sourceFont = sorted[0].source
     return result
+  }
+
+  private static func normalizedEmbeddedFace(_ name: String) -> String {
+    let bytes = Array(name.utf8)
+    if bytes.count > 7, bytes[6] == 43,
+      bytes[..<6].allSatisfy({ (65...90).contains($0) })
+    {
+      return String(decoding: bytes.dropFirst(7), as: UTF8.self).lowercased()
+    }
+    return name.lowercased()
+  }
+
+  private static func hasMatchingSharedGlyphMetrics(
+    source: PageTextFontProfile, candidate: PageTextFontProfile, sourceText: String
+  ) -> Bool {
+    var sharedGlyphs = Set<String>()
+    for scalar in sourceText.unicodeScalars {
+      let text = String(scalar)
+      guard let sourceGlyph = source.glyphs[text], let candidateGlyph = candidate.glyphs[text],
+        sourceGlyph.width.isFinite, candidateGlyph.width.isFinite else { continue }
+      guard abs(sourceGlyph.width - candidateGlyph.width) <= 0.001 else { return false }
+      sharedGlyphs.insert(text)
+    }
+    return sharedGlyphs.count >= 2
   }
 
   private static func coalesced(_ fragments: [PageTextFragment]) -> [PageTextFragment] {

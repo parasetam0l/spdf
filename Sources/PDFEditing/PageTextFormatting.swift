@@ -193,43 +193,140 @@ public struct AuthoredPageTextBox: Sendable {
 }
 
 enum PageTextLineWriter {
-  static func validateFonts(_ lines: [PageTextLine], pageID: PDFObjectID, in graph: PDFGraph) throws {
+  static func indexedPageFonts(
+    page: [PDFName: PDFValue], in graph: PDFGraph
+  ) -> [PDFName: IndexedTextFont] {
+    guard case .dictionary(let resources)? = FontValue.resolve(
+      page[PDFName("Resources")], in: graph),
+      case .dictionary(let fontResources)? = FontValue.resolve(
+        resources[PDFName("Font")], in: graph)
+    else { return [:] }
+    return Dictionary(uniqueKeysWithValues: fontResources.keys.sorted().compactMap { resource in
+      IndexedTextFont.resolve(resource: resource, page: page, in: graph)
+        .map { (resource, $0) }
+    })
+  }
+
+  static func validateFonts(_ lines: [PageTextLine], pageID: PDFObjectID, in graph: PDFGraph,
+    fallbackWitnessText: String? = nil) throws {
     guard case .dictionary(let page)? = graph.objects[pageID] else {
       throw PDFError(.malformed, "Missing text page")
     }
-    var profiles: [PDFName: PageTextFontProfile] = [:]
-    for segment in lines.flatMap(\.segments) {
-      guard !(segment.format.sourceFont != nil && segment.format.customFont != nil) else {
-        throw PDFError(.malformed, "A text run cannot select two font sources")
-      }
-      if let source = segment.format.sourceFont {
-        guard let font = IndexedTextFont.resolve(resource: source.resource, page: page, in: graph),
-          font.isInlineEditable, let encoded = font.encode(segment.text),
-          let glyphs = font.glyphs(encoded),
-          PageTextSourceFont.canWriteInline(segment.text) else {
-          throw PDFError(.unsupported, "The embedded font does not contain these characters. Choose another font for them.")
+    var pageFonts: [PDFName: IndexedTextFont] = [:]
+    if fallbackWitnessText != nil {
+      pageFonts = indexedPageFonts(page: page, in: graph)
+    }
+    for line in lines {
+      for segment in line.segments {
+        guard !(segment.format.sourceFont != nil && segment.format.customFont != nil) else {
+          throw PDFError(.malformed, "A text run cannot select two font sources")
         }
-        if profiles[source.resource] == nil { profiles[source.resource] = font.profile }
-        guard let profile = profiles[source.resource],
-          glyphs.allSatisfy({ profile.glyphs[$0.text]?.codes == $0.codes }) else {
-          throw PDFError(.unsupported, "The embedded font does not contain these characters. Choose another font for them.")
-        }
-      } else if let custom = segment.format.customFont {
-        let inspector = try TrueTypeInspector.inspect(custom.program)
-        guard !inspector.isCFF, inspector.permitsEditableSubsetEmbedding else {
-          throw PDFError(.unsupported,
-            "This font's embedding settings do not allow inline PDF writing")
-        }
-        let needed = Set(segment.text.unicodeScalars.map { Int($0.value) })
-        let availability = try TrueTypeSubsetter.availability(
-          program: custom.program, unicodes: needed)
-        guard availability.missing.isEmpty,
-          PageTextSourceFont.canWriteInline(segment.text) else {
-          throw PDFError(.unsupported,
-            "This licensed font does not contain every supported character in the selection.")
+        if let source = segment.format.sourceFont {
+          guard let font = IndexedTextFont.resolve(resource: source.resource, page: page, in: graph),
+            font.isInlineEditable, PageTextSourceFont.canWriteInline(segment.text) else {
+            throw PDFError(.unsupported, "The embedded font does not contain these characters. Choose another font for them.")
+          }
+          let directlyEncoded: Bool = {
+            guard let encoded = font.encode(segment.text), let glyphs = font.glyphs(encoded),
+              glyphs.map(\.text).joined() == segment.text,
+              let profile = font.profile else { return false }
+            return glyphs.allSatisfy({ profile.glyphs[$0.text]?.codes == $0.codes })
+          }()
+          if !directlyEncoded {
+            guard let fallbackWitnessText else {
+              throw PDFError(.unsupported, "The embedded font does not contain these characters. Choose another font for them.")
+            }
+            for scalar in segment.text.unicodeScalars {
+              guard Self.inlineGlyph(String(scalar), preferredResource: source.resource,
+                preferredFont: font, sourceText: fallbackWitnessText,
+                availableFonts: pageFonts) != nil else {
+                throw PDFError(.unsupported, "The embedded font does not contain these characters. Choose another font for them.")
+              }
+            }
+          }
+        } else if let custom = segment.format.customFont {
+          let inspector = try TrueTypeInspector.inspect(custom.program)
+          guard !inspector.isCFF, inspector.permitsEditableSubsetEmbedding else {
+            throw PDFError(.unsupported,
+              "This font's embedding settings do not allow inline PDF writing")
+          }
+          let needed = Set(segment.text.unicodeScalars.map { Int($0.value) })
+          let availability = try TrueTypeSubsetter.availability(
+            program: custom.program, unicodes: needed)
+          guard availability.missing.isEmpty,
+            PageTextSourceFont.canWriteInline(segment.text) else {
+            throw PDFError(.unsupported,
+              "This licensed font does not contain every supported character in the selection.")
+          }
         }
       }
     }
+  }
+
+  /// Resolve one printable scalar in the requested subset first, then reuse a
+  /// same-face subset already referenced on the page only when shared source
+  /// glyph widths provide evidence that it is metrically compatible.
+  static func inlineGlyph(
+    _ text: String, preferredResource: PDFName, preferredFont: IndexedTextFont,
+    sourceText: String, availableFonts: [PDFName: IndexedTextFont]
+  ) -> (resource: PDFName, glyph: IndexedTextFont.Glyph)? {
+    func encodedGlyph(_ font: IndexedTextFont) -> IndexedTextFont.Glyph? {
+      guard let codes = font.encode(text), let glyphs = font.glyphs(codes),
+        glyphs.count == 1, glyphs[0].text == text
+      else { return nil }
+      if let profile = font.profile {
+        guard font.sourceGlyphsMatchProfile(glyphs, profile: profile) else { return nil }
+      } else if font.hasEmbeddedProgram {
+        return nil
+      }
+      return glyphs[0]
+    }
+
+    if let glyph = encodedGlyph(preferredFont) {
+      return (preferredResource, glyph)
+    }
+    for resource in availableFonts.keys.sorted() where resource != preferredResource {
+      guard let candidate = availableFonts[resource], candidate.isInlineEditable,
+        normalizedEmbeddedFace(candidate.baseFont)
+          == normalizedEmbeddedFace(preferredFont.baseFont),
+        hasMatchingSharedGlyphMetrics(
+          source: preferredFont, candidate: candidate, sourceText: sourceText),
+        let glyph = encodedGlyph(candidate),
+        let width = glyph.width, width.isFinite, width >= 0
+      else { continue }
+      return (resource, glyph)
+    }
+    return nil
+  }
+
+  static func normalizedEmbeddedFace(_ baseFont: String) -> String {
+    let bytes = Array(baseFont.utf8)
+    if bytes.count > 7, bytes[6] == 43,
+      bytes[..<6].allSatisfy({ (65...90).contains($0) })
+    {
+      return String(decoding: bytes.dropFirst(7), as: UTF8.self).lowercased()
+    }
+    return baseFont.lowercased()
+  }
+
+  static func hasMatchingSharedGlyphMetrics(
+    source: IndexedTextFont, candidate: IndexedTextFont, sourceText: String
+  ) -> Bool {
+    var sharedGlyphs = Set<String>()
+    for scalar in sourceText.unicodeScalars {
+      let text = String(scalar)
+      guard let sourceCodes = source.encode(text), let sourceGlyphs = source.glyphs(sourceCodes),
+        sourceGlyphs.count == 1, sourceGlyphs[0].text == text,
+        let sourceWidth = sourceGlyphs[0].width, sourceWidth.isFinite,
+        let candidateCodes = candidate.encode(text),
+        let candidateGlyphs = candidate.glyphs(candidateCodes),
+        candidateGlyphs.count == 1, candidateGlyphs[0].text == text,
+        let candidateWidth = candidateGlyphs[0].width, candidateWidth.isFinite
+      else { continue }
+      guard abs(sourceWidth - candidateWidth) <= 0.001 else { return false }
+      sharedGlyphs.insert(text)
+    }
+    return sharedGlyphs.count >= 2
   }
   static func originalContent(pageID: PDFObjectID, in graph: PDFGraph) throws -> PageContent {
     let content = try PageContent.load(pageID: pageID, in: graph)

@@ -27,21 +27,34 @@ public enum NativeParagraphEditing {
     let text: String
     let mapping: PageTextFontProfile.Glyph
     let range: NSRange
+    let profile: PageTextFontProfile
   }
 
   /// Match decoded text using the longest verified PDF glyph sequence first.
   /// A ToUnicode ligature such as `fl` is one source glyph even though the
-  /// native string contains two Unicode scalars.
+  /// native string contains two Unicode scalars. Missing glyphs may come from
+  /// another subset already used by this page, under the same face and
+  /// matching shared metrics that the rewrite planner requires.
   private static func sourceGlyphPieces(in text: String,
-    profile: PageTextFontProfile) -> [SourceGlyphPiece]? {
-    if let mapping = profile.glyphs[text] {
-      return [.init(text: text, mapping: mapping,
-        range: NSRange(location: 0, length: (text as NSString).length))]
+    preferredProfile: PageTextFontProfile,
+    profiles: [PDFName: PageTextFontProfile],
+    metricWitnessText: String) -> [SourceGlyphPiece]? {
+    let alternatives = profiles.keys.sorted().compactMap { profiles[$0] }.filter { candidate in
+      candidate.source.resource != preferredProfile.source.resource
+        && normalizedEmbeddedFace(candidate.source.name)
+          == normalizedEmbeddedFace(preferredProfile.source.name)
+        && hasMatchingSharedGlyphMetrics(source: preferredProfile, candidate: candidate,
+          sourceText: metricWitnessText)
     }
-    let candidates = profile.glyphs.map { value, mapping in
-      (text: value, mapping: mapping, scalars: value.unicodeScalars.map(\.value))
+    let orderedProfiles = [preferredProfile] + alternatives
+    let candidates = orderedProfiles.enumerated().flatMap { profileIndex, profile in
+      profile.glyphs.map { value, mapping in
+        (text: value, mapping: mapping, profile: profile,
+          profileIndex: profileIndex, scalars: value.unicodeScalars.map(\.value))
+      }
     }.filter { !$0.scalars.isEmpty }.sorted {
       if $0.scalars.count != $1.scalars.count { return $0.scalars.count > $1.scalars.count }
+      if $0.profileIndex != $1.profileIndex { return $0.profileIndex < $1.profileIndex }
       return $0.text < $1.text
     }
     let scalars = Array(text.unicodeScalars.map(\.value))
@@ -55,11 +68,36 @@ public enum NativeParagraphEditing {
       }) else { return nil }
       let length = candidate.text.utf16.count
       pieces.append(.init(text: candidate.text, mapping: candidate.mapping,
-        range: NSRange(location: utf16Offset, length: length)))
+        range: NSRange(location: utf16Offset, length: length), profile: candidate.profile))
       scalarOffset += candidate.scalars.count
       utf16Offset += length
     }
     return pieces
+  }
+
+  private static func normalizedEmbeddedFace(_ name: String) -> String {
+    let bytes = Array(name.utf8)
+    if bytes.count > 7, bytes[6] == 43,
+      bytes[..<6].allSatisfy({ (65...90).contains($0) })
+    {
+      return String(decoding: bytes.dropFirst(7), as: UTF8.self).lowercased()
+    }
+    return name.lowercased()
+  }
+
+  private static func hasMatchingSharedGlyphMetrics(
+    source: PageTextFontProfile, candidate: PageTextFontProfile, sourceText: String
+  ) -> Bool {
+    var sharedGlyphs = Set<String>()
+    for scalar in sourceText.unicodeScalars {
+      let text = String(scalar)
+      guard let sourceGlyph = source.glyphs[text],
+        let candidateGlyph = candidate.glyphs[text] else { continue }
+      guard sourceGlyph.width.isFinite, candidateGlyph.width.isFinite,
+        abs(sourceGlyph.width - candidateGlyph.width) <= 0.001 else { return false }
+      sharedGlyphs.insert(text)
+    }
+    return sharedGlyphs.count >= 2
   }
 
   /// Returns the text-bearing range of a visual line. TextKit includes the
@@ -135,13 +173,17 @@ public enum NativeParagraphEditing {
     for line in lines {
       guard line.text.isEmpty || !line.segments.isEmpty else { return issue }
       for segment in line.segments {
-        guard let font = nativeFont(segment.format, embedded: embedded) else { return issue }
         var x = segment.x
         if let source = segment.format.sourceFont {
           guard let profile = profiles[source.resource],
-            let pieces = sourceGlyphPieces(in: segment.text, profile: profile) else { return issue }
+            let pieces = sourceGlyphPieces(in: segment.text,
+              preferredProfile: profile, profiles: profiles,
+              metricWitnessText: line.text) else { return issue }
           for piece in pieces {
             guard let id = piece.mapping.id, id > 0, id <= Int(UInt16.max) else { return issue }
+            guard let baseFont = embedded[piece.profile.source.resource] else { return issue }
+            let font = CTFontCreateCopyWithAttributes(
+              baseFont, segment.format.size, nil, nil) as NSFont
             var glyph = CGGlyph(id), bounds = CGRect.zero
             _ = CTFontGetBoundingRectsForGlyphs(font, .horizontal, &glyph, &bounds, 1)
             let syntheticExpansion = segment.format.syntheticBoldStrokeWidth / 2
@@ -158,6 +200,7 @@ public enum NativeParagraphEditing {
             x += piece.mapping.width * segment.format.size / 1_000 + segment.format.characterSpacing
           }
         } else {
+          guard let font = nativeFont(segment.format, embedded: embedded) else { return issue }
           for scalar in segment.text.unicodeScalars {
             guard scalar.value <= 0xFFFF else { return issue }
             var code = UInt16(scalar.value), glyph: CGGlyph = 0
@@ -260,7 +303,8 @@ public enum NativeParagraphEditing {
         standardFontAdvances: advances)) != nil else { continue }
       let clippingRect: [Double]?
       do { clippingRect = try validator.clippingRect(for: indices) } catch { continue }
-      guard clippingIssue(lines: authored.lines, clippingRect: clippingRect, profiles: profiles, nativeFonts: embedded) == nil else { continue }
+      guard clippingIssue(lines: authored.lines, clippingRect: clippingRect,
+        profiles: profiles, nativeFonts: embedded) == nil else { continue }
       let rect = paragraphBounds(lines: authored.lines, firstBaseline: authored.box.firstBaseline,
         initialFontSize: initial.format.size, x: authored.box.x, width: authored.box.width,
         embedded: embedded)
@@ -400,7 +444,9 @@ public enum NativeParagraphEditing {
     guard let source = format.sourceFont, let profile = profiles[source.resource] else { return }
     let string = text.string as NSString
     guard range.location >= 0, range.length >= 0, NSMaxRange(range) <= string.length,
-      let pieces = sourceGlyphPieces(in: string.substring(with: range), profile: profile) else { return }
+      let pieces = sourceGlyphPieces(in: string.substring(with: range),
+        preferredProfile: profile, profiles: [source.resource: profile],
+        metricWitnessText: string.substring(with: range)) else { return }
     for piece in pieces {
       guard let id = piece.mapping.id, id > 0, id <= Int(UInt16.max) else { continue }
       let glyph = CGGlyph(id)

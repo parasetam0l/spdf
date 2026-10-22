@@ -297,6 +297,7 @@ struct IndexedTextFont {
   }
   var isSupported: Bool { simple?.isSupported ?? !mapping.isEmpty }
   var isInlineEditable: Bool { simple.map { $0.isEditable && !$0.isType3 } ?? (program != nil) }
+  var hasEmbeddedProgram: Bool { program != nil }
 
   /// Read-only outline metrics for collision checks. This deliberately does
   /// not apply the font embedding-permission gate used by the writer: reading

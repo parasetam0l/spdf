@@ -576,15 +576,19 @@ public struct RewritePageTextCommand: PDFEditCommand, Equatable, Sendable {
       }
     }
     try PageTextLineWriter.validate(lines, box: box)
-    try PageTextLineWriter.validateFonts(lines, pageID: pageID, in: graph)
+    try PageTextLineWriter.validateFonts(lines, pageID: pageID, in: graph,
+      fallbackWitnessText: originalText.values.joined())
+    let usesTaggedWriter = Self.hasTaggedReadingOrder(pageID: pageID, in: graph)
     guard let font = firstFont,
-      lines.allSatisfy({ !$0.segments.isEmpty || font.encode($0.text) != nil }) else {
+      usesTaggedWriter || lines.allSatisfy({ !$0.segments.isEmpty || font.encode($0.text) != nil })
+    else {
       throw PDFError(.unsupported, "The PDF font cannot encode the replacement characters")
     }
     let clip = try analysis.clippingRect(for: originalText.keys.sorted())
     try Self.validateNoTextCollisions(
       lines, selectedRunIndices: Set(originalText.keys), pageID: pageID,
-      graph: graph, analysis: analysis, defaultFont: font, defaultFontSize: fontSize)
+      graph: graph, analysis: analysis, defaultFont: font, defaultFontSize: fontSize,
+      sourceText: originalText.values.joined())
     return (content, selected, font, advances, clip)
   }
 
@@ -594,7 +598,7 @@ public struct RewritePageTextCommand: PDFEditCommand, Equatable, Sendable {
   private static func validateNoTextCollisions(
     _ lines: [PageTextLine], selectedRunIndices: Set<Int>, pageID: PDFObjectID,
     graph: PDFGraph, analysis: ParagraphRewriteAnalysis, defaultFont: IndexedTextFont,
-    defaultFontSize: Double
+    defaultFontSize: Double, sourceText: String
   ) throws {
     guard !lines.isEmpty else { return }
     let layout: PageTextLayout
@@ -641,6 +645,29 @@ public struct RewritePageTextCommand: PDFEditCommand, Equatable, Sendable {
     var fontsWithoutOutputOutlines: Set<PDFObjectID> = []
     var customFontOutlineMetrics: [String: TrueTypeOutlineMetrics] = [:]
     var customFontsWithoutOutlines: Set<String> = []
+    let availableOutputFonts = analysis.fonts
+    func outputGlyphs(of text: String, preferredFont: IndexedTextFont)
+      -> [(font: IndexedTextFont, glyph: IndexedTextFont.Glyph)]?
+    {
+      if let codes = preferredFont.encode(text), let glyphs = preferredFont.glyphs(codes),
+        glyphs.map(\.text).joined() == text,
+        let profile = preferredFont.profile,
+        glyphs.allSatisfy({ profile.glyphs[$0.text]?.codes == $0.codes })
+      {
+        return glyphs.map { (preferredFont, $0) }
+      }
+      var result: [(font: IndexedTextFont, glyph: IndexedTextFont.Glyph)] = []
+      for scalar in text.unicodeScalars {
+        guard let resolved = PageTextLineWriter.inlineGlyph(
+          String(scalar), preferredResource: preferredFont.resource,
+          preferredFont: preferredFont, sourceText: sourceText,
+          availableFonts: availableOutputFonts),
+          let resolvedFont = availableOutputFonts[resolved.resource]
+        else { return nil }
+        result.append((resolvedFont, resolved.glyph))
+      }
+      return result
+    }
     func outlineMetrics(for font: IndexedTextFont) -> TrueTypeOutlineMetrics? {
       if let cached = outputOutlineMetrics[font.fontID] { return cached }
       guard !fontsWithoutOutputOutlines.contains(font.fontID) else { return nil }
@@ -688,17 +715,18 @@ public struct RewritePageTextCommand: PDFEditCommand, Equatable, Sendable {
       }
 
       if let font {
-        guard let metrics = outlineMetrics(for: font),
-          metrics.inspector.unitsPerEm > 0,
-          let codes = font.encode(text), let glyphs = font.glyphs(codes), !glyphs.isEmpty
-        else { return nil }
-        let unitScale = size / Double(metrics.inspector.unitsPerEm)
+        guard let glyphs = outputGlyphs(of: text, preferredFont: font), !glyphs.isEmpty else {
+          return nil
+        }
         var pen = 0.0
         var result: [[Double]] = []
-        for glyph in glyphs {
+        for (glyphFont, glyph) in glyphs {
+          guard let metrics = outlineMetrics(for: glyphFont),
+            metrics.inspector.unitsPerEm > 0 else { return nil }
+          let unitScale = size / Double(metrics.inspector.unitsPerEm)
           guard let width = glyph.width,
             width.isFinite, width >= 0 else { return nil }
-          guard let glyphID = font.outlineGlyphID(for: glyph, inspector: metrics.inspector) else {
+          guard let glyphID = glyphFont.outlineGlyphID(for: glyph, inspector: metrics.inspector) else {
             return nil
           }
           if let box = metrics.bounds(glyphID: glyphID) {
@@ -765,10 +793,11 @@ public struct RewritePageTextCommand: PDFEditCommand, Equatable, Sendable {
       if text.isEmpty { return (0, 0) }
       let widths: [Double]
       if let font {
-        guard let codes = font.encode(text), let glyphs = font.glyphs(codes), !glyphs.isEmpty else {
+        guard let glyphs = outputGlyphs(of: text, preferredFont: font), !glyphs.isEmpty else {
           return nil
         }
-        if glyphs.contains(where: { $0.width == nil }) {
+        if glyphs.contains(where: { $0.glyph.width == nil }) {
+          guard glyphs.allSatisfy({ $0.font.resource == font.resource }) else { return nil }
           let family = font.baseFont.split(separator: "+", maxSplits: 1).last.map(String.init)
           let isCanonicalStandard = analysis.runs.indices.contains { index in
             analysis.standardIndices.contains(index) && analysis.runs[index].fontResource == font.resource
@@ -776,12 +805,12 @@ public struct RewritePageTextCommand: PDFEditCommand, Equatable, Sendable {
           guard isCanonicalStandard, let family, Self.standardFonts.contains(family) else {
             return nil
           }
-          let glyphText = glyphs.map(\.text).joined()
+          let glyphText = glyphs.map(\.glyph.text).joined()
           guard let measured = standardWidths(of: glyphText, family: family),
             measured.count == glyphs.count else { return nil }
           widths = measured
         } else {
-          widths = glyphs.compactMap(\.width)
+          widths = glyphs.compactMap { $0.glyph.width }
         }
       } else if let customFont {
         guard let inspector = outlineMetrics(forCustomFont: customFont)?.inspector,
@@ -1307,8 +1336,9 @@ public struct RewritePageTextCommand: PDFEditCommand, Equatable, Sendable {
   /// Rewrites changed tagged lines inside their existing text-show instructions.
   /// A line may change length only in its final source instruction; every
   /// earlier instruction remains exact. The writer uses each instruction's own
-  /// font mapping, preserves marked-content order, and restores the original
-  /// text-matrix endpoint after each instruction.
+  /// font mapping, may borrow a same-face glyph from another paragraph subset,
+  /// preserves marked-content order, and restores the original font selection
+  /// and text-matrix endpoint after each instruction.
   private func taggedRunPreservingRewriteRanges(
     content: PageContent, runs: [TextRun], advances: [Double], graph: PDFGraph
   ) throws -> [(range: Range<Int>, replacement: [UInt8])]? {
@@ -1347,7 +1377,24 @@ public struct RewritePageTextCommand: PDFEditCommand, Equatable, Sendable {
       }.compactMap(\.mcid)
     })
     let hasExplicitWordSpacing = runs.contains { abs($0.wordSpacing) >= 1e-8 }
-    guard lines.count > 1 || distinctMCIDs.count > 1 || hasExplicitWordSpacing else {
+    guard case .dictionary(let page)? = graph.objects[pageID] else { return nil }
+    let selectedFontResources = Set(runs.map(\.fontResource))
+    let requiresSameFaceSubsetFallback = lines.contains { line in
+      let segments: [(text: String, resource: PDFName)] = line.segments.isEmpty
+        ? [(line.text, first.fontResource)]
+        : line.segments.map {
+          ($0.text, $0.format.sourceFont?.resource ?? first.fontResource)
+        }
+      return segments.contains { text, resource in
+        guard selectedFontResources.contains(resource),
+          let font = IndexedTextFont.resolve(resource: resource, page: page, in: graph),
+          let codes = font.encode(text), let glyphs = font.glyphs(codes),
+          glyphs.map(\.text).joined() == text else { return true }
+        return false
+      }
+    }
+    guard lines.count > 1 || distinctMCIDs.count > 1 || hasExplicitWordSpacing
+      || requiresSameFaceSubsetFallback else {
       return nil
     }
 
@@ -1406,8 +1453,14 @@ public struct RewritePageTextCommand: PDFEditCommand, Equatable, Sendable {
 
     let standardIndices = try? StandardTextFont.editableRunIndices(pageID: pageID, in: graph)
     guard case .dictionary(let page)? = graph.objects[pageID] else { return nil }
+    let availablePageFonts = PageTextLineWriter.indexedPageFonts(page: page, in: graph)
 
-    struct OutputGlyph { let text: String; let x: Double }
+    struct OutputGlyph {
+      let text: String
+      let x: Double
+      let fontResource: PDFName
+      let codes: [UInt8]
+    }
     var outputByRun: [Int: [OutputGlyph]] = [:]
     var preservedRunIndices = Set<Int>()
     var hasWhitespaceOnlyLineNormalization = false
@@ -1475,9 +1528,19 @@ public struct RewritePageTextCommand: PDFEditCommand, Equatable, Sendable {
         globalIndices.firstIndex(of: index).map { runs[$0].fontResource }
       })
       guard segments.allSatisfy({ segment in
-        !segment.text.isEmpty && segment.format.isValid
-          && segment.format.customFont == nil && segment.x.isFinite
-          && sourceFontResources.contains(segment.format.sourceFont?.resource ?? sourceRun.fontResource)
+        guard !segment.text.isEmpty, segment.format.isValid,
+          segment.format.customFont == nil, segment.x.isFinite
+        else { return false }
+        let resource = segment.format.sourceFont?.resource ?? sourceRun.fontResource
+        if sourceFontResources.contains(resource) { return true }
+        guard let candidate = availablePageFonts[resource] else { return false }
+        return sourceFontResources.contains { sourceResource in
+          guard let source = availablePageFonts[sourceResource] else { return false }
+          return PageTextLineWriter.normalizedEmbeddedFace(candidate.baseFont)
+              == PageTextLineWriter.normalizedEmbeddedFace(source.baseFont)
+            && PageTextLineWriter.hasMatchingSharedGlyphMetrics(
+              source: source, candidate: candidate, sourceText: sourceLineText)
+        }
       }) else { return nil }
 
       var pagePen = line.x
@@ -1493,8 +1556,7 @@ public struct RewritePageTextCommand: PDFEditCommand, Equatable, Sendable {
         }) ?? firstSourceIndex
         let segmentStyle = TextEditTargeting.inputStyle(
           runIndex: fontRunIndex, runs: allRuns, in: graph)
-        let segmentStandardFont = segment.format.sourceFont == nil
-          ? segmentStyle.fontFamily.flatMap(StandardTextFont.init(rawValue:)) : nil
+        let segmentStandardFont = segmentStyle.fontFamily.flatMap(StandardTextFont.init(rawValue:))
         let segmentRunIndices = sourceIndices.filter { index in
           guard let offset = globalIndices.firstIndex(of: index) else { return false }
           return runs[offset].fontResource == segmentResource
@@ -1503,17 +1565,33 @@ public struct RewritePageTextCommand: PDFEditCommand, Equatable, Sendable {
           && standardIndices.map { segmentRunIndices.allSatisfy($0.contains) } == true
           && segmentFont.simple?.differences.isEmpty == true && segmentFont.simple?.toUnicode == nil
         guard abs(segment.x - pagePen) <= 0.02,
-          PageTextSourceFont.canWriteInline(segment.text),
-          let encoded = segmentFont.encode(segment.text), let glyphs = segmentFont.glyphs(encoded),
-          glyphs.map(\.text).joined() == segment.text
+          PageTextSourceFont.canWriteInline(segment.text)
         else { return nil }
-        for glyph in glyphs {
-          guard glyph.text.unicodeScalars.count == 1 else { return nil }
+        var encodedGlyphs: [(resource: PDFName, glyph: IndexedTextFont.Glyph)] = []
+        if let encoded = segmentFont.encode(segment.text),
+          let glyphs = segmentFont.glyphs(encoded),
+          glyphs.map(\.text).joined() == segment.text
+        {
+          guard glyphs.allSatisfy({ $0.text.unicodeScalars.count == 1 }) else { return nil }
+          encodedGlyphs = glyphs.map { (segmentResource, $0) }
+        } else {
+          for scalar in segment.text.unicodeScalars {
+            let glyphText = String(scalar)
+            guard let encodedGlyph = PageTextLineWriter.inlineGlyph(
+              glyphText, preferredResource: segmentResource, preferredFont: segmentFont,
+              sourceText: sourceLineText, availableFonts: availablePageFonts)
+            else { return nil }
+            encodedGlyphs.append(encodedGlyph)
+          }
+        }
+        for encodedGlyph in encodedGlyphs {
+          let glyph = encodedGlyph.glyph
           let glyphWidth: Double
           if let width = glyph.width, width.isFinite, width >= 0 {
             glyphWidth = width
           } else {
-            guard mayUseSegmentStandardMetrics, let segmentStandardFont,
+            guard encodedGlyph.resource == segmentResource,
+              mayUseSegmentStandardMetrics, let segmentStandardFont,
               let width = Self.standardAdvance(
                 glyph.text, font: segmentStandardFont, size: 1_000,
                 charSpacing: 0, wordSpacing: 0, horizontalScale: 100),
@@ -1524,7 +1602,8 @@ public struct RewritePageTextCommand: PDFEditCommand, Equatable, Sendable {
           let desiredAdvance = glyphWidth * segment.format.size / 1_000
             + segment.format.characterSpacing
           guard desiredAdvance.isFinite, desiredAdvance >= 0 else { return nil }
-          lineGlyphs.append(OutputGlyph(text: glyph.text, x: pagePen))
+          lineGlyphs.append(OutputGlyph(text: glyph.text, x: pagePen,
+            fontResource: encodedGlyph.resource, codes: glyph.codes))
           pagePen += desiredAdvance
         }
       }
@@ -1631,10 +1710,20 @@ public struct RewritePageTextCommand: PDFEditCommand, Equatable, Sendable {
       if omittedScalarCount > 0 {
         let omittedWhitespace = sourceScalars.suffix(omittedScalarCount)
         guard omittedWhitespace.count == omittedScalarCount,
-          omittedWhitespace.allSatisfy({ CharacterSet.whitespacesAndNewlines.contains($0) })
+          omittedWhitespace.allSatisfy({ CharacterSet.whitespacesAndNewlines.contains($0) }),
+          let finalSourceIndex = sourceIndices.last,
+          let finalOffset = globalIndices.firstIndex(of: finalSourceIndex),
+          let trailingFont = availablePageFonts[runs[finalOffset].fontResource]
         else { return nil }
         for scalar in omittedWhitespace {
-          lineGlyphs.append(OutputGlyph(text: String(scalar), x: pagePen))
+          let text = String(scalar)
+          guard let glyph = PageTextLineWriter.inlineGlyph(
+            text, preferredResource: runs[finalOffset].fontResource,
+            preferredFont: trailingFont, sourceText: sourceLineText,
+            availableFonts: availablePageFonts)
+          else { return nil }
+          lineGlyphs.append(OutputGlyph(text: text, x: pagePen,
+            fontResource: glyph.resource, codes: glyph.glyph.codes))
         }
       }
       var cursor = 0
@@ -1657,7 +1746,9 @@ public struct RewritePageTextCommand: PDFEditCommand, Equatable, Sendable {
       guard preservedCount == 0 || preservedCount == runIndices.count else { return nil }
     }
     let rewrittenIndices = globalIndices.filter { !preservedRunIndices.contains($0) }
-    guard !rewrittenIndices.isEmpty || !hasWhitespaceOnlyLineNormalization else { return [] }
+    guard !rewrittenIndices.isEmpty || !hasWhitespaceOnlyLineNormalization else {
+      return []
+    }
     guard !rewrittenIndices.isEmpty else { return nil }
     let offsetsByGlobalIndex = Dictionary(uniqueKeysWithValues: globalIndices.enumerated().map {
       ($1, $0)
@@ -1732,35 +1823,89 @@ public struct RewritePageTextCommand: PDFEditCommand, Equatable, Sendable {
         && standardIndices.map { indices.allSatisfy($0.contains) } == true
         && instructionFont.simple?.differences.isEmpty == true
         && instructionFont.simple?.toUnicode == nil
-      var glyphCodes: [[UInt8]] = []
+      let usesAlternateSubset = instructionGlyphs.contains {
+        $0.fontResource != instructionRun.fontResource
+      }
+      if !usesAlternateSubset {
+        // Keep the established writer byte shape for ordinary same-subset
+        // edits. Only split TJ operations when a glyph actually needs the
+        // alternate subset resource.
+        var output = Array("[".utf8)
+        var pagePen = transform[4]
+        for glyph in instructionGlyphs {
+          guard glyph.fontResource == instructionRun.fontResource,
+            let codes = instructionFont.encode(glyph.text), codes == glyph.codes,
+            let decoded = instructionFont.glyphs(codes), decoded.count == 1,
+            decoded[0].text == glyph.text
+          else { return nil }
+          let adjustment = (pagePen - glyph.x) * 1_000 / denominator
+          guard adjustment.isFinite, abs(adjustment) <= 1_000_000 else { return nil }
+          if abs(adjustment) > 1e-9 {
+            output += Array("\(AnnotationSupport.number(adjustment)) ".utf8)
+          }
+          output += ReplaceTextCommand.literalStringBytes(codes)
+
+          let sourceTextAdvance: Double
+          if let measured = instructionFont.advance(
+            of: codes, fontSize: instructionRun.fontSize,
+            charSpacing: instructionRun.charSpacing, wordSpacing: instructionRun.wordSpacing,
+            horizontalScale: instructionRun.horizontalScale), measured.isFinite {
+            sourceTextAdvance = measured
+          } else {
+            guard mayUseInstructionStandardMetrics, let instructionStandardFont,
+              let measured = Self.standardAdvance(
+                glyph.text, font: instructionStandardFont, size: instructionRun.fontSize,
+                charSpacing: instructionRun.charSpacing, wordSpacing: instructionRun.wordSpacing,
+                horizontalScale: instructionRun.horizontalScale), measured.isFinite
+            else { return nil }
+            sourceTextAdvance = measured
+          }
+          pagePen = glyph.x + sourceTextAdvance * transform[0]
+        }
+        let oldEndX = transform[4] + oldAdvance * transform[0]
+        let trailingAdjustment = (pagePen - oldEndX) * 1_000 / denominator
+        guard trailingAdjustment.isFinite, abs(trailingAdjustment) <= 1_000_000 else {
+          return nil
+        }
+        if abs(trailingAdjustment) > 1e-9 {
+          output += Array(" \(AnnotationSupport.number(trailingAdjustment))".utf8)
+        }
+        output += Array("] TJ".utf8)
+        replacements.append((TextStyleSupport.fullSpan(of: instruction), output))
+        continue
+      }
+      var output: [UInt8] = []
+      var pagePen = transform[4]
+      var outputFontResource = instructionRun.fontResource
       for glyph in instructionGlyphs {
-        guard glyph.text.unicodeScalars.count == 1,
-          let codes = instructionFont.encode(glyph.text),
-          let decoded = instructionFont.glyphs(codes), decoded.count == 1,
+        guard let outputFont = availablePageFonts[glyph.fontResource],
+          PageTextLineWriter.normalizedEmbeddedFace(outputFont.baseFont)
+            == PageTextLineWriter.normalizedEmbeddedFace(instructionFont.baseFont),
+          let decoded = outputFont.glyphs(glyph.codes), decoded.count == 1,
           decoded[0].text == glyph.text
         else { return nil }
-        glyphCodes.append(codes)
-      }
-      var output = Array("[".utf8)
-      var pagePen = transform[4]
-      for (glyphIndex, glyph) in instructionGlyphs.enumerated() {
+        if outputFontResource != glyph.fontResource {
+          output += try PDFWriter.serializedValue(.name(glyph.fontResource))
+          output += Array(" \(AnnotationSupport.number(instructionRun.fontSize)) Tf\n".utf8)
+          outputFontResource = glyph.fontResource
+        }
         let adjustment = (pagePen - glyph.x) * 1_000 / denominator
         guard adjustment.isFinite, abs(adjustment) <= 1_000_000 else { return nil }
+        output += Array("[".utf8)
         if abs(adjustment) > 1e-9 {
           output += Array("\(AnnotationSupport.number(adjustment)) ".utf8)
         }
-        let codes = glyphCodes[glyphIndex]
-        output += ReplaceTextCommand.literalStringBytes(codes)
+        output += ReplaceTextCommand.literalStringBytes(glyph.codes)
+        output += Array("] TJ\n".utf8)
 
         let sourceTextAdvance: Double
-        if let measured = instructionFont.advance(
-            of: codes, fontSize: instructionRun.fontSize,
+        if let measured = outputFont.advance(
+          of: glyph.codes, fontSize: instructionRun.fontSize,
             charSpacing: instructionRun.charSpacing, wordSpacing: instructionRun.wordSpacing,
             horizontalScale: instructionRun.horizontalScale), measured.isFinite {
           sourceTextAdvance = measured
         } else {
-          guard glyph.text.unicodeScalars.count == 1,
-            mayUseInstructionStandardMetrics, let instructionStandardFont,
+          guard mayUseInstructionStandardMetrics, let instructionStandardFont,
             let measured = Self.standardAdvance(
               glyph.text, font: instructionStandardFont, size: instructionRun.fontSize,
               charSpacing: instructionRun.charSpacing, wordSpacing: instructionRun.wordSpacing,
@@ -1776,9 +1921,12 @@ public struct RewritePageTextCommand: PDFEditCommand, Equatable, Sendable {
         return nil
       }
       if abs(trailingAdjustment) > 1e-9 {
-        output += Array(" \(AnnotationSupport.number(trailingAdjustment))".utf8)
+        output += Array("[\(AnnotationSupport.number(trailingAdjustment))] TJ\n".utf8)
       }
-      output += Array("] TJ".utf8)
+      if outputFontResource != instructionRun.fontResource {
+        output += try PDFWriter.serializedValue(.name(instructionRun.fontResource))
+        output += Array(" \(AnnotationSupport.number(instructionRun.fontSize)) Tf\n".utf8)
+      }
       replacements.append((TextStyleSupport.fullSpan(of: instruction), output))
     }
     return replacements

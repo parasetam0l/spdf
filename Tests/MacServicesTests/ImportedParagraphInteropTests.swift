@@ -1316,6 +1316,39 @@ struct ImportedParagraphInteropTests {
     #expect(issue("ABC") == nil)
   }
 
+  @Test @MainActor func clippingAcceptsMissingGlyphFromCompatibleParagraphSubset() throws {
+    let (graph, pageID) = try fixture(composite: true)
+    let paragraph = try #require(targets(graph, pageID: pageID)
+      .first { $0.paragraph != nil }?.paragraph)
+    let source = try #require(paragraph.fontProfiles.values.first)
+    let sourceGlyph = try #require(source.glyphs["C"])
+    var fallbackGlyphs = source.glyphs
+    fallbackGlyphs["ı"] = .init(id: sourceGlyph.id, width: sourceGlyph.width,
+      codes: sourceGlyph.codes)
+    let fallbackResource = PDFName("F2")
+    let fallback = PageTextFontProfile(
+      source: .init(resource: fallbackResource, name: "UVWXYZ+DejaVuSans"),
+      program: source.program, glyphs: fallbackGlyphs)
+    var profiles = paragraph.fontProfiles
+    profiles[fallbackResource] = fallback
+
+    let format = try #require(paragraph.fragments.first?.format)
+    let line = PageTextLine(text: "ABCı", x: 42, baseline: 700,
+      segments: [.init(text: "ABCı", x: 42, format: format)])
+    let clip = [40.0, 672, 320, 714]
+    #expect(NativeParagraphEditing.clippingIssue(lines: [line], clippingRect: clip,
+      profiles: profiles) == nil)
+    #expect(NativeParagraphEditing.clippingIssue(lines: [line], clippingRect: clip,
+      profiles: paragraph.fontProfiles) != nil)
+
+    let wrongFace = PageTextFontProfile(
+      source: .init(resource: fallbackResource, name: "ABCDEF+OtherFace"),
+      program: source.program, glyphs: fallbackGlyphs)
+    profiles[fallbackResource] = wrongFace
+    #expect(NativeParagraphEditing.clippingIssue(lines: [line], clippingRect: clip,
+      profiles: profiles) != nil)
+  }
+
   @Test @MainActor func separateSymbolMarkersKeepWrappedItemsApart() throws {
     var (graph, pageID) = try fixture(composite: false)
     guard case .dictionary(var page)? = graph.objects[pageID],
