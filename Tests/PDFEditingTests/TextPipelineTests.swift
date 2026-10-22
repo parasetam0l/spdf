@@ -188,9 +188,34 @@ struct TextPipelineTests {
   // MARK: - P16-006 structure order
 
   @Test func structureTreeOrderGovernsTaggedPages() throws {
-    let (_, graph, pageID) = try pageLayout(PDFFixtures.taggedPages())
+    let (_, parsedGraph, pageID) = try pageLayout(PDFFixtures.taggedPages())
+    var graph = parsedGraph
+    // A nested inline span is represented both inside its parent and in the
+    // inventory's flattened element list. Reading order must visit it once.
+    guard case .dictionary(var paragraphStruct)? = graph.objects[PDFObjectID(22)],
+      case .dictionary(var parentTree)? = graph.objects[PDFObjectID(25)],
+      case .array(var numberTreeEntries)? = parentTree[PDFName("Nums")],
+      numberTreeEntries.count > 1,
+      case .array(var pageParents) = numberTreeEntries[1]
+    else { throw CocoaError(.fileReadCorruptFile) }
+    paragraphStruct[PDFName("K")] = .reference(PDFObjectID(60))
+    graph.objects[PDFObjectID(22)] = .dictionary(paragraphStruct)
+    graph.objects[PDFObjectID(60)] = .dictionary([
+      PDFName("Type"): .name(PDFName("StructElem")),
+      PDFName("S"): .name(PDFName("Span")),
+      PDFName("P"): .reference(PDFObjectID(22)),
+      PDFName("Pg"): .reference(PDFObjectID(3)),
+      PDFName("K"): .integer(1),
+    ])
+    pageParents[1] = .reference(PDFObjectID(60))
+    numberTreeEntries[1] = .array(pageParents)
+    parentTree[PDFName("Nums")] = .array(numberTreeEntries)
+    graph.objects[PDFObjectID(25)] = .dictionary(parentTree)
+
     let order = try TextReadingOrder.orderedClusterIndices(pageID: pageID, in: graph)
     let layout = try PageTextLayout.build(pageID: pageID, in: graph)
+    #expect(TextReadingOrder.structureClusterOrder(
+      pageID: pageID, layout: layout, in: graph, limits: PDFLimits()) != nil)
     #expect(order.count == layout.clusters.count)
     #expect(Set(order) == Set(layout.clusters.indices))
     // The heading (MCID 0) reads before the paragraph (MCID 1).
@@ -209,6 +234,19 @@ struct TextPipelineTests {
     #expect(
       try TextReadingOrder.orderedClusterIndices(pageID: plainID, in: plainGraph)
         == Array(plainLayout.clusters.indices))
+
+    var duplicateMCIDGraph = graph
+    guard case .dictionary(var duplicateParagraph)? = duplicateMCIDGraph.objects[PDFObjectID(22)] else {
+      throw CocoaError(.fileReadCorruptFile)
+    }
+    duplicateParagraph[PDFName("K")] = .array([
+      .reference(PDFObjectID(60)), .integer(1),
+    ])
+    duplicateMCIDGraph.objects[PDFObjectID(22)] = .dictionary(duplicateParagraph)
+    let duplicateLayout = try PageTextLayout.build(pageID: pageID, in: duplicateMCIDGraph)
+    #expect(TextReadingOrder.structureClusterOrder(
+      pageID: pageID, layout: duplicateLayout, in: duplicateMCIDGraph,
+      limits: PDFLimits()) == nil)
   }
 
   // MARK: - P16-022 artifact exclusion

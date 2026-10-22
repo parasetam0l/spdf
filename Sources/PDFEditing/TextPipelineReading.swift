@@ -62,10 +62,20 @@ public enum TextReadingOrder {
       }
     }
     guard let pageIndex = pageIDs.firstIndex(of: pageID) else { return nil }
-    for element in inventory.elements {
+    // PDFStructureInventory.elements is a flattened index that also retains
+    // nested children. Walk only root children here so each MCID enters the
+    // reading-order sequence once.
+    for element in inventory.elements where element.parentObjectID == inventory.rootObjectID {
       for child in element.children { collect(child, pageIndex: pageIndex) }
     }
     guard !mcidSequence.isEmpty else { return nil }
+    var rank: [Int: Int] = [:]
+    for mcid in mcidSequence {
+      // Repeated structure-tree references to one MCID make its reading order
+      // ambiguous. Treat that as unavailable instead of trapping or guessing.
+      guard rank[mcid] == nil else { return nil }
+      rank[mcid] = rank.count
+    }
     var mcidByRun: [Int: Int] = [:]
     for (index, run) in runs.enumerated() {
       for range in ranges {
@@ -76,7 +86,6 @@ public enum TextReadingOrder {
       }
     }
     guard !mcidByRun.isEmpty else { return nil }
-    let rank = Dictionary(uniqueKeysWithValues: mcidSequence.enumerated().map { ($1, $0) })
     // Stable sort: MCID rank first, geometric index breaks ties and orders
     // untagged clusters after tagged ones.
     return layout.clusters.indices.sorted { lhs, rhs in

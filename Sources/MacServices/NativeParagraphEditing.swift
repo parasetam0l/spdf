@@ -11,6 +11,9 @@ public struct PageTextParagraph: Sendable, Equatable {
   public let standardFontAdvances: [Int: Double]
   public let fragments: [PageTextFragment]
   public let wraps: Bool
+  /// Scalar counts assigned to each source run after accounting for visual
+  /// word spaces inferred between adjacent PDF text runs.
+  public var sourceRunOutputCounts: [Int: Int] = [:]
   public var fontProfiles: [PDFName: PageTextFontProfile] = [:]
   /// Fixed page-space bounds from the actual PDF clipping operators.
   public var clippingRect: [Double]? = nil
@@ -443,6 +446,7 @@ public enum NativeParagraphEditing {
     struct Line {
       var spans: [Span]
       var fragments: [PageTextFragment] = []
+      var syntheticSeparatorsAfter: [Int] = []
       var leadingAdvance: Double = 0
       var x: Double { spans[0].x + leadingAdvance }
       var y: Double { spans[0].source.baseline }
@@ -603,6 +607,7 @@ public enum NativeParagraphEditing {
       let tracking = spans.allSatisfy { $0.source.text.count == 1 }
         && wordGaps.filter { $0 }.count >= 2 && wordGaps.filter { $0 }.count * 2 >= gaps.count
       var fragments: [PageTextFragment] = []
+      var syntheticSeparatorsAfter: [Int] = []
       for (index, span) in spans.enumerated() {
         var pieces = span.fragments
         if index < gaps.count, let last = pieces.popLast() {
@@ -613,8 +618,10 @@ public enum NativeParagraphEditing {
               format.characterSpacing = gaps[index] - width
               if abs(format.characterSpacing) < 1e-6 { format.characterSpacing = 0 }
               pieces.append(.init(text: " ", format: format))
+              syntheticSeparatorsAfter.append(span.source.index)
             } else if let format = inferredSpaceFormat(last.format, gap: gaps[index]) {
               pieces.append(.init(text: " ", format: format))
+              syntheticSeparatorsAfter.append(span.source.index)
             } else {
               var format = last.format
               if abs(gaps[index]) > 1e-6 { format.characterSpacing += gaps[index] }
@@ -640,6 +647,7 @@ public enum NativeParagraphEditing {
       }
       lines[index].leadingAdvance = leading
       lines[index].fragments = fragments
+      lines[index].syntheticSeparatorsAfter = syntheticSeparatorsAfter
     }
     var result: [PageTextTarget] = []
     var consumed = Set<Int>()
@@ -692,10 +700,10 @@ public enum NativeParagraphEditing {
           [span.source.index] + span.block.runIndices
         })).sorted()
         // Nearby same-style show fragments can make one ordinary line. On
-        // tagged pages, only expose the combined target when its reading
-        // order can stay in one marked-content scope.
+        // tagged pages, only expose the combined target when the rewrite can
+        // preserve the source MCID assignments and structure-tree order.
         let canJoinFragments = all.count > 1
-          && validator.canKeepSingleMarkedContentScope(runIndices: candidateRuns)
+          && validator.canPreserveMarkedContentOrder(runIndices: candidateRuns)
         guard formats.contains(where: {
           $0.sourceFont != nil || $0 != initial || $0.characterSpacing != 0
         }) || all.contains(where: {
@@ -742,6 +750,16 @@ public enum NativeParagraphEditing {
               return nil
             }
             original[index] = text
+          }
+        }
+        var sourceRunOutputCounts = original.mapValues { $0.unicodeScalars.count }
+        for line in members {
+          for runIndex in line.syntheticSeparatorsAfter {
+            guard sourceRunOutputCounts[runIndex] != nil else {
+              diagnostic?("unmapped-inferred-separator: source run \(runIndex) in \(String(label.prefix(100)))")
+              return nil
+            }
+            sourceRunOutputCounts[runIndex, default: 0] += 1
           }
         }
         var advances: [Int: Double] = [:]
@@ -800,7 +818,9 @@ public enum NativeParagraphEditing {
           style: .init(fontFamily: initial.fontName, fontSize: initial.size, fillColor: initial.color),
           runIndices: runIndices, paragraph: .init(originalText: original,
             lineSpacing: spacing, firstBaseline: first.y, standardFontAdvances: advances,
-            fragments: fragments, wraps: members.count > 1, fontProfiles: profiles, clippingRect: clippingRect))
+            fragments: fragments, wraps: members.count > 1,
+            sourceRunOutputCounts: sourceRunOutputCounts,
+            fontProfiles: profiles, clippingRect: clippingRect))
       }
       // A short final line may be followed immediately by a new paragraph.
       // Find the longest prefix that actually reproduces the source wrapping;

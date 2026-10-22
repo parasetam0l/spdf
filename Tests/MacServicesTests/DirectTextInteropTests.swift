@@ -230,13 +230,11 @@ struct DirectTextInteropTests {
     #expect(serializedContent.contains("Independent neighbor"))
   }
 
-  @Test @MainActor func taggedParagraphRewriteRefusesToMergeSeparateMCIDs() throws {
-    let firstText = "Original "
-    let secondText = "phrase"
-    let firstAdvance = try #require(
-      NativeParagraphEditing.standardAdvance(firstText, family: "Helvetica", size: 16))
-    let secondAdvance = try #require(
-      NativeParagraphEditing.standardAdvance(secondText, family: "Helvetica", size: 16))
+  @Test @MainActor func taggedParagraphRewriteKeepsMultilineMCIDBoundaries() throws {
+    let firstText = "Original paragraph keeps several ordinary words "
+    let secondText = "across two separate lines"
+    let editedFirst = String(firstText.reversed())
+    let editedSecond = String(secondText.reversed())
     let parsed = try PDFParser.parse(PDFFixtures.taggedPages())
     let pageID = try #require(parsed.pageIDs.first)
     var original = parsed.graph
@@ -248,12 +246,13 @@ struct DirectTextInteropTests {
       case .reference(let fontID)? = fonts[PDFName("F1")]
     else { throw CocoaError(.fileReadCorruptFile) }
     original.objects[contentID] = .stream(PDFStream(bytes: Data("""
-      /P <</MCID 0>> BDC
+      /P <</MCID 1>> BDC
       BT /F1 16 Tf 42 700 Td (\(firstText)) Tj ET
       EMC
-      /P <</MCID 1>> BDC
-      BT /F1 16 Tf \(42 + firstAdvance) 700 Td (\(secondText)) Tj ET
+      /P <</MCID 3>> BDC
+      BT /F2 16 Tf 42 680 Td (\(secondText)) Tj ET
       EMC
+      BT /F1 12 Tf 42 640 Td (Independent neighbor) Tj ET
       """.utf8)))
     original.objects[fontID] = .dictionary([
       PDFName("Type"): .name(PDFName("Font")),
@@ -261,14 +260,186 @@ struct DirectTextInteropTests {
       PDFName("BaseFont"): .name(PDFName("Helvetica")),
       PDFName("Encoding"): .name(PDFName("WinAnsiEncoding")),
     ])
+    var updatedPage = page
+    var updatedResources = resources
+    var updatedFonts = fonts
+    updatedFonts[PDFName("F2")] = .reference(fontID)
+    updatedResources[PDFName("Font")] = .dictionary(updatedFonts)
+    updatedPage[PDFName("Resources")] = .dictionary(updatedResources)
+    original.objects[pageID] = .dictionary(updatedPage)
+    original.objects[PDFObjectID(22)] = .dictionary([
+      PDFName("Type"): .name(PDFName("StructElem")),
+      PDFName("S"): .name(PDFName("P")),
+      PDFName("P"): .reference(PDFObjectID(20)),
+      PDFName("Pg"): .reference(PDFObjectID(3)),
+      PDFName("C"): .name(PDFName("Body")),
+      PDFName("K"): .array([.integer(1), .integer(3)]),
+    ])
+    original.objects[PDFObjectID(25)] = .dictionary([
+      PDFName("Nums"): .array([
+        .integer(0), .array([
+          .reference(PDFObjectID(21)), .reference(PDFObjectID(22)),
+          .reference(PDFObjectID(23)), .reference(PDFObjectID(22)),
+        ]),
+        .integer(1), .reference(PDFObjectID(24)),
+        .integer(2), .reference(PDFObjectID(42)),
+      ])
+    ])
+    let firstAdvance = try #require(
+      NativeParagraphEditing.standardAdvance(firstText, family: "Helvetica", size: 16))
+    let secondAdvance = try #require(
+      NativeParagraphEditing.standardAdvance(secondText, family: "Helvetica", size: 16))
     let command = RewritePageTextCommand(
-      pageID: pageID, originalText: [0: firstText, 1: secondText],
-      lines: [.init(text: "Replacement phrase", x: 42, baseline: 700)],
+      pageID: pageID, originalText: [0: firstText, 1: secondText], lines: [
+        .init(text: editedFirst, x: 42, baseline: 700),
+        .init(text: editedSecond, x: 42, baseline: 680),
+      ],
       fontSize: 16, color: [0, 0, 0],
       standardFontAdvances: [0: firstAdvance, 1: secondAdvance])
     let validator = try PageTextRewriteValidator(pageID: pageID, in: original)
-    #expect(!validator.canKeepSingleMarkedContentScope(runIndices: [0, 1]))
-    #expect(throws: PDFError.self) { try command.validate(in: original) }
+    #expect(validator.canPreserveMarkedContentOrder(runIndices: [0, 1]))
+    let sourceDocument = try #require(PDFDocument(data: PDFWriter.write(original)))
+    let sourcePage = try #require(sourceDocument.page(at: 0))
+    let blocks = try PageTextEditing.blocks(pageID: pageID, in: original)
+    let targets = NativeParagraphEditing.targets(
+      from: blocks, pageID: pageID, graph: original, page: sourcePage, pageIndex: 0)
+    #expect(targets.contains {
+      $0.paragraph?.originalText == [0: firstText, 1: secondText]
+    })
+    try command.validate(in: original)
+    let edited = try PDFEditingEngine.commit(PDFTransaction([command]), to: original)
+    let reopened = try PDFParser.parse(PDFWriter.write(edited))
+    let reopenedPageID = try #require(reopened.pageIDs.first)
+    let inventory = try PDFStructureInspector.inspect(in: reopened.graph, pageIDs: reopened.pageIDs)
+    let paragraph = try #require(inventory.elements.first { $0.objectID == PDFObjectID(22) })
+    #expect(try PDFStructureText.text(
+      of: paragraph, pageIDs: reopened.pageIDs, in: reopened.graph)
+      == "\(editedFirst)\n\(editedSecond)")
+    let document = try #require(PDFDocument(data: PDFWriter.write(edited)))
+    #expect(try #require(document.page(at: 0)?.string).contains("Independent neighbor"))
+    #expect(inventory.pageMCIDs[0].contains(1))
+    #expect(inventory.pageMCIDs[0].contains(3))
+    let rewrittenRuns = try PageTextEditing.sourceRuns(pageID: reopenedPageID, in: reopened.graph)
+    #expect(rewrittenRuns.prefix(editedFirst.count + editedSecond.count)
+      .map(\.text).joined() == editedFirst + editedSecond)
+
+    var reordered = original
+    guard case .dictionary(var paragraphElement)? = reordered.objects[PDFObjectID(22)] else {
+      throw CocoaError(.fileReadCorruptFile)
+    }
+    paragraphElement[PDFName("K")] = .array([.integer(3), .integer(1)])
+    reordered.objects[PDFObjectID(22)] = .dictionary(paragraphElement)
+    let reorderedValidator = try PageTextRewriteValidator(pageID: pageID, in: reordered)
+    #expect(!reorderedValidator.canPreserveMarkedContentOrder(runIndices: [0, 1]))
+    #expect(throws: PDFError.self) { try command.validate(in: reordered) }
+  }
+
+  @Test @MainActor func taggedSingleLineRewriteKeepsFinalSourceWhitespace() throws {
+    let firstText = "Original"
+    let secondText = "phrase "
+    let parsed = try PDFParser.parse(PDFFixtures.taggedPages())
+    let pageID = try #require(parsed.pageIDs.first)
+    var graph = parsed.graph
+    guard case .dictionary(let page)? = graph.objects[pageID],
+      case .reference(let contentID)? = page[PDFName("Contents")],
+      case .dictionary(let resources)? = page[PDFName("Resources")],
+      case .dictionary(let fonts)? = resources[PDFName("Font")],
+      case .reference(let fontID)? = fonts[PDFName("F1")]
+    else { throw CocoaError(.fileReadCorruptFile) }
+
+    let firstAdvance = try #require(
+      NativeParagraphEditing.standardAdvance(firstText, family: "Helvetica", size: 16))
+    let spaceAdvance = try #require(
+      NativeParagraphEditing.standardAdvance(" ", family: "Helvetica", size: 16))
+    var updatedPage = page
+    var updatedResources = resources
+    var updatedFonts = fonts
+    updatedFonts[PDFName("F2")] = .reference(fontID)
+    updatedResources[PDFName("Font")] = .dictionary(updatedFonts)
+    updatedPage[PDFName("Resources")] = .dictionary(updatedResources)
+    graph.objects[pageID] = .dictionary(updatedPage)
+    graph.objects[fontID] = .dictionary([
+      PDFName("Type"): .name(PDFName("Font")),
+      PDFName("Subtype"): .name(PDFName("Type1")),
+      PDFName("BaseFont"): .name(PDFName("Helvetica")),
+      PDFName("Encoding"): .name(PDFName("WinAnsiEncoding")),
+    ])
+    graph.objects[contentID] = .stream(PDFStream(bytes: Data("""
+      /P <</MCID 1>> BDC
+      BT /F1 16 Tf 42 700 Td (\(firstText)) Tj ET
+      EMC
+      /P <</MCID 3>> BDC
+      BT /F2 16 Tf 1 0 0 1 \(42 + firstAdvance + spaceAdvance) 700 Tm (\(secondText)) Tj ET
+      EMC
+      """.utf8)))
+
+    guard case .dictionary(var paragraphElement)? = graph.objects[PDFObjectID(22)],
+      case .dictionary(var parentTree)? = graph.objects[PDFObjectID(25)],
+      case .array(var numberTreeEntries)? = parentTree[PDFName("Nums")],
+      numberTreeEntries.count > 1,
+      case .array(var pageParents) = numberTreeEntries[1],
+      pageParents.indices.contains(1)
+    else { throw CocoaError(.fileReadCorruptFile) }
+    paragraphElement[PDFName("K")] = .array([.integer(1), .integer(3)])
+    graph.objects[PDFObjectID(22)] = .dictionary(paragraphElement)
+    pageParents[1] = .reference(PDFObjectID(22))
+    numberTreeEntries[1] = .array(pageParents)
+    parentTree[PDFName("Nums")] = .array(numberTreeEntries)
+    graph.objects[PDFObjectID(25)] = .dictionary(parentTree)
+
+    let sourceRuns = try PageTextEditing.sourceRuns(pageID: pageID, in: graph)
+    #expect(sourceRuns.prefix(2).map(\.text) == [firstText, secondText])
+    let sourceDocument = try #require(PDFDocument(data: PDFWriter.write(graph)))
+    let sourcePage = try #require(sourceDocument.page(at: 0))
+    let blocks = try PageTextEditing.blocks(pageID: pageID, in: graph)
+    let targets = NativeParagraphEditing.targets(
+      from: blocks, pageID: pageID, graph: graph, page: sourcePage, pageIndex: 0)
+    let target = try #require(targets.first { $0.paragraph != nil && $0.text == "Original phrase" })
+    let targetParagraph = try #require(target.paragraph)
+    #expect(targetParagraph.sourceRunOutputCounts == [0: firstText.count + 1, 1: secondText.count])
+    let command = RewritePageTextCommand(
+      pageID: pageID, originalText: targetParagraph.originalText,
+      lines: [.init(text: "Reworded phrase", x: 42, baseline: 700)],
+      fontSize: 16, color: [0, 0, 0],
+      standardFontAdvances: targetParagraph.standardFontAdvances,
+      sourceRunOutputCounts: targetParagraph.sourceRunOutputCounts)
+    try command.validate(in: graph)
+    let edited = try PDFEditingEngine.commit(PDFTransaction([command]), to: graph)
+    let reopened = try PDFParser.parse(PDFWriter.write(edited))
+    let reopenedPageID = try #require(reopened.pageIDs.first)
+    let rewrittenRuns = try PageTextEditing.sourceRuns(pageID: reopenedPageID, in: reopened.graph)
+    #expect(rewrittenRuns.map(\.text).joined() == "Reworded phrase ")
+  }
+
+  @Test @MainActor func taggedPartialTJInstructionIsRefused() throws {
+    let parsed = try PDFParser.parse(PDFFixtures.taggedPages())
+    let pageID = try #require(parsed.pageIDs.first)
+    var graph = parsed.graph
+    guard case .dictionary(let page)? = graph.objects[pageID],
+      case .reference(let contentID)? = page[PDFName("Contents")],
+      case .dictionary(let resources)? = page[PDFName("Resources")],
+      case .dictionary(let fonts)? = resources[PDFName("Font")],
+      case .reference(let fontID)? = fonts[PDFName("F1")]
+    else { throw CocoaError(.fileReadCorruptFile) }
+    graph.objects[fontID] = .dictionary([
+      PDFName("Type"): .name(PDFName("Font")),
+      PDFName("Subtype"): .name(PDFName("Type1")),
+      PDFName("BaseFont"): .name(PDFName("Helvetica")),
+      PDFName("Encoding"): .name(PDFName("WinAnsiEncoding")),
+    ])
+    graph.objects[contentID] = .stream(PDFStream(bytes: Data("""
+      /P <</MCID 1>> BDC
+      BT /F1 16 Tf 42 700 Td [(Kept ) (neighbor)] TJ ET
+      EMC
+      """.utf8)))
+    let runs = try PageTextEditing.sourceRuns(pageID: pageID, in: graph)
+    #expect(runs.prefix(2).map(\.text) == ["Kept ", "neighbor"])
+    let first = try #require(runs.first)
+    let command = RewritePageTextCommand(
+      pageID: pageID, originalText: [first.index: first.text],
+      lines: [.init(text: "Edited", x: first.x, baseline: first.baseline)],
+      fontSize: first.format.size, color: first.format.color)
+    #expect(throws: PDFError.self) { try command.validate(in: graph) }
   }
 
   @Test @MainActor func paragraphRewriteRefusesStaleGlyphAndUnsupportedClippingState() throws {

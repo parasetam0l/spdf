@@ -303,7 +303,7 @@ public enum PDFStructureInspector {
         classNames = values.compactMap { name($0) }
       }
       let elementPageIndex = pageIndex(for: dictionary[PDFName("Pg")]) ?? inheritedPageIndex
-      if let pageReference = dictionary[PDFName("Pg")], elementPageIndex == nil {
+      if dictionary[PDFName("Pg")] != nil, elementPageIndex == nil {
         issues.append(
           PDFStructureIssue(
             kind: .orphanedElement, objectID: objectID, pageIndex: nil,
@@ -386,14 +386,19 @@ public enum PDFStructureInspector {
     }
 
     if let rootObjectID, case .dictionary(let root)? = graph.objects[rootObjectID] {
-      func walk(_ value: PDFValue, depth: Int, ancestors: Set<PDFObjectID>) {
+      func walk(
+        _ value: PDFValue, parentObjectID: PDFObjectID?, depth: Int,
+        ancestors: Set<PDFObjectID>
+      ) {
         guard depth <= limits.nesting else { return }
         switch value {
         case .array(let values):
-          for value in values { walk(value, depth: depth + 1, ancestors: ancestors) }
+          for value in values {
+            walk(value, parentObjectID: parentObjectID, depth: depth + 1, ancestors: ancestors)
+          }
         case .reference, .dictionary:
           guard let element = parseElement(
-            value: value, parentObjectID: rootObjectID, inheritedPageIndex: nil, depth: depth,
+            value: value, parentObjectID: parentObjectID, inheritedPageIndex: nil, depth: depth,
             ancestors: ancestors)
           else { return }
           elements.append(element)
@@ -402,7 +407,8 @@ public enum PDFStructureInspector {
           for child in element.children {
             if case .element(let nested) = child {
               walk(
-                .reference(nested.objectID ?? PDFObjectID(0)), depth: depth + 1,
+                .reference(nested.objectID ?? PDFObjectID(0)),
+                parentObjectID: element.objectID ?? parentObjectID, depth: depth + 1,
                 ancestors: childAncestors)
             }
           }
@@ -412,9 +418,11 @@ public enum PDFStructureInspector {
       }
       switch root[PDFName("K")] {
       case .array(let values)?:
-        for value in values { walk(value, depth: 0, ancestors: []) }
+        for value in values {
+          walk(value, parentObjectID: rootObjectID, depth: 0, ancestors: [])
+        }
       case let value?:
-        walk(value, depth: 0, ancestors: [])
+        walk(value, parentObjectID: rootObjectID, depth: 0, ancestors: [])
       default:
         break
       }

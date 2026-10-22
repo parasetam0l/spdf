@@ -44,9 +44,9 @@ public struct PageTextRewriteValidator {
     try analysis.clippingRect(for: runIndices)
   }
 
-  /// Whether a contiguous selection can remain in one marked-content scope
-  /// when the tagged paragraph writer replaces its source text in place.
-  public func canKeepSingleMarkedContentScope(runIndices: [Int]) -> Bool {
+  /// Whether a contiguous selection can be rewritten without moving text
+  /// between its original marked-content items or changing tagged reading order.
+  public func canPreserveMarkedContentOrder(runIndices: [Int]) -> Bool {
     let selected = runIndices.sorted()
     guard !selected.isEmpty, Set(selected).count == selected.count,
       let lower = selected.first, let upper = selected.last,
@@ -55,22 +55,15 @@ public struct PageTextRewriteValidator {
     guard case .dictionary(let page)? = graph.objects[pageID],
       page[PDFName("StructParents")] != nil else { return true }
     let instructions = Set(selected.map { analysis.runs[$0].instructionIndex })
-    var stack: [Int] = []
-    var scopes: [Int: [Int]] = [:]
-    for (index, instruction) in analysis.content.instructions.enumerated() {
-      if instructions.contains(index) { scopes[index] = stack }
-      switch instruction.operatorName {
-      case "BMC", "BDC": stack.append(index)
-      case "EMC":
-        guard !stack.isEmpty else { return false }
-        stack.removeLast()
-      default: break
-      }
+    let ranges = StructureTaggingAssistant.markedRanges(in: analysis.content)
+    for instruction in instructions {
+      let mcids = ranges.filter { $0.instructions.contains(instruction) }.compactMap(\.mcid)
+      guard mcids.count == 1 else { return false }
     }
-    guard stack.isEmpty, let first = instructions.min(), let expected = scopes[first] else {
-      return false
-    }
-    return instructions.allSatisfy { scopes[$0] == expected }
+    let selectedSet = Set(selected)
+    guard let structureRunOrder = analysis.taggedStructureRunOrder else { return false }
+    let selectedStructureOrder = structureRunOrder.filter(selectedSet.contains)
+    return selectedStructureOrder == selected
   }
 
   public func validate(originalText: [Int: String], fontSize: Double, color: [Double],
@@ -96,6 +89,7 @@ fileprivate struct ParagraphRewriteAnalysis {
   let instructionIssues: [Int: String]
   let instructionRuns: [Int: [Int]]
   let clips: [Int: [Double]]
+  let taggedStructureRunOrder: [Int]?
 
   func clippingRect(for indices: [Int]) throws -> [Double]? {
     guard let first = indices.first, runs.indices.contains(first) else {
@@ -388,6 +382,36 @@ fileprivate struct ParagraphRewriteAnalysis {
     }
     let allRuns = try TextRunIndexer.runs(in: content, graph: graph)
     runs = allRuns
+    let tagged: Bool
+    if case .dictionary(let page)? = graph.objects[pageID] {
+      tagged = page[PDFName("StructParents")] != nil
+    } else {
+      tagged = false
+    }
+    if tagged, let layout = try? PageTextLayout.build(in: content, graph: graph),
+      let clusterOrder = TextReadingOrder.structureClusterOrder(
+        pageID: pageID, layout: layout, in: graph, limits: PDFLimits())
+    {
+      var order: [Int] = []
+      var seen = Set<Int>()
+      var valid = true
+      for clusterIndex in clusterOrder {
+        guard layout.clusters.indices.contains(clusterIndex) else {
+          valid = false
+          break
+        }
+        let runIndex = layout.clusters[clusterIndex].runIndex
+        if seen.insert(runIndex).inserted {
+          order.append(runIndex)
+        } else if order.last != runIndex {
+          valid = false
+          break
+        }
+      }
+      taggedStructureRunOrder = valid ? order : nil
+    } else {
+      taggedStructureRunOrder = nil
+    }
     var resolved: [PDFName: IndexedTextFont] = [:]
     for resource in Set(runs.map(\.fontResource)) {
       resolved[resource] = IndexedTextFont.resolve(resource: resource, page: page, in: graph)
@@ -407,7 +431,7 @@ fileprivate struct ParagraphRewriteAnalysis {
 /// the pen position seen by all following, unedited text.
 public struct RewritePageTextCommand: PDFEditCommand, Equatable, Sendable {
   private static let taggedRewriteRefusal =
-    "This tagged paragraph needs a same-style, single-line edit within one marked-content block to preserve its reading order."
+    "This tagged paragraph needs a supported same-style line layout with preserved marked-content boundaries and reading order."
 
   public let pageID: PDFObjectID
   public let originalText: [Int: String]
@@ -417,11 +441,15 @@ public struct RewritePageTextCommand: PDFEditCommand, Equatable, Sendable {
   /// Standard-14 fonts can omit /Widths. The platform supplies unshaped
   /// advances only for those fonts; other missing metrics are refused.
   public let standardFontAdvances: [Int: Double]
+  /// Output scalar counts can exceed a source run's text when paragraph
+  /// discovery inserted a visual word separator at that run boundary.
+  public let sourceRunOutputCounts: [Int: Int]
   public let box: PageTextBox?
 
   public init(
     pageID: PDFObjectID, originalText: [Int: String], lines: [PageTextLine],
-    fontSize: Double, color: [Double], standardFontAdvances: [Int: Double] = [:], box: PageTextBox? = nil
+    fontSize: Double, color: [Double], standardFontAdvances: [Int: Double] = [:],
+    sourceRunOutputCounts: [Int: Int] = [:], box: PageTextBox? = nil
   ) {
     self.pageID = pageID
     self.originalText = originalText
@@ -429,6 +457,7 @@ public struct RewritePageTextCommand: PDFEditCommand, Equatable, Sendable {
     self.fontSize = fontSize
     self.color = color
     self.standardFontAdvances = standardFontAdvances
+    self.sourceRunOutputCounts = sourceRunOutputCounts
     self.box = box
   }
 
@@ -466,6 +495,17 @@ public struct RewritePageTextCommand: PDFEditCommand, Equatable, Sendable {
       })
     else { throw PDFError(.malformed, "The paragraph layout is invalid") }
     let analysis = try supplied ?? ParagraphRewriteAnalysis(pageID: pageID, graph: graph)
+    if !sourceRunOutputCounts.isEmpty {
+      guard Set(sourceRunOutputCounts.keys) == Set(originalText.keys),
+        originalText.allSatisfy({ index, text in
+          let sourceCount = text.unicodeScalars.count
+          guard let outputCount = sourceRunOutputCounts[index] else { return false }
+          return outputCount >= sourceCount && outputCount <= sourceCount + 1
+        })
+      else {
+        throw PDFError(.malformed, "The paragraph's source run mapping is invalid")
+      }
+    }
     let content = analysis.content
     let allRuns = analysis.runs
     var selected: [TextRun] = []
@@ -976,6 +1016,12 @@ public struct RewritePageTextCommand: PDFEditCommand, Equatable, Sendable {
     content: PageContent, runs: [TextRun], advances: [Double], font: IndexedTextFont,
     graph: PDFGraph
   ) throws -> [(range: Range<Int>, replacement: [UInt8])]? {
+    if Self.hasTaggedReadingOrder(pageID: pageID, in: graph),
+      let preserved = try taggedRunPreservingRewriteRanges(
+        content: content, runs: runs, advances: advances, graph: graph)
+    {
+      return preserved
+    }
     guard lines.count == 1, runs.count == originalText.count,
       runs.count == advances.count, let first = runs.first,
       let line = lines.first, runs.allSatisfy(\.hasKnownOffset),
@@ -990,7 +1036,8 @@ public struct RewritePageTextCommand: PDFEditCommand, Equatable, Sendable {
     let globalIndices = originalText.keys.sorted()
     guard globalIndices.count == runs.count,
       let allRuns = try? TextRunIndexer.runs(in: content, graph: graph),
-      globalIndices.allSatisfy({ allRuns.indices.contains($0) })
+      globalIndices.allSatisfy({ allRuns.indices.contains($0) }),
+      Self.coversWholeTextInstructions(globalIndices, in: allRuns)
     else { return nil }
 
     let firstTransform = TextCanvasSupport.concatenate(first.ctm, first.matrix)
@@ -1240,6 +1287,390 @@ public struct RewritePageTextCommand: PDFEditCommand, Equatable, Sendable {
     return replacements
   }
 
+  /// Rewrites changed tagged lines inside their existing text-show instructions.
+  /// Output keeps each line's source scalar count, uses each instruction's own
+  /// font mapping, never moves glyphs between marked-content items, and restores
+  /// every source instruction's ending text-matrix position.
+  private func taggedRunPreservingRewriteRanges(
+    content: PageContent, runs: [TextRun], advances: [Double], graph: PDFGraph
+  ) throws -> [(range: Range<Int>, replacement: [UInt8])]? {
+    guard runs.count == originalText.count, runs.count == advances.count,
+      !runs.isEmpty, lines.count > 0, runs.allSatisfy(\.hasKnownOffset),
+      runs.allSatisfy({ abs($0.wordSpacing) < 1e-8 })
+    else { return nil }
+
+    let globalIndices = originalText.keys.sorted()
+    guard globalIndices.count == runs.count,
+      let lower = globalIndices.first, let upper = globalIndices.last,
+      upper - lower + 1 == globalIndices.count,
+      let allRuns = try? TextRunIndexer.runs(in: content, graph: graph),
+      globalIndices.allSatisfy(allRuns.indices.contains),
+      Self.coversWholeTextInstructions(globalIndices, in: allRuns)
+    else { return nil }
+
+    let first = runs[0]
+    let firstTransform = TextCanvasSupport.concatenate(first.ctm, first.matrix)
+    guard firstTransform.count == 6, firstTransform.allSatisfy(\.isFinite),
+      firstTransform[0] > 0, abs(firstTransform[1]) <= 1e-8
+    else { return nil }
+
+    // Keep this path to actual multi-line or multi-MCID paragraphs. The
+    // established one-line, one-scope writer also supports length changes.
+    let selectedInstructionIndices = Set(runs.map(\.instructionIndex))
+    let markedRanges = StructureTaggingAssistant.markedRanges(in: content)
+    for instructionIndex in selectedInstructionIndices {
+      let mcidRanges = markedRanges.filter {
+        $0.instructions.contains(instructionIndex) && $0.mcid != nil
+      }
+      guard mcidRanges.count == 1 else { return nil }
+    }
+    let distinctMCIDs = Set(selectedInstructionIndices.flatMap { instructionIndex in
+      markedRanges.filter {
+        $0.instructions.contains(instructionIndex) && $0.mcid != nil
+      }.compactMap(\.mcid)
+    })
+    guard lines.count > 1 || distinctMCIDs.count > 1 else { return nil }
+
+    // The tagged tree must describe the selected run sequence in the same
+    // order. A missing, duplicate, or reordered run is not safe to rewrite.
+    guard let layout = try? PageTextLayout.build(in: content, graph: graph),
+      let orderedClusters = TextReadingOrder.structureClusterOrder(
+        pageID: pageID, layout: layout, in: graph, limits: PDFLimits())
+    else { return nil }
+    let selectedSet = Set(globalIndices)
+    var structureRunOrder: [Int] = []
+    var seenRuns = Set<Int>()
+    for clusterIndex in orderedClusters {
+      guard layout.clusters.indices.contains(clusterIndex) else { return nil }
+      let runIndex = layout.clusters[clusterIndex].runIndex
+      guard selectedSet.contains(runIndex) else { continue }
+      if seenRuns.insert(runIndex).inserted {
+        structureRunOrder.append(runIndex)
+      } else if structureRunOrder.last != runIndex {
+        return nil
+      }
+    }
+    guard structureRunOrder == globalIndices else { return nil }
+    if let box {
+      guard box.x.isFinite, box.firstBaseline.isFinite,
+        abs(box.x - (lines.first?.x ?? .infinity)) <= 0.02,
+        abs(box.firstBaseline - (lines.first?.baseline ?? .infinity)) <= 0.02,
+        lines.count == 1 || box.wraps
+      else { return nil }
+    }
+
+    // Group source runs by their original baseline. A source line may use a
+    // different subset resource from the next line, so validate style within
+    // each line and leave unchanged lines byte-for-byte intact.
+    var sourceLineRuns: [[Int]] = []
+    var sourceLineBaselines: [Double] = []
+    for (offset, run) in runs.enumerated() {
+      let transform = TextCanvasSupport.concatenate(run.ctm, run.matrix)
+      guard transform.count == 6, transform.allSatisfy(\.isFinite),
+        transform[0] > 0, abs(transform[1]) <= 1e-8,
+        run.text == originalText[globalIndices[offset]],
+        !run.text.contains("\n"), !run.text.contains("\r")
+      else { return nil }
+      let baseline = transform[5]
+      if let previous = sourceLineBaselines.last, abs(previous - baseline) <= 0.02 {
+        sourceLineRuns[sourceLineRuns.count - 1].append(globalIndices[offset])
+      } else {
+        guard !sourceLineBaselines.contains(where: { abs($0 - baseline) <= 0.02 }) else {
+          return nil
+        }
+        sourceLineBaselines.append(baseline)
+        sourceLineRuns.append([globalIndices[offset]])
+      }
+    }
+    guard sourceLineRuns.count == lines.count else { return nil }
+
+    let standardIndices = try? StandardTextFont.editableRunIndices(pageID: pageID, in: graph)
+    guard case .dictionary(let page)? = graph.objects[pageID] else { return nil }
+
+    struct OutputGlyph { let text: String; let x: Double }
+    var outputByRun: [Int: [OutputGlyph]] = [:]
+    var preservedRunIndices = Set<Int>()
+    var hasWhitespaceOnlyLineNormalization = false
+
+    for lineIndex in lines.indices {
+      let line = lines[lineIndex]
+      let sourceIndices = sourceLineRuns[lineIndex]
+      guard abs(line.baseline - sourceLineBaselines[lineIndex]) <= 0.02,
+        let firstSourceIndex = sourceIndices.first,
+        let sourceOffset = globalIndices.firstIndex(of: firstSourceIndex)
+      else { return nil }
+      let sourceRun = runs[sourceOffset]
+      let sourceTransform = TextCanvasSupport.concatenate(sourceRun.ctm, sourceRun.matrix)
+      let sourceX = sourceTransform[4] + sourceRun.textSpaceOffset * sourceTransform[0]
+      guard abs(line.x - sourceX) <= 0.02 else { return nil }
+
+      if !line.segments.isEmpty {
+        guard line.segments.map(\.text).joined() == line.text,
+          let firstSegment = line.segments.first,
+          abs(firstSegment.x - line.x) <= 0.02
+        else { return nil }
+      }
+      let sourceLineText = sourceIndices.compactMap { originalText[$0] }.joined()
+      let sourceScalars = Array(sourceLineText.unicodeScalars)
+      let outputScalars = Array(line.text.unicodeScalars)
+      let sourceVisibleText = sourceScalars.filter {
+        !CharacterSet.whitespacesAndNewlines.contains($0)
+      }
+      let outputVisibleText = outputScalars.filter {
+        !CharacterSet.whitespacesAndNewlines.contains($0)
+      }
+      let sourceWhitespaceCount = sourceScalars.count - sourceVisibleText.count
+      let outputWhitespaceCount = outputScalars.count - outputVisibleText.count
+      if sourceVisibleText == outputVisibleText && sourceWhitespaceCount == outputWhitespaceCount {
+        // Keep visually unchanged lines in their original source instructions;
+        // source extraction can place wrapped whitespace at different offsets.
+        preservedRunIndices.formUnion(sourceIndices)
+        hasWhitespaceOnlyLineNormalization = hasWhitespaceOnlyLineNormalization
+          || sourceLineText != line.text
+        continue
+      }
+
+      let sourceStyle = TextEditTargeting.inputStyle(
+        runIndex: firstSourceIndex, runs: allRuns, in: graph)
+      guard var lineFormat = PageTextEditing.format(
+        for: sourceRun, family: sourceStyle.fontFamily ?? "", pageID: pageID, in: graph),
+        lineFormat.customFont == nil,
+        let lineFont = IndexedTextFont.resolve(
+          resource: sourceRun.fontResource, page: page, in: graph),
+        lineFont.fontID == sourceRun.fontID, lineFont.isInlineEditable
+      else { return nil }
+      lineFormat.size *= sourceTransform[0]
+      lineFormat.characterSpacing *= sourceTransform[0]
+
+      if line.segments.isEmpty {
+        guard abs(fontSize - lineFormat.size) <= 0.02, color == lineFormat.color,
+          PageTextSourceFont.canWriteInline(line.text)
+        else { return nil }
+      }
+      let segments = line.segments.isEmpty
+        ? [PageTextSegment(text: line.text, x: line.x, format: lineFormat)]
+        : line.segments
+
+      let sourceFontResources = Set(sourceIndices.compactMap { index in
+        globalIndices.firstIndex(of: index).map { runs[$0].fontResource }
+      })
+      guard segments.allSatisfy({ segment in
+        !segment.text.isEmpty && segment.format.isValid
+          && segment.format.customFont == nil && segment.x.isFinite
+          && sourceFontResources.contains(segment.format.sourceFont?.resource ?? sourceRun.fontResource)
+      }) else { return nil }
+
+      var pagePen = line.x
+      var lineGlyphs: [OutputGlyph] = []
+      for segment in segments {
+        let segmentResource = segment.format.sourceFont?.resource ?? sourceRun.fontResource
+        guard let segmentFont = IndexedTextFont.resolve(
+          resource: segmentResource, page: page, in: graph), segmentFont.isInlineEditable
+        else { return nil }
+        let fontRunIndex = sourceIndices.first(where: { index in
+          guard let offset = globalIndices.firstIndex(of: index) else { return false }
+          return runs[offset].fontResource == segmentResource
+        }) ?? firstSourceIndex
+        let segmentStyle = TextEditTargeting.inputStyle(
+          runIndex: fontRunIndex, runs: allRuns, in: graph)
+        let segmentStandardFont = segment.format.sourceFont == nil
+          ? segmentStyle.fontFamily.flatMap(StandardTextFont.init(rawValue:)) : nil
+        let segmentRunIndices = sourceIndices.filter { index in
+          guard let offset = globalIndices.firstIndex(of: index) else { return false }
+          return runs[offset].fontResource == segmentResource
+        }
+        let mayUseSegmentStandardMetrics = segmentStandardFont != nil
+          && standardIndices.map { segmentRunIndices.allSatisfy($0.contains) } == true
+          && segmentFont.simple?.differences.isEmpty == true && segmentFont.simple?.toUnicode == nil
+        guard abs(segment.x - pagePen) <= 0.02,
+          PageTextSourceFont.canWriteInline(segment.text),
+          let encoded = segmentFont.encode(segment.text), let glyphs = segmentFont.glyphs(encoded),
+          glyphs.map(\.text).joined() == segment.text
+        else { return nil }
+        for glyph in glyphs {
+          guard glyph.text.unicodeScalars.count == 1 else { return nil }
+          let glyphWidth: Double
+          if let width = glyph.width, width.isFinite, width >= 0 {
+            glyphWidth = width
+          } else {
+            guard mayUseSegmentStandardMetrics, let segmentStandardFont,
+              let width = Self.standardAdvance(
+                glyph.text, font: segmentStandardFont, size: 1_000,
+                charSpacing: 0, wordSpacing: 0, horizontalScale: 100),
+              width.isFinite, width >= 0
+            else { return nil }
+            glyphWidth = width
+          }
+          let desiredAdvance = glyphWidth * segment.format.size / 1_000
+            + segment.format.characterSpacing
+          guard desiredAdvance.isFinite, desiredAdvance >= 0 else { return nil }
+          lineGlyphs.append(OutputGlyph(text: glyph.text, x: pagePen))
+          pagePen += desiredAdvance
+        }
+      }
+
+      let expectedScalarCount = sourceIndices.reduce(0) { total, index in
+        total + (sourceRunOutputCounts[index]
+          ?? originalText[index]?.unicodeScalars.count ?? 0)
+      }
+      guard lineGlyphs.count <= expectedScalarCount else { return nil }
+      let omittedScalarCount = expectedScalarCount - lineGlyphs.count
+      if omittedScalarCount > 0 {
+        let omittedWhitespace = sourceScalars.suffix(omittedScalarCount)
+        guard omittedWhitespace.count == omittedScalarCount,
+          omittedWhitespace.allSatisfy({ CharacterSet.whitespacesAndNewlines.contains($0) })
+        else { return nil }
+        for scalar in omittedWhitespace {
+          lineGlyphs.append(OutputGlyph(text: String(scalar), x: pagePen))
+        }
+      }
+      var cursor = 0
+      for index in sourceIndices {
+        guard let sourceText = originalText[index] else { return nil }
+        let count = sourceRunOutputCounts[index] ?? sourceText.unicodeScalars.count
+        guard count > 0, cursor + count <= lineGlyphs.count else { return nil }
+        outputByRun[index] = Array(lineGlyphs[cursor..<(cursor + count)])
+        cursor += count
+      }
+      guard cursor == lineGlyphs.count else { return nil }
+    }
+
+    let instructionRunGroups = Dictionary(grouping: globalIndices.enumerated()) {
+      runs[$0.offset].instructionIndex
+    }
+    for indices in instructionRunGroups.values {
+      let runIndices = indices.map(\.element)
+      let preservedCount = runIndices.filter(preservedRunIndices.contains).count
+      guard preservedCount == 0 || preservedCount == runIndices.count else { return nil }
+    }
+    let rewrittenIndices = globalIndices.filter { !preservedRunIndices.contains($0) }
+    guard !rewrittenIndices.isEmpty || !hasWhitespaceOnlyLineNormalization else { return [] }
+    guard !rewrittenIndices.isEmpty else { return nil }
+    let offsetsByGlobalIndex = Dictionary(uniqueKeysWithValues: globalIndices.enumerated().map {
+      ($1, $0)
+    })
+    let indicesByInstruction = Dictionary(grouping: rewrittenIndices) {
+      index in runs[offsetsByGlobalIndex[index]!].instructionIndex
+    }
+    var replacements: [(range: Range<Int>, replacement: [UInt8])] = []
+    for instructionIndex in indicesByInstruction.keys.sorted() {
+      guard let indices = indicesByInstruction[instructionIndex], let firstIndex = indices.first,
+        content.instructions.indices.contains(instructionIndex),
+        let firstOffset = offsetsByGlobalIndex[firstIndex]
+      else { return nil }
+      let instruction = content.instructions[instructionIndex]
+      guard ["Tj", "TJ"].contains(instruction.operatorName) else { return nil }
+      let instructionRun = runs[firstOffset]
+      guard let instructionFont = IndexedTextFont.resolve(
+        resource: instructionRun.fontResource, page: page, in: graph),
+        instructionFont.fontID == instructionRun.fontID,
+        instructionFont.isInlineEditable
+      else { return nil }
+      let transform = TextCanvasSupport.concatenate(instructionRun.ctm, instructionRun.matrix)
+      guard transform.count == 6, transform.allSatisfy(\.isFinite),
+        transform[0] > 0, abs(transform[1]) <= 1e-8,
+        indices.allSatisfy({
+          guard let offset = offsetsByGlobalIndex[$0] else { return false }
+          let run = runs[offset]
+          let runTransform = TextCanvasSupport.concatenate(runs[offset].ctm, runs[offset].matrix)
+          return runTransform.count == 6 && runTransform.allSatisfy(\.isFinite)
+            && abs(runTransform[5] - transform[5]) <= 0.02
+            && run.fontID == instructionRun.fontID
+            && run.fontResource == instructionRun.fontResource
+            && abs(run.fontSize - instructionRun.fontSize) < 1e-8
+            && abs(run.charSpacing - instructionRun.charSpacing) < 1e-8
+            && abs(run.fillAlpha - instructionRun.fillAlpha) < 1e-8
+            && run.fillColor == instructionRun.fillColor
+        })
+      else { return nil }
+
+      var oldAdvance = 0.0
+      for index in indices {
+        guard let offset = offsetsByGlobalIndex[index] else { return nil }
+        oldAdvance += advances[offset]
+      }
+      if case .array(let entries)? = instruction.operands.first?.value {
+        for entry in entries {
+          switch entry {
+          case .integer(let value):
+            oldAdvance -= Double(value) * instructionRun.fontSize / 1_000
+              * instructionRun.horizontalScale / 100
+          case .real(let value):
+            oldAdvance -= value * instructionRun.fontSize / 1_000
+              * instructionRun.horizontalScale / 100
+          case .string: break
+          default: return nil
+          }
+        }
+      }
+      let denominator = instructionRun.fontSize
+        * instructionRun.horizontalScale / 100 * transform[0]
+      guard oldAdvance.isFinite, abs(oldAdvance) <= 1_000_000,
+        denominator.isFinite, denominator > 0
+      else { return nil }
+
+      let instructionGlyphs = indices.flatMap { outputByRun[$0] ?? [] }
+      guard !instructionGlyphs.isEmpty else { return nil }
+      let instructionStyle = TextEditTargeting.inputStyle(
+        runIndex: firstIndex, runs: allRuns, in: graph)
+      let instructionStandardFont = instructionStyle.fontFamily.flatMap(
+        StandardTextFont.init(rawValue:))
+      let mayUseInstructionStandardMetrics = instructionStandardFont != nil
+        && standardIndices.map { indices.allSatisfy($0.contains) } == true
+        && instructionFont.simple?.differences.isEmpty == true
+        && instructionFont.simple?.toUnicode == nil
+      var glyphCodes: [[UInt8]] = []
+      for glyph in instructionGlyphs {
+        guard glyph.text.unicodeScalars.count == 1,
+          let codes = instructionFont.encode(glyph.text),
+          let decoded = instructionFont.glyphs(codes), decoded.count == 1,
+          decoded[0].text == glyph.text
+        else { return nil }
+        glyphCodes.append(codes)
+      }
+      var output = Array("[".utf8)
+      var pagePen = transform[4]
+      for (glyphIndex, glyph) in instructionGlyphs.enumerated() {
+        let adjustment = (pagePen - glyph.x) * 1_000 / denominator
+        guard adjustment.isFinite, abs(adjustment) <= 1_000_000 else { return nil }
+        if abs(adjustment) > 1e-9 {
+          output += Array("\(AnnotationSupport.number(adjustment)) ".utf8)
+        }
+        let codes = glyphCodes[glyphIndex]
+        output += ReplaceTextCommand.literalStringBytes(codes)
+
+        let sourceTextAdvance: Double
+        if let measured = instructionFont.advance(
+            of: codes, fontSize: instructionRun.fontSize,
+            charSpacing: instructionRun.charSpacing, wordSpacing: instructionRun.wordSpacing,
+            horizontalScale: instructionRun.horizontalScale), measured.isFinite {
+          sourceTextAdvance = measured
+        } else {
+          guard glyph.text.unicodeScalars.count == 1,
+            mayUseInstructionStandardMetrics, let instructionStandardFont,
+            let measured = Self.standardAdvance(
+              glyph.text, font: instructionStandardFont, size: instructionRun.fontSize,
+              charSpacing: instructionRun.charSpacing, wordSpacing: instructionRun.wordSpacing,
+              horizontalScale: instructionRun.horizontalScale), measured.isFinite
+          else { return nil }
+          sourceTextAdvance = measured
+        }
+        pagePen = glyph.x + sourceTextAdvance * transform[0]
+      }
+      let oldEndX = transform[4] + oldAdvance * transform[0]
+      let trailingAdjustment = (pagePen - oldEndX) * 1_000 / denominator
+      guard trailingAdjustment.isFinite, abs(trailingAdjustment) <= 1_000_000 else {
+        return nil
+      }
+      if abs(trailingAdjustment) > 1e-9 {
+        output += Array(" \(AnnotationSupport.number(trailingAdjustment))".utf8)
+      }
+      output += Array("] TJ".utf8)
+      replacements.append((TextStyleSupport.fullSpan(of: instruction), output))
+    }
+    return replacements
+  }
+
   private func instructionScopeIsConsistent(
     _ instructionIndices: Set<Int>, scopes: [Int: [Int]]
   ) -> Bool {
@@ -1247,6 +1678,19 @@ public struct RewritePageTextCommand: PDFEditCommand, Equatable, Sendable {
       return false
     }
     return instructionIndices.allSatisfy { scopes[$0] == expected }
+  }
+
+  private static func coversWholeTextInstructions(
+    _ selectedIndices: [Int], in allRuns: [TextRun]
+  ) -> Bool {
+    let selected = Set(selectedIndices)
+    guard !selected.isEmpty, selected.count == selectedIndices.count,
+      selected.allSatisfy(allRuns.indices.contains)
+    else { return false }
+    let selectedInstructions = Set(selected.map { allRuns[$0].instructionIndex })
+    return allRuns.indices.allSatisfy { index in
+      !selectedInstructions.contains(allRuns[index].instructionIndex) || selected.contains(index)
+    }
   }
 
   private static func standardAdvance(

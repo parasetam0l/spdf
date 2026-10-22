@@ -3493,7 +3493,8 @@ final class SPDFDocument: NSDocument {
           RewritePageTextCommand(
             pageID: page, originalText: paragraph.originalText, lines: lines,
             fontSize: style.fontSize, color: style.color,
-            standardFontAdvances: paragraph.standardFontAdvances, box: box)
+            standardFontAdvances: paragraph.standardFontAdvances,
+            sourceRunOutputCounts: paragraph.sourceRunOutputCounts, box: box)
         ]))
         noteUserEdit()
         refreshViewer(preservingPage: target.pageIndex + 1)
