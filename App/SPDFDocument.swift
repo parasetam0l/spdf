@@ -3499,7 +3499,18 @@ final class SPDFDocument: NSDocument {
         noteUserEdit()
         refreshViewer(preservingPage: target.pageIndex + 1)
         return true
-      } catch { presentError(error); return false }
+      } catch {
+#if DEBUG
+        if CommandLine.arguments.contains("--test-corpus-paragraphs") {
+          viewer?.pageTextFormattingIssue = String(describing: error)
+        } else {
+          presentError(error)
+        }
+#else
+        presentError(error)
+#endif
+        return false
+      }
     }
     guard !text.contains("\n"), !text.contains("\r") else { return false }
     var commands: [any PDFEditCommand] = []

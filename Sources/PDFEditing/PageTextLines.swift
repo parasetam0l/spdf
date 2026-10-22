@@ -602,8 +602,10 @@ public struct RewritePageTextCommand: PDFEditCommand, Equatable, Sendable {
     } catch {
       throw PDFError(.unsupported, "Cannot check the edited paragraph against nearby text")
     }
+    // Whitespace carries an advance box but has no painted ink; its em-sized
+    // bounds can cross the next line and falsely block a safe rewrite.
     let independentGlyphs = layout.clusters.filter {
-      !selectedRunIndices.contains($0.runIndex)
+      !selectedRunIndices.contains($0.runIndex) && !$0.isWhitespace
     }
     guard !independentGlyphs.isEmpty else { return }
     guard case .dictionary(let page)? = graph.objects[pageID] else {
@@ -853,40 +855,45 @@ public struct RewritePageTextCommand: PDFEditCommand, Equatable, Sendable {
       return bounds.allSatisfy(\.isFinite) ? bounds : nil
     }
 
-    func measuredBounds(for glyph: TextCluster) -> (bounds: [Double], hasAdvance: Bool)? {
+    func measuredBounds(for glyph: TextCluster) -> (
+      bounds: [Double], hasAdvance: Bool, text: String, runIndex: Int
+    )? {
       guard glyph.bounds.count == 4, glyph.bounds.allSatisfy(\.isFinite) else { return nil }
-      if let ink = embeddedInkBounds(for: glyph) { return (ink, true) }
-      if glyph.advance != nil { return (glyph.bounds, true) }
+      if let ink = embeddedInkBounds(for: glyph) {
+        return (ink, true, glyph.text, glyph.runIndex)
+      }
+      if glyph.advance != nil { return (glyph.bounds, true, glyph.text, glyph.runIndex) }
       guard analysis.runs.indices.contains(glyph.runIndex),
         analysis.standardIndices.contains(glyph.runIndex)
-      else { return (glyph.bounds, false) }
+      else { return (glyph.bounds, false, glyph.text, glyph.runIndex) }
       let run = analysis.runs[glyph.runIndex]
       guard let font = analysis.fonts[run.fontResource],
         let family = font.baseFont.split(separator: "+", maxSplits: 1).last.map(String.init),
         Self.standardFonts.contains(family)
-      else { return (glyph.bounds, false) }
+      else { return (glyph.bounds, false, glyph.text, glyph.runIndex) }
       let characters = Array(glyph.text.utf16)
       guard characters.count == 1, run.fontSize.isFinite, run.fontSize > 0,
         run.charSpacing.isFinite, run.wordSpacing.isFinite,
         run.horizontalScale.isFinite
-      else { return (glyph.bounds, false) }
+      else { return (glyph.bounds, false, glyph.text, glyph.runIndex) }
       let coreTextFont = standardFont(named: family)
       var standardGlyphs = [CGGlyph](repeating: 0, count: characters.count)
       guard CTFontGetGlyphsForCharacters(
         coreTextFont, characters, &standardGlyphs, characters.count) else {
-        return (glyph.bounds, false)
+        return (glyph.bounds, false, glyph.text, glyph.runIndex)
       }
       var advances = [CGSize](repeating: .zero, count: standardGlyphs.count)
       let totalAdvance = CTFontGetAdvancesForGlyphs(
         coreTextFont, .horizontal, standardGlyphs, &advances, standardGlyphs.count)
       guard totalAdvance.isFinite, let width = advances.first?.width,
-        width.isFinite, width >= 0 else { return (glyph.bounds, false) }
+        width.isFinite, width >= 0
+      else { return (glyph.bounds, false, glyph.text, glyph.runIndex) }
       let spacing = run.charSpacing + (glyph.code == 32 ? run.wordSpacing : 0)
       let advance = (width * run.fontSize / 1_000 + spacing) * run.horizontalScale / 100
-      guard advance.isFinite else { return (glyph.bounds, false) }
+      guard advance.isFinite else { return (glyph.bounds, false, glyph.text, glyph.runIndex) }
       let matrix = TextCanvasSupport.concatenate(run.ctm, run.matrix)
       guard matrix.count == 6, matrix.allSatisfy(\.isFinite) else {
-        return (glyph.bounds, false)
+        return (glyph.bounds, false, glyph.text, glyph.runIndex)
       }
       let textX = glyph.origin[0] - matrix[4] - run.rise * matrix[2]
       let textY = glyph.origin[1] - matrix[5] - run.rise * matrix[3]
@@ -896,17 +903,19 @@ public struct RewritePageTextCommand: PDFEditCommand, Equatable, Sendable {
       } else if abs(matrix[1]) > 1e-9 {
         position = textY / matrix[1]
       } else {
-        return (glyph.bounds, false)
+        return (glyph.bounds, false, glyph.text, glyph.runIndex)
       }
-      guard position.isFinite else { return (glyph.bounds, false) }
+      guard position.isFinite else { return (glyph.bounds, false, glyph.text, glyph.runIndex) }
       let measured = PageTextLayout.composedBounds(
         matrix: matrix, position: position, advance: advance,
         em: run.fontSize, descent: 0, rise: run.rise)
-      guard measured.allSatisfy(\.isFinite) else { return (glyph.bounds, false) }
+      guard measured.allSatisfy(\.isFinite) else {
+        return (glyph.bounds, false, glyph.text, glyph.runIndex)
+      }
       return ([
         min(glyph.bounds[0], measured[0]), min(glyph.bounds[1], measured[1]),
         max(glyph.bounds[2], measured[2]), max(glyph.bounds[3], measured[3]),
-      ], true)
+      ], true, glyph.text, glyph.runIndex)
     }
 
     let independentGlyphBounds = independentGlyphs.compactMap { measuredBounds(for: $0) }
@@ -997,8 +1006,15 @@ public struct RewritePageTextCommand: PDFEditCommand, Equatable, Sendable {
           let overlapX = min(editedBounds[2], other[2]) - max(editedBounds[0], other[0])
           let overlapY = min(editedBounds[3], other[3]) - max(editedBounds[1], other[1])
           guard overlapX > 0.5, overlapY > 0.5 else { continue }
+#if DEBUG
+          let diagnostic = CommandLine.arguments.contains("--test-corpus-paragraphs")
+            ? " Conflicting source glyph \(String(reflecting: measured.text)) from run \(measured.runIndex) at \(other); output glyph bounds \(editedBounds); overlap \(overlapX) x \(overlapY) pt."
+            : ""
+#else
+          let diagnostic = ""
+#endif
           throw PDFError(.unsupported,
-            "This edit would overlap another text block. Shorten the text or choose a wider area.")
+            "This edit would overlap another text block. Shorten the text or choose a wider area.\(diagnostic)")
         }
       }
     }

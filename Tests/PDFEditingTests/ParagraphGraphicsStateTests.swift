@@ -132,6 +132,19 @@ struct ParagraphGraphicsStateTests {
     }
   }
 
+  @Test func whitespaceOnlyGlyphBoundsDoNotTriggerInkCollision() throws {
+    let (graph, id) = try fixture([show("AB"), show(" ", y: 711)])
+    let runs = try TextRunIndexer.runs(in: PageContent.load(pageID: id, in: graph), graph: graph)
+    let clusters = try PageTextLayout.build(pageID: id, in: graph).clusters
+    #expect(runs.count == 2)
+    #expect(clusters.contains { $0.runIndex == 1 && $0.isWhitespace })
+    let command = RewritePageTextCommand(pageID: id, originalText: [0: runs[0].text],
+      lines: [.init(text: "C", x: 42, baseline: 700)], fontSize: 16,
+      color: runs[0].fillColor)
+
+    try command.validate(in: graph)
+  }
+
   @Test func paragraphPreviewAcrossStreamsKeepsSharedContentAndNeighbors() throws {
     var (graph, id) = try fixture([show("AB")])
     guard case .dictionary(var page)? = graph.objects[id],

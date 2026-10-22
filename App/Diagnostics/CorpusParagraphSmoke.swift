@@ -120,6 +120,12 @@
         print("sPDF corpus paragraph check passed")
         exit(0)
       } catch {
+        try? FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
+        if let data = try? JSONSerialization.data(withJSONObject: [
+          "status": "failed", "error": String(describing: error),
+        ], options: [.prettyPrinted, .sortedKeys]) {
+          try? data.write(to: output.appendingPathComponent("failure.json"))
+        }
         FileHandle.standardError.write(Data("Corpus paragraph check failed: \(error)\n".utf8))
         exit(1)
       }
