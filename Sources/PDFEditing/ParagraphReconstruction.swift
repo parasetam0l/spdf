@@ -83,6 +83,20 @@ public enum ParagraphReconstruction {
     roles: [Int: String]? = nil
   ) throws -> [TextParagraphCandidate] {
     let layout = try PageTextLayout.build(pageID: pageID, in: graph)
+    return try candidates(
+      pageID: pageID, in: graph, layout: layout, limits: limits, roles: roles)
+  }
+
+  /// Reuse a layout already built by a multi-output consumer such as DOCX
+  /// reconstruction. Building the same page layout a second time repeats
+  /// content decoding, font resolution, and glyph geometry work.
+  static func candidates(
+    pageID: PDFObjectID, in graph: PDFGraph, layout: PageTextLayout,
+    limits: Limits = Limits(), roles: [Int: String]? = nil
+  ) throws -> [TextParagraphCandidate] {
+    guard layout.pageID == pageID else {
+      throw PDFError(.malformed, "The paragraph layout belongs to a different page")
+    }
     guard !layout.clusters.isEmpty else { return [] }
     let content = try PageContent.load(pageID: pageID, in: graph)
     let runs = try TextRunIndexer.runs(in: content, graph: graph)

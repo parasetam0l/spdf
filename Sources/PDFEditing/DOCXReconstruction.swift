@@ -234,7 +234,7 @@ public enum DOCXReconstructionBuilder {
       let box = pageBox(of: pageID, in: graph)
       let layout = try PageTextLayout.build(pageID: pageID, in: graph)
       let candidates = try ParagraphReconstruction.candidates(
-        pageID: pageID, in: graph, roles: rolesByPage[pageID] ?? [:])
+        pageID: pageID, in: graph, layout: layout, roles: rolesByPage[pageID] ?? [:])
       let perLine = ParagraphListReconstruction.itemCandidates(from: candidates)
       pages.append(
         PageAnalysis(
