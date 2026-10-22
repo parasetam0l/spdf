@@ -1346,7 +1346,10 @@ public struct RewritePageTextCommand: PDFEditCommand, Equatable, Sendable {
         $0.instructions.contains(instructionIndex) && $0.mcid != nil
       }.compactMap(\.mcid)
     })
-    guard lines.count > 1 || distinctMCIDs.count > 1 else { return nil }
+    let hasExplicitWordSpacing = runs.contains { abs($0.wordSpacing) >= 1e-8 }
+    guard lines.count > 1 || distinctMCIDs.count > 1 || hasExplicitWordSpacing else {
+      return nil
+    }
 
     // The tagged tree must describe the selected run sequence in the same
     // order. A missing, duplicate, or reordered run is not safe to rewrite.

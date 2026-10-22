@@ -34,7 +34,9 @@ struct ParagraphGraphicsStateTests {
     }
   }
 
-  private func taggedFinalRunFixture() throws -> (PDFGraph, PDFObjectID) {
+  private func taggedFinalRunFixture(
+    singleScopeWordSpacing: Double? = nil
+  ) throws -> (PDFGraph, PDFObjectID) {
     let parsed = try PDFParser.parse(PDFFixtures.fontEmbeddedPages())
     let pageID = try #require(parsed.pageIDs.first)
     var graph = parsed.graph
@@ -43,18 +45,26 @@ struct ParagraphGraphicsStateTests {
       throw PDFError(.malformed, "Tagged fixture page is missing")
     }
     let font = try #require(IndexedTextFont.resolve(resource: PDFName("F1"), page: page, in: graph))
-    let codes = try #require(font.encode(prefix))
-    let prefixWidth = try #require(font.advance(of: codes, fontSize: 12,
-      charSpacing: 0, wordSpacing: 0, horizontalScale: 100))
-    let finalRunX = 42 + prefixWidth
-    graph.objects[PDFObjectID(5)] = .stream(PDFStream(bytes: Data("""
-      /P <</MCID 0>> BDC
-      BT /F1 12 Tf 42 660 Td (ABC ABC ) Tj ET
-      EMC
-      /P <</MCID 1>> BDC
-      BT /F1 12 Tf \(finalRunX) 660 Td (ABC) Tj ET
-      EMC
-      """.utf8)))
+    if let singleScopeWordSpacing {
+      graph.objects[PDFObjectID(5)] = .stream(PDFStream(bytes: Data("""
+        /P <</MCID 0>> BDC
+        BT /F1 12 Tf \(singleScopeWordSpacing) Tw 42 660 Td [(ABC ) 20 (ABC)] TJ ET
+        EMC
+        """.utf8)))
+    } else {
+      let codes = try #require(font.encode(prefix))
+      let prefixWidth = try #require(font.advance(of: codes, fontSize: 12,
+        charSpacing: 0, wordSpacing: 0, horizontalScale: 100))
+      let finalRunX = 42 + prefixWidth
+      graph.objects[PDFObjectID(5)] = .stream(PDFStream(bytes: Data("""
+        /P <</MCID 0>> BDC
+        BT /F1 12 Tf 42 660 Td (ABC ABC ) Tj ET
+        EMC
+        /P <</MCID 1>> BDC
+        BT /F1 12 Tf \(finalRunX) 660 Td (ABC) Tj ET
+        EMC
+        """.utf8)))
+    }
 
     guard case .dictionary(var catalog)? = graph.objects[PDFObjectID(1)],
       case .dictionary(var page)? = graph.objects[pageID]
@@ -75,11 +85,14 @@ struct ParagraphGraphicsStateTests {
       PDFName("S"): .name(PDFName("P")),
       PDFName("P"): .reference(PDFObjectID(90)),
       PDFName("Pg"): .reference(pageID),
-      PDFName("K"): .array([.integer(0), .integer(1)]),
+      PDFName("K"): singleScopeWordSpacing == nil
+        ? .array([.integer(0), .integer(1)]) : .integer(0),
     ])
     graph.objects[PDFObjectID(92)] = .dictionary([
       PDFName("Nums"): .array([
-        .integer(0), .array([.reference(PDFObjectID(91)), .reference(PDFObjectID(91))]),
+        .integer(0), .array(singleScopeWordSpacing == nil
+          ? [.reference(PDFObjectID(91)), .reference(PDFObjectID(91))]
+          : [.reference(PDFObjectID(91))]),
       ]),
     ])
     return (graph, pageID)
@@ -237,6 +250,33 @@ struct ParagraphGraphicsStateTests {
       lines: [.init(text: "CBC ABC ABC ABC", x: 42, baseline: 660)],
       fontSize: 12, color: [0, 0, 0])
     #expect(throws: PDFError.self) { try changedPrefix.validate(in: graph) }
+  }
+
+  @Test func oneLineTaggedParagraphPreservesExplicitWordSpacing() throws {
+    let (graph, pageID) = try taggedFinalRunFixture(singleScopeWordSpacing: 2)
+    let runs = try TextRunIndexer.runs(in: PageContent.load(pageID: pageID, in: graph), graph: graph)
+    #expect(runs.map(\.text).joined() == "ABC ABC")
+    #expect(runs.allSatisfy { abs($0.wordSpacing - 2) < 1e-8 })
+    let originalText = Dictionary(uniqueKeysWithValues: runs.enumerated().map {
+      ($0.offset, $0.element.text)
+    })
+    let edit = RewritePageTextCommand(pageID: pageID, originalText: originalText,
+      lines: [.init(text: "CBA CBA", x: 42, baseline: 660)],
+      fontSize: 12, color: runs[0].fillColor)
+
+    try edit.validate(in: graph)
+    let edited = try PDFEditingEngine.commit(PDFTransaction([edit]), to: graph)
+    let reparsed = try PDFParser.parse(PDFWriter.write(edited))
+    let savedContent = try PageContent.load(pageID: pageID, in: reparsed.graph)
+    let savedRuns = try TextRunIndexer.runs(in: savedContent, graph: reparsed.graph)
+    #expect(savedRuns.map(\.text).joined() == "CBA CBA")
+    #expect(savedRuns.allSatisfy { abs($0.wordSpacing - 2) < 1e-8 })
+    let inventory = try PDFStructureInspector.inspect(in: reparsed.graph, pageIDs: reparsed.pageIDs)
+    #expect(inventory.issues.isEmpty)
+    let layout = try PageTextLayout.build(pageID: pageID, in: reparsed.graph)
+    let order = try #require(TextReadingOrder.structureClusterOrder(
+      pageID: pageID, layout: layout, in: reparsed.graph, limits: PDFLimits()))
+    #expect(order.map { layout.clusters[$0].text }.joined().contains("CBA CBA"))
   }
 
   @Test func paragraphPreviewAcrossStreamsKeepsSharedContentAndNeighbors() throws {
