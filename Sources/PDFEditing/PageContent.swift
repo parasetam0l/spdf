@@ -32,6 +32,24 @@ struct PageContent {
     }
   }
 
+  /// Return every content-stream segment containing bytes from a range. PDF
+  /// `/Contents` arrays execute as one concatenated stream, so a token or text
+  /// instruction may legitimately straddle adjacent stream boundaries.
+  func segmentIndices(for span: Range<Int>) -> [Int]? {
+    guard span.lowerBound >= 0, span.upperBound >= span.lowerBound,
+      span.upperBound <= bytes.count else { return nil }
+    if span.isEmpty {
+      guard let index = segmentIndex(for: span) else { return nil }
+      return [index]
+    }
+    guard let first = segments.indices.first(where: { segments[$0].range.overlaps(span) }),
+      let last = segments.indices.last(where: { segments[$0].range.overlaps(span) }),
+      segments[first].range.lowerBound <= span.lowerBound,
+      segments[last].range.upperBound >= span.upperBound
+    else { return nil }
+    return Array(first...last)
+  }
+
   static func load(pageID: PDFObjectID, in graph: PDFGraph, limits: PDFLimits = PDFLimits()) throws
     -> PageContent
   {
@@ -85,9 +103,8 @@ struct PageContent {
   }
 
   /// Rewrite several non-overlapping decoded ranges in their original
-  /// editable segments. A content instruction must remain wholly within one
-  /// stream; separate instructions may be updated across the page's `/Contents`
-  /// array without merging or reordering those streams.
+  /// editable segments. Ranges may cross `/Contents` boundaries because the
+  /// page streams are parsed and executed as one concatenated sequence.
   func replacing(
     ranges: [(range: Range<Int>, replacement: [UInt8])], in graph: PDFGraph,
     limits: PDFLimits = PDFLimits()
@@ -101,13 +118,19 @@ struct PageContent {
     }
 
     var rangesBySegment: [Int: [(range: Range<Int>, replacement: [UInt8])]] = [:]
+    var spansAcrossSegments = false
+    var touchedSegments: Set<Int> = []
     for entry in sorted {
-      guard let index = segmentIndex(for: entry.range) else {
-        throw PDFError(.unsupported, "The edited span crosses content streams or lies outside the page")
+      guard let indices = segmentIndices(for: entry.range) else {
+        throw PDFError(.unsupported, "The edited span cannot be mapped to the page's content streams")
       }
-      rangesBySegment[index, default: []].append(entry)
+      touchedSegments.formUnion(indices)
+      if indices.count > 1 { spansAcrossSegments = true }
+      if indices.count == 1 {
+        rangesBySegment[indices[0], default: []].append(entry)
+      }
     }
-    for index in rangesBySegment.keys {
+    for index in touchedSegments.sorted() {
       let segment = segments[index]
       guard segment.isEditable else {
         throw PDFError(.unsupported, "This content stream uses unsupported filters for editing")
@@ -118,6 +141,11 @@ struct PageContent {
       guard segments.filter({ $0.objectID == segment.objectID }).count == 1 else {
         throw PDFError(.unsupported, "A repeated page content stream cannot be edited selectively")
       }
+    }
+
+    if spansAcrossSegments {
+      return try replacingAcrossSegments(
+        sorted, touchedSegments: touchedSegments, in: graph, limits: limits)
     }
 
     var result = graph
@@ -145,7 +173,110 @@ struct PageContent {
         dictionary.removeValue(forKey: PDFName("DP"))
       }
       dictionary[PDFName("Length")] = .integer(Int64(bytes.count))
+      if segment.dictionary[PDFName("DL")] != nil {
+        dictionary[PDFName("DL")] = .integer(Int64(decoded.count))
+      }
       result.objects[segment.objectID] = .stream(PDFStream(dictionary: dictionary, bytes: bytes))
+    }
+    return result
+  }
+
+  private func replacingAcrossSegments(
+    _ ranges: [(range: Range<Int>, replacement: [UInt8])],
+    touchedSegments: Set<Int>, in graph: PDFGraph, limits: PDFLimits
+  ) throws -> PDFGraph {
+    // Multiple insertions at the same point or an insertion adjacent to a
+    // replacement have ambiguous stream-boundary ownership. Existing callers
+    // use distinct page-start/page-end insertions; refuse other combinations.
+    let insertions = ranges.filter { $0.range.isEmpty }
+    for insertion in insertions {
+      let point = insertion.range.lowerBound
+      let overlapsReplacement = ranges.contains { entry in
+        !entry.range.isEmpty
+          && entry.range.lowerBound <= point && point <= entry.range.upperBound
+      }
+      let insertionCount = insertions.filter { $0.range.lowerBound == point }.count
+      guard !overlapsReplacement, insertionCount == 1
+      else {
+        throw PDFError(.unsupported, "Overlapping content-stream insertions cannot be assigned safely")
+      }
+    }
+
+    var rewritten = bytes
+    for entry in ranges.reversed() {
+      rewritten.replaceSubrange(entry.range, with: entry.replacement)
+    }
+
+    func translatedBoundary(
+      _ offset: Int, containingSegmentIndex: Int, isSegmentStart: Bool
+    ) -> Int {
+      var delta = 0
+      for entry in ranges {
+        let lower = entry.range.lowerBound
+        let upper = entry.range.upperBound
+        if lower == upper {
+          if offset < lower { break }
+          if offset == lower {
+            // An insertion at a stream boundary belongs to the first segment
+            // that contains that boundary, matching `segmentIndex(for:)`.
+            let owner = self.segmentIndex(for: lower..<lower)
+            if !isSegmentStart || owner != containingSegmentIndex {
+              delta += entry.replacement.count
+            }
+            continue
+          }
+          delta += entry.replacement.count
+          continue
+        }
+        if offset < lower { break }
+        if offset < upper {
+          let sourceLength = upper - lower
+          let replacementLength = entry.replacement.count
+          let within = offset - lower
+          return lower + delta + (replacementLength * within / sourceLength)
+        }
+        delta += entry.replacement.count - (upper - lower)
+      }
+      return offset + delta
+    }
+
+    var result = graph
+    for index in segments.indices {
+      let segment = segments[index]
+      let lower = translatedBoundary(
+        segment.range.lowerBound, containingSegmentIndex: index, isSegmentStart: true)
+      let upper = translatedBoundary(
+        segment.range.upperBound, containingSegmentIndex: index, isSegmentStart: false)
+      guard lower >= 0, upper >= lower, upper <= rewritten.count else {
+        throw PDFError(.malformed, "Rewritten content-stream boundaries are invalid")
+      }
+      let decoded = Array(rewritten[lower..<upper])
+      guard decoded != segment.decoded else { continue }
+      // A segment can only change when selected bytes reach it. The explicit
+      // touched-set guard keeps boundary remapping from rewriting neighbors.
+      guard touchedSegments.contains(index) else {
+        throw PDFError(.malformed, "A content-stream rewrite crossed an unselected segment")
+      }
+
+      var dictionary = segment.dictionary
+      let encoded: Data
+      if segment.filters == [PDFName("FlateDecode")] {
+        encoded = try PDFFilters.encodeFlate(Data(decoded), limits: limits)
+        dictionary[PDFName("Filter")] = .name(PDFName("FlateDecode"))
+        dictionary.removeValue(forKey: PDFName("DecodeParms"))
+        dictionary.removeValue(forKey: PDFName("DP"))
+      } else {
+        encoded = Data(decoded)
+        dictionary.removeValue(forKey: PDFName("Filter"))
+        dictionary.removeValue(forKey: PDFName("DecodeParms"))
+        dictionary.removeValue(forKey: PDFName("DP"))
+      }
+      dictionary[PDFName("Length")] = .integer(Int64(encoded.count))
+      if segment.dictionary[PDFName("DL")] != nil {
+        dictionary[PDFName("DL")] = .integer(Int64(decoded.count))
+      }
+      result.objects[segment.objectID] = .stream(
+        PDFStream(dictionary: dictionary, bytes: encoded))
     }
     return result
   }

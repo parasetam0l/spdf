@@ -304,6 +304,70 @@ struct ImportedParagraphInteropTests {
     }
   }
 
+  @Test @MainActor func importedParagraphCanBeRewrittenAcrossContentStreamBoundary() throws {
+    var (graph, pageID) = try fixture(composite: false)
+    let original = try PageContent.load(pageID: pageID, in: graph)
+    let originalRuns = try TextRunIndexer.runs(in: original, graph: graph)
+    let run = try #require(originalRuns.first { $0.text == "ABC ABC ABC ABC ABC ABC" })
+    let split = run.stringSpan.lowerBound + 3
+    #expect(split < run.stringSpan.upperBound)
+
+    let firstDecoded = Data(original.bytes[..<split])
+    graph.objects[PDFObjectID(50)] = .stream(PDFStream(
+      dictionary: [PDFName("Filter"): .name(PDFName("FlateDecode")),
+        PDFName("DL"): .integer(Int64(firstDecoded.count))],
+      bytes: try PDFFilters.encodeFlate(firstDecoded)))
+    graph.objects[PDFObjectID(51)] = .stream(PDFStream(bytes: Data(original.bytes[split...])))
+    guard case .dictionary(var page)? = graph.objects[pageID] else {
+      Issue.record("Paragraph fixture page is missing")
+      return
+    }
+    page[PDFName("Contents")] = .array([
+      .reference(PDFObjectID(50)), .reference(PDFObjectID(51)),
+    ])
+    graph.objects[pageID] = .dictionary(page)
+
+    let splitContent = try PageContent.load(pageID: pageID, in: graph)
+    let splitRun = try #require(TextRunIndexer.runs(in: splitContent, graph: graph).first {
+      $0.text == "ABC ABC ABC ABC ABC ABC"
+    })
+    #expect(splitContent.segmentIndices(for: splitRun.stringSpan) == [0, 1])
+    let target = try #require(targets(graph, pageID: pageID).first {
+      $0.paragraph?.originalText.count == 2
+    })
+    let paragraph = try #require(target.paragraph)
+    let format = try #require(paragraph.fragments.first?.format)
+    let preview = try PageTextEditing.hidingParagraph(
+      pageID: pageID, originalText: paragraph.originalText,
+      standardFontAdvances: paragraph.standardFontAdvances, in: graph)
+    let previewBytes = try PageContent.load(pageID: pageID, in: preview).bytes
+    #expect(String(decoding: previewBytes, as: UTF8.self).contains("\n3 Tr\n"))
+    #expect(String(decoding: previewBytes, as: UTF8.self).contains("\n0 Tr\n"))
+    let replacement = PageTextLine(text: "CBA ABC", x: target.rect[0],
+      baseline: paragraph.firstBaseline,
+      segments: [.init(text: "CBA ABC", x: target.rect[0], format: format)])
+    let command = RewritePageTextCommand(pageID: pageID, originalText: paragraph.originalText,
+      lines: [replacement], fontSize: format.size, color: format.color,
+      box: .init(x: target.rect[0], firstBaseline: paragraph.firstBaseline,
+        width: 240, lineSpacing: paragraph.lineSpacing))
+    let edited = try PDFEditingEngine.commit(PDFTransaction([command]), to: graph)
+    let saved = try PDFWriter.write(edited)
+    let reopened = try PDFParser.parse(saved)
+    let reopenedRuns = try TextRunIndexer.runs(
+      in: PageContent.load(pageID: pageID, in: reopened.graph), graph: reopened.graph)
+    guard case .stream(let rewrittenFirst)? = edited.objects[PDFObjectID(50)] else {
+      Issue.record("The rewritten compressed stream is missing")
+      return
+    }
+    #expect(rewrittenFirst.dictionary[PDFName("Filter")] == .name(PDFName("FlateDecode")))
+    #expect(rewrittenFirst.dictionary[PDFName("DL")] == .integer(
+      Int64(try PDFFilters.decoded(rewrittenFirst).count)))
+    #expect(reopenedRuns.contains { $0.text == "CBA ABC" })
+    #expect(PDFDocument(data: saved)?.string?.contains("CBA ABC") == true)
+    #expect(edited.objects[PDFObjectID(4)] == graph.objects[PDFObjectID(4)])
+    #expect(edited.objects[PDFObjectID(7)] == graph.objects[PDFObjectID(7)])
+  }
+
   @Test @MainActor func compositeMultiScalarCIDParagraphsKeepTheirSourceGlyphAndReopen() throws {
     let (graph, pageID, ligatureID) = try compositeLigatureFixture()
     guard case .dictionary(let page)? = graph.objects[pageID] else {

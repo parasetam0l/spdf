@@ -535,8 +535,9 @@ public struct RewritePageTextCommand: PDFEditCommand, Equatable, Sendable {
         abs(run.horizontalScale - 100) < 1e-6, abs(run.rise) < 1e-6,
         let font = analysis.fonts[run.fontResource],
         font.isInlineEditable,
-        let segment = content.segmentIndex(for: TextStyleSupport.fullSpan(of: instruction)),
-        content.segments[segment].isEditable
+        let instructionSegments = content.segmentIndices(
+          for: TextStyleSupport.fullSpan(of: instruction)),
+        instructionSegments.allSatisfy({ content.segments[$0].isEditable })
       else {
         throw PDFError(.unsupported, "This paragraph needs a different font, spacing or transform")
       }
@@ -1864,13 +1865,7 @@ public struct RewritePageTextCommand: PDFEditCommand, Equatable, Sendable {
     ranges.append((0..<0, Array("q\n".utf8)))
     let end = context.content.bytes.count
     ranges.append((end..<end, Array("\nQ\n".utf8)))
-    var result = graph
-    for index in context.content.segments.indices {
-      let local = ranges.filter { context.content.segmentIndex(for: $0.range) == index }
-      if !local.isEmpty {
-        result = try context.content.replacing(ranges: local, in: result)
-      }
-    }
+    var result = try context.content.replacing(ranges: ranges, in: graph)
     try PageTextLineWriter.append(lines, box: box, pageID: pageID, defaultFont: context.font,
       defaultSize: fontSize, defaultColor: color,
       defaultOpacity: context.runs.first?.fillAlpha ?? 1,

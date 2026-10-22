@@ -278,16 +278,36 @@ struct ParagraphGraphicsStateTests {
       .filter { !$0.text.isEmpty }.map(\.text) == ["ABCD", "DCBA"])
   }
 
-  @Test func aTextInstructionCrossingStreamBoundariesRefusesBeforePreview() throws {
+  @Test func aTextInstructionCrossingStreamBoundariesCanBePreviewedAndEdited() throws {
     var (graph, id) = try fixture(["BT /F1 16 Tf 42 700 Td (AB)"])
     guard case .dictionary(var page)? = graph.objects[id] else { return }
     graph.objects[PDFObjectID(6)] = .stream(PDFStream(bytes: Data(" Tj ET".utf8)))
     page[PDFName("Contents")] = .array([.reference(PDFObjectID(5)), .reference(PDFObjectID(6))])
     graph.objects[id] = .dictionary(page)
-    #expect(try editable(graph, id) == [false])
-    #expect(throws: PDFError.self) {
-      try PageTextEditing.hidingParagraph(pageID: id, originalText: [0: "AB"],
-        standardFontAdvances: [:], in: graph)
+    #expect(try editable(graph, id) == [true])
+
+    let hidden = try PageTextEditing.hidingParagraph(pageID: id, originalText: [0: "AB"],
+      standardFontAdvances: [:], in: graph)
+    let hiddenReopened = try PDFParser.parse(PDFWriter.write(hidden))
+    let hiddenContent = try PageContent.load(pageID: id, in: hiddenReopened.graph)
+    let hiddenRuns = try TextRunIndexer.runs(in: hiddenContent, graph: hiddenReopened.graph)
+    #expect(hiddenRuns.map(\.text) == ["AB"])
+    let hiddenModes = hiddenRuns.map {
+      TextCanvasSupport.renderingMode(at: $0.instructionIndex, in: hiddenContent)
     }
+    #expect(hiddenModes == [3])
+
+    let edited = try PDFEditingEngine.commit(PDFTransaction([
+      RewritePageTextCommand(pageID: id, originalText: [0: "AB"],
+        lines: [.init(text: "CD", x: 42, baseline: 700)], fontSize: 16, color: [0, 0, 0])
+    ]), to: graph)
+    let editedReopened = try PDFParser.parse(PDFWriter.write(edited))
+    let editedContent = try PageContent.load(pageID: id, in: editedReopened.graph)
+    let editedRuns = try TextRunIndexer.runs(in: editedContent, graph: editedReopened.graph)
+    #expect(editedRuns.map(\.text) == ["CD"])
+    let editedModes = editedRuns.map {
+      TextCanvasSupport.renderingMode(at: $0.instructionIndex, in: editedContent)
+    }
+    #expect(editedModes == [0])
   }
 }

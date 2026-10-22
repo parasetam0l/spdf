@@ -243,12 +243,7 @@ public enum PageTextEditing {
       let range = TextStyleSupport.fullSpan(of: content.instructions[index])
       return (range, Array("\n3 Tr\n".utf8) + content.bytes[range] + Array("\n0 Tr\n".utf8))
     }
-    var result = graph
-    for index in content.segments.indices {
-      let local = ranges.filter { content.segmentIndex(for: $0.range) == index }
-      if !local.isEmpty { result = try content.replacing(ranges: local, in: result) }
-    }
-    return result
+    return try content.replacing(ranges: ranges, in: graph)
   }
   public static func blocks(pageID: PDFObjectID, in graph: PDFGraph) throws -> [PageTextBlock] {
     let content = try PageContent.load(pageID: pageID, in: graph)
@@ -264,7 +259,9 @@ public enum PageTextEditing {
     return grouped.keys.sorted().compactMap { instruction in
       guard let indices = grouped[instruction], let first = indices.first,
         let font = fonts[runs[first].fontResource], font.isInlineEditable || font.simple?.isEditable == true,
-        let segment = content.segmentIndex(for: runs[first].stringSpan), content.segments[segment].isEditable,
+        let segments = content.segmentIndices(
+          for: TextStyleSupport.fullSpan(of: content.instructions[instruction])),
+        segments.allSatisfy({ content.segments[$0].isEditable }),
         TextCanvasSupport.renderingMode(at: instruction, in: content) == 0,
         let rect = TextEditTargeting.union(
           layout.clusters.filter {
