@@ -309,8 +309,10 @@ struct ImportedParagraphInteropTests {
     let original = try PageContent.load(pageID: pageID, in: graph)
     let originalRuns = try TextRunIndexer.runs(in: original, graph: graph)
     let run = try #require(originalRuns.first { $0.text == "ABC ABC ABC ABC ABC ABC" })
-    let split = run.stringSpan.lowerBound + 3
-    #expect(split < run.stringSpan.upperBound)
+    // Leave the complete literal-string token in the first stream and split
+    // before the Tj operator, which is a legal boundary between PDF tokens.
+    let split = run.stringSpan.upperBound
+    #expect(split < original.instructions[run.instructionIndex].span.upperBound)
 
     let firstDecoded = Data(original.bytes[..<split])
     graph.objects[PDFObjectID(50)] = .stream(PDFStream(
@@ -331,7 +333,11 @@ struct ImportedParagraphInteropTests {
     let splitRun = try #require(TextRunIndexer.runs(in: splitContent, graph: graph).first {
       $0.text == "ABC ABC ABC ABC ABC ABC"
     })
-    #expect(splitContent.segmentIndices(for: splitRun.stringSpan) == [0, 1])
+    #expect(splitContent.segmentIndices(for: splitRun.stringSpan) == [0])
+    let splitInstruction = splitContent.instructions[splitRun.instructionIndex]
+    let splitInstructionSpan = (splitInstruction.operands.first?.span.lowerBound
+      ?? splitInstruction.span.lowerBound)..<splitInstruction.span.upperBound
+    #expect(splitContent.segmentIndices(for: splitInstructionSpan) == [0, 1])
     let target = try #require(targets(graph, pageID: pageID).first {
       $0.paragraph?.originalText.count == 2
     })

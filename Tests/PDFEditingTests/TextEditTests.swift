@@ -173,7 +173,13 @@ struct TextEditTests {
       return
     }
     let bytes = [UInt8](stream.bytes)
-    let split = bytes.count / 2
+    let original = try PageContent.load(pageID: pageID, in: graph)
+    let target = try #require(TextRunIndexer.runs(in: original, graph: graph).first {
+      $0.text == "ing stays"
+    })
+    // Split before the string operand so each /Contents segment begins and
+    // ends between complete PDF tokens.
+    let split = target.stringSpan.lowerBound
     graph.objects[PDFObjectID(10)] = .stream(
       PDFStream(dictionary: stream.dictionary, bytes: Data(bytes[0..<split])))
     graph.objects[PDFObjectID(11)] = .stream(

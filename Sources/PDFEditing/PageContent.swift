@@ -230,10 +230,17 @@ struct PageContent {
         }
         if offset < lower { break }
         if offset < upper {
-          let sourceLength = upper - lower
-          let replacementLength = entry.replacement.count
-          let within = offset - lower
-          return lower + delta + (replacementLength * within / sourceLength)
+          if offset == lower {
+            // A range beginning at a segment boundary belongs to the segment
+            // that contains its first byte. Keep the preceding stream's end
+            // at the start of the replacement.
+            return lower + delta
+          }
+          // Keep every original stream boundary inside the replaced span on
+          // one side of the replacement. Proportional remapping can place a
+          // boundary in the middle of a newly serialized PDF token, making
+          // the saved /Contents array unparsable.
+          return lower + delta + entry.replacement.count
         }
         delta += entry.replacement.count - (upper - lower)
       }

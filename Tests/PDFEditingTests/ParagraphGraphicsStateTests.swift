@@ -281,24 +281,47 @@ struct ParagraphGraphicsStateTests {
   @Test func aTextInstructionCrossingStreamBoundariesCanBePreviewedAndEdited() throws {
     var (graph, id) = try fixture(["BT /F1 16 Tf 42 700 Td (AB)"])
     guard case .dictionary(var page)? = graph.objects[id] else { return }
-    graph.objects[PDFObjectID(5)] = .stream(
-      PDFStream(bytes: Data("BT /F1 16 Tf 42 700 Td (".utf8)))
-    let middle = Data("A".utf8)
-    graph.objects[PDFObjectID(6)] = .stream(PDFStream(
+    graph.objects[PDFObjectID(5)] = .stream(PDFStream(
+      bytes: Data("BT /F1 16 Tf 42 700 Td ".utf8)))
+    let compressedArrayID = PDFObjectID(900)
+    let numberArrayID = PDFObjectID(901)
+    let operatorStreamID = PDFObjectID(902)
+    let firstArrayPart = Data("[(AB) ".utf8)
+    graph.objects[compressedArrayID] = .stream(PDFStream(
       dictionary: [PDFName("Filter"): .name(PDFName("FlateDecode")),
-        PDFName("DL"): .integer(Int64(middle.count))],
-      bytes: try PDFFilters.encodeFlate(middle)))
-    graph.objects[PDFObjectID(7)] = .stream(PDFStream(bytes: Data("B) Tj ET".utf8)))
+        PDFName("DL"): .integer(Int64(firstArrayPart.count))],
+      bytes: try PDFFilters.encodeFlate(firstArrayPart)))
+    graph.objects[numberArrayID] = .stream(PDFStream(bytes: Data("0 ".utf8)))
+    graph.objects[operatorStreamID] = .stream(PDFStream(bytes: Data("] TJ ET".utf8)))
     page[PDFName("Contents")] = .array([
-      .reference(PDFObjectID(5)), .reference(PDFObjectID(6)), .reference(PDFObjectID(7)),
+      .reference(PDFObjectID(5)), .reference(compressedArrayID), .reference(numberArrayID),
+      .reference(operatorStreamID),
     ])
     graph.objects[id] = .dictionary(page)
     let original = try PageContent.load(pageID: id, in: graph)
     #expect(try editable(graph, id) == [true])
-    let textShow = try #require(original.instructions.first { $0.operatorName == "Tj" })
+    let textShow = try #require(original.instructions.first { $0.operatorName == "TJ" })
     let textShowStart = textShow.operands.first?.span.lowerBound ?? textShow.span.lowerBound
     let textShowSpan = textShowStart..<textShow.span.upperBound
-    #expect(original.segmentIndices(for: textShowSpan) == [0, 1, 2])
+    #expect(original.segmentIndices(for: textShowSpan) == [1, 2, 3])
+
+    // Grow the complete text-show instruction enough to expose any
+    // length-proportional remapping that would cut a replacement token.
+    let longer = try original.replacing(
+      range: textShowSpan, with: Array("[(CROSS-STREAM EDIT CHECK) 0] TJ".utf8), in: graph)
+    let longerReopened = try PDFParser.parse(PDFWriter.write(longer))
+    let longerContent = try PageContent.load(pageID: id, in: longerReopened.graph)
+    #expect(try TextRunIndexer.runs(in: longerContent, graph: longerReopened.graph).map(\.text)
+      == ["CROSS-STREAM EDIT CHECK"])
+    #expect(longer.objects[PDFObjectID(5)] == graph.objects[PDFObjectID(5)])
+    guard case .stream(let longerCompressed)? = longer.objects[compressedArrayID] else { return }
+    #expect(String(decoding: try PDFFilters.decoded(longerCompressed), as: UTF8.self)
+      == "[(CROSS-STREAM EDIT CHECK) 0] TJ")
+    guard case .stream(let longerEmpty)? = longer.objects[numberArrayID] else { return }
+    #expect(try PDFFilters.decoded(longerEmpty).isEmpty)
+    #expect(longerCompressed.dictionary[PDFName("Filter")] == .name(PDFName("FlateDecode")))
+    #expect(longerCompressed.dictionary[PDFName("DL")] == .integer(
+      Int64(try PDFFilters.decoded(longerCompressed).count)))
 
     let hidden = try PageTextEditing.hidingParagraph(pageID: id, originalText: [0: "AB"],
       standardFontAdvances: [:], in: graph)
@@ -318,10 +341,10 @@ struct ParagraphGraphicsStateTests {
     let editedReopened = try PDFParser.parse(PDFWriter.write(edited))
     let editedContent = try PageContent.load(pageID: id, in: editedReopened.graph)
     let editedRuns = try TextRunIndexer.runs(in: editedContent, graph: editedReopened.graph)
-    guard case .stream(let editedMiddle)? = edited.objects[PDFObjectID(6)] else { return }
-    #expect(editedMiddle.dictionary[PDFName("Filter")] == .name(PDFName("FlateDecode")))
-    #expect(editedMiddle.dictionary[PDFName("DL")] == .integer(
-      Int64(try PDFFilters.decoded(editedMiddle).count)))
+    guard case .stream(let editedCompressed)? = edited.objects[compressedArrayID] else { return }
+    #expect(editedCompressed.dictionary[PDFName("Filter")] == .name(PDFName("FlateDecode")))
+    #expect(editedCompressed.dictionary[PDFName("DL")] == .integer(
+      Int64(try PDFFilters.decoded(editedCompressed).count)))
     #expect(editedRuns.map(\.text) == ["CD"])
     let editedModes = editedRuns.map {
       TextCanvasSupport.renderingMode(at: $0.instructionIndex, in: editedContent)
