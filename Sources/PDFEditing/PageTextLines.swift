@@ -1295,8 +1295,7 @@ public struct RewritePageTextCommand: PDFEditCommand, Equatable, Sendable {
     content: PageContent, runs: [TextRun], advances: [Double], graph: PDFGraph
   ) throws -> [(range: Range<Int>, replacement: [UInt8])]? {
     guard runs.count == originalText.count, runs.count == advances.count,
-      !runs.isEmpty, lines.count > 0, runs.allSatisfy(\.hasKnownOffset),
-      runs.allSatisfy({ abs($0.wordSpacing) < 1e-8 })
+      !runs.isEmpty, lines.count > 0, runs.allSatisfy(\.hasKnownOffset)
     else { return nil }
 
     let globalIndices = originalText.keys.sorted()

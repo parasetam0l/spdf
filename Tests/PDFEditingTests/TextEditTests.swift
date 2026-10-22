@@ -198,6 +198,63 @@ struct TextEditTests {
     #expect(newText.contains("(ing changed)"))
   }
 
+  @Test func separateTextInstructionsCanBeRewrittenAcrossContentStreams() throws {
+    var graph = try PDFParser.parse(PDFFixtures.textEditPages()).graph
+    let pageID = PDFObjectID(3)
+    let contentID = PDFObjectID(5)
+    guard case .stream(let stream)? = graph.objects[contentID] else {
+      Issue.record("Content stream missing")
+      return
+    }
+    let bytes = [UInt8](stream.bytes)
+    let instructions = try ContentParser.instructions(in: bytes)
+    let showInstructions = instructions.filter { ["Tj", "TJ"].contains($0.operatorName) }
+    let split = try #require(showInstructions.first?.span.upperBound)
+    guard split > 0, split < bytes.count else {
+      Issue.record("The fixture does not contain text shows on both sides of a stream boundary")
+      return
+    }
+    graph.objects[PDFObjectID(10)] = .stream(
+      PDFStream(dictionary: stream.dictionary, bytes: Data(bytes[..<split])))
+    graph.objects[PDFObjectID(11)] = .stream(
+      PDFStream(dictionary: stream.dictionary, bytes: Data(bytes[split...])))
+    graph.objects.removeValue(forKey: contentID)
+    guard case .dictionary(var page)? = graph.objects[pageID] else { return }
+    page[PDFName("Contents")] = .array([
+      .reference(PDFObjectID(10)), .reference(PDFObjectID(11)),
+    ])
+    graph.objects[pageID] = .dictionary(page)
+
+    let content = try PageContent.load(pageID: pageID, in: graph)
+    let runs = try TextRunIndexer.runs(in: content, graph: graph)
+    func printableASCII(_ text: String) -> Bool {
+      !text.isEmpty && text.utf8.allSatisfy { (0x20...0x7e).contains($0) }
+    }
+    let firstIndex = try #require(runs.firstIndex {
+      content.segmentIndex(for: $0.stringSpan) == 0 && printableASCII($0.text)
+    })
+    let secondIndex = try #require(runs.firstIndex {
+      content.segmentIndex(for: $0.stringSpan) == 1 && printableASCII($0.text)
+    })
+    let first = runs[firstIndex]
+    let second = runs[secondIndex]
+    let firstReplacement = String(first.text.reversed())
+    let secondReplacement = String(second.text.reversed())
+    let edited = try content.replacing(ranges: [
+      (first.stringSpan, ReplaceTextCommand.literalStringBytes(Array(firstReplacement.utf8))),
+      (second.stringSpan, ReplaceTextCommand.literalStringBytes(Array(secondReplacement.utf8))),
+    ], in: graph)
+
+    #expect(edited.objects[PDFObjectID(10)] != graph.objects[PDFObjectID(10)])
+    #expect(edited.objects[PDFObjectID(11)] != graph.objects[PDFObjectID(11)])
+    #expect(edited.objects[PDFObjectID(4)] == graph.objects[PDFObjectID(4)])
+    #expect(try TextRunIndexer.runs(
+      in: PageContent.load(pageID: pageID, in: edited), graph: edited
+    ).map(\.text) == runs.enumerated().map { index, run in
+      index == firstIndex ? firstReplacement : index == secondIndex ? secondReplacement : run.text
+    })
+  }
+
   @Test func widthsAndAdvancesIncludeSpacingScalingAndMissingWidth() throws {
     let parsed = try PDFParser.parse(PDFFixtures.textWidthsPages())
     guard case .dictionary(let page)? = parsed.graph.objects[PDFObjectID(3)],

@@ -399,8 +399,15 @@
         viewer.view.go(to: page)
         viewer.setZoom(1)
         _ = viewer.activateTool(.textEdit)
-        try await Task.sleep(for: .milliseconds(100))
-        guard let overlay = find(PageEditOverlayView.self, in: content) else {
+        var overlay: PageEditOverlayView?
+        for _ in 0..<50 {
+          if let found = find(PageEditOverlayView.self, in: content) {
+            overlay = found
+            break
+          }
+          try await Task.sleep(for: .milliseconds(100))
+        }
+        guard let overlay else {
           throw PDFError(.malformed, "Missing corpus pointer target")
         }
         let pagePoint = NSPoint(x: (target.rect[0] + target.rect[2]) / 2,
@@ -541,7 +548,10 @@
       }
       let expectedText = canvas.textView.string, lines = canvas.pageLines(), box = canvas.pageBox()
       let savedCharacters = characters(canvas, document: document)
-      guard canvas.commit() else { throw PDFError(.malformed, "Corpus paragraph did not commit") }
+      guard canvas.commit() else {
+        throw PDFError(.malformed,
+          "Corpus paragraph did not commit: \(viewer.pageTextFormattingIssue ?? "no refusal reason was reported")")
+      }
       let edited = try document.editSession.bytesForSave()
       guard let editedGraph = document.editSession.currentGraph,
         !fontObjects.isEmpty,

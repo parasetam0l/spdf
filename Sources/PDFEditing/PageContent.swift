@@ -84,9 +84,10 @@ struct PageContent {
     try replacing(ranges: [(range, replacement)], in: graph, limits: limits)
   }
 
-  /// Rewrite several non-overlapping decoded ranges inside one editable
-  /// segment in a single pass. Used by coordinate edits that must change
-  /// more than one operand of the same instruction.
+  /// Rewrite several non-overlapping decoded ranges in their original
+  /// editable segments. A content instruction must remain wholly within one
+  /// stream; separate instructions may be updated across the page's `/Contents`
+  /// array without merging or reordering those streams.
   func replacing(
     ranges: [(range: Range<Int>, replacement: [UInt8])], in graph: PDFGraph,
     limits: PDFLimits = PDFLimits()
@@ -98,43 +99,54 @@ struct PageContent {
         throw PDFError(.malformed, "Edited ranges overlap inside the content stream")
       }
     }
-    guard let index = segmentIndex(for: sorted[0].range) else {
-      throw PDFError(.unsupported, "The edited span is outside the page content streams")
-    }
+
+    var rangesBySegment: [Int: [(range: Range<Int>, replacement: [UInt8])]] = [:]
     for entry in sorted {
-      guard segmentIndex(for: entry.range) == index else {
-        throw PDFError(.unsupported, "The edited text spans multiple content streams")
+      guard let index = segmentIndex(for: entry.range) else {
+        throw PDFError(.unsupported, "The edited span crosses content streams or lies outside the page")
+      }
+      rangesBySegment[index, default: []].append(entry)
+    }
+    for index in rangesBySegment.keys {
+      let segment = segments[index]
+      guard segment.isEditable else {
+        throw PDFError(.unsupported, "This content stream uses unsupported filters for editing")
+      }
+      // The same stream object can appear more than once in one /Contents
+      // array. Rewriting its object would change every occurrence, so refuse
+      // instead of applying the replacement to an unselected occurrence.
+      guard segments.filter({ $0.objectID == segment.objectID }).count == 1 else {
+        throw PDFError(.unsupported, "A repeated page content stream cannot be edited selectively")
       }
     }
-    let segment = segments[index]
-    guard segment.isEditable else {
-      throw PDFError(.unsupported, "This content stream uses unsupported filters for editing")
-    }
-    let base = segment.range.lowerBound
-    var decoded = segment.decoded
-    for entry in sorted.reversed() {
-      decoded.replaceSubrange(
-        (entry.range.lowerBound - base)..<(entry.range.upperBound - base),
-        with: entry.replacement)
-    }
 
-    var dictionary = segment.dictionary
-    let bytes: Data
-    if segment.filters == [PDFName("FlateDecode")] {
-      bytes = try PDFFilters.encodeFlate(Data(decoded), limits: limits)
-      dictionary[PDFName("Filter")] = .name(PDFName("FlateDecode"))
-      dictionary.removeValue(forKey: PDFName("DecodeParms"))
-      dictionary.removeValue(forKey: PDFName("DP"))
-    } else {
-      bytes = Data(decoded)
-      dictionary.removeValue(forKey: PDFName("Filter"))
-      dictionary.removeValue(forKey: PDFName("DecodeParms"))
-      dictionary.removeValue(forKey: PDFName("DP"))
-    }
-    dictionary[PDFName("Length")] = .integer(Int64(bytes.count))
+    var result = graph
+    for index in rangesBySegment.keys.sorted() {
+      let segment = segments[index]
+      let base = segment.range.lowerBound
+      var decoded = segment.decoded
+      for entry in (rangesBySegment[index] ?? []).reversed() {
+        decoded.replaceSubrange(
+          (entry.range.lowerBound - base)..<(entry.range.upperBound - base),
+          with: entry.replacement)
+      }
 
-    var graph = graph
-    graph.objects[segment.objectID] = .stream(PDFStream(dictionary: dictionary, bytes: bytes))
-    return graph
+      var dictionary = segment.dictionary
+      let bytes: Data
+      if segment.filters == [PDFName("FlateDecode")] {
+        bytes = try PDFFilters.encodeFlate(Data(decoded), limits: limits)
+        dictionary[PDFName("Filter")] = .name(PDFName("FlateDecode"))
+        dictionary.removeValue(forKey: PDFName("DecodeParms"))
+        dictionary.removeValue(forKey: PDFName("DP"))
+      } else {
+        bytes = Data(decoded)
+        dictionary.removeValue(forKey: PDFName("Filter"))
+        dictionary.removeValue(forKey: PDFName("DecodeParms"))
+        dictionary.removeValue(forKey: PDFName("DP"))
+      }
+      dictionary[PDFName("Length")] = .integer(Int64(bytes.count))
+      result.objects[segment.objectID] = .stream(PDFStream(dictionary: dictionary, bytes: bytes))
+    }
+    return result
   }
 }
