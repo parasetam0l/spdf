@@ -1,6 +1,7 @@
 #if DEBUG
   import AppKit
   import CoreGraphics
+  import Darwin
   import DocumentSession
   import Foundation
   import ImageIO
@@ -39,6 +40,91 @@
         FileHandle.standardError.write(Data("[termination-ui] disposable document ready\n".utf8))
       } catch {
         FileHandle.standardError.write(Data("[termination-ui] \(error)\n".utf8))
+        exit(1)
+      }
+    }
+
+    /// Seeds a disposable recovery snapshot and exits without running AppKit's
+    /// document-close path, simulating process loss between autosaves.
+    static func seedRecoveryForRestart(fixtures: URL, output: URL) async {
+      do {
+        try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
+        SPDFDocument.recoveryDirectoryOverride = output
+        let store = SPDFDocument.makeRecoveryStore()
+        try? FileManager.default.removeItem(at: store.policy.directory)
+        let sourceURL = output.appendingPathComponent("source.pdf")
+        try Data(contentsOf: fixtures.appendingPathComponent("one-page.pdf"))
+          .write(to: sourceURL, options: .atomic)
+        let (opened, _) = try await NSDocumentController.shared.openDocument(
+          withContentsOf: sourceURL, display: true)
+        guard let document = opened as? SPDFDocument else {
+          throw failure("The recovery source did not open in the editor")
+        }
+        document.rotateCurrentPage(byDegrees: 90)
+        document.snapshotRecoveryNow()
+        let key = document.recoveryKey
+        guard store.pendingKeys() == [key],
+          let snapshot = try store.latestBytes(for: key)
+        else { throw failure("The open document did not create its recovery snapshot") }
+        let expected = try document.data(ofType: "com.adobe.pdf")
+        guard snapshot == expected else {
+          throw failure("Recovery bytes differ from the open document's edited state")
+        }
+        try expected.write(to: output.appendingPathComponent("expected.pdf"), options: .atomic)
+        try Data(key.utf8).write(to: output.appendingPathComponent("recovery-key.txt"), options: .atomic)
+        FileHandle.standardError.write(Data("[recovery] seeded; exiting before document close\n".utf8))
+        Darwin._exit(0)
+      } catch {
+        FileHandle.standardError.write(Data("[recovery] seed FAIL: \(error)\n".utf8))
+        Darwin._exit(1)
+      }
+    }
+
+    /// Runs in a fresh Debug app process, exercises the real recovery prompt,
+    /// and verifies the restored bytes before clearing the disposable record.
+    static func resumeRecoveryAfterRestart(output: URL) async {
+      do {
+        SPDFDocument.recoveryDirectoryOverride = output
+        let store = SPDFDocument.makeRecoveryStore()
+        let keyURL = output.appendingPathComponent("recovery-key.txt")
+        let key = try String(contentsOf: keyURL, encoding: .utf8)
+          .trimmingCharacters(in: .whitespacesAndNewlines)
+        try require(store.pendingKeys() == [key],
+          "A fresh process did not find exactly the seeded recovery record")
+        let expected = try Data(contentsOf: output.appendingPathComponent("expected.pdf"))
+        let restoredPrompt = await drive([.button("Recover")]) {
+          guard let appDelegate = NSApp.delegate as? ApplicationDelegate else { return false }
+          appDelegate.offerRecoveryIfNeeded()
+          return true
+        }
+        let recovered = NSDocumentController.shared.documents.compactMap { $0 as? SPDFDocument }
+          .first { $0.fileURL == nil && $0.recoveryKey == key }
+        guard let recovered else { throw failure("The recovery prompt did not restore a document") }
+        try require(restoredPrompt, "The recovery prompt was not handled")
+        try require(try recovered.data(ofType: "com.adobe.pdf") == expected,
+          "Recovered bytes differ from the pre-termination snapshot")
+        let restoredURL = output.appendingPathComponent("restored.pdf")
+        let saved = await withCheckedContinuation { continuation in
+          recovered.save(to: restoredURL, ofType: "com.adobe.pdf", for: .saveAsOperation) { error in
+            continuation.resume(returning: error == nil)
+          }
+        }
+        try require(saved, "Saving the recovered document to a new file failed")
+        try require(try Data(contentsOf: restoredURL) == expected,
+          "Saved recovery output differs from the pre-termination snapshot")
+        try await waitUntil { store.pendingKeys().isEmpty }
+        recovered.close()
+        let report: [String: Any] = [
+          "passed": true,
+          "scope": "Disposable recovery snapshot survived abrupt Debug-process exit, recovered and saved byte-identically in a fresh process",
+          "date": ISO8601DateFormatter().string(from: Date()),
+        ]
+        try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys])
+          .write(to: output.appendingPathComponent("recovery-restart-test.json"), options: .atomic)
+        FileHandle.standardError.write(Data("[recovery] restart PASS: restored bytes match\n".utf8))
+        exit(0)
+      } catch {
+        FileHandle.standardError.write(Data("[recovery] resume FAIL: \(error)\n".utf8))
         exit(1)
       }
     }
@@ -358,6 +444,53 @@
           "Deferred Sparkle install did not resume exactly once after the actual worker")
         deferred.close()
         record("real Sparkle delegate callback defers/retries handler until actual job completion")
+
+        let previousRecoveryOverride = SPDFDocument.recoveryDirectoryOverride
+        let recoveryRoot = output.appendingPathComponent("MultipleRecovery", isDirectory: true)
+        try? FileManager.default.removeItem(at: recoveryRoot)
+        SPDFDocument.recoveryDirectoryOverride = recoveryRoot
+        defer { SPDFDocument.recoveryDirectoryOverride = previousRecoveryOverride }
+        let recoveryStore = SPDFDocument.makeRecoveryStore()
+        func makeRecoverySnapshot(_ fixture: String, key: String, rotation: Int) throws {
+          let fixtureURL = fixtures.appendingPathComponent(fixture)
+          let session = DocumentEditSession()
+          session.load(try PDFSource(data: Data(contentsOf: fixtureURL)))
+          try session.rotatePage(at: 0, byDegrees: rotation)
+          guard
+            try recoveryStore.snapshot(session: session, key: key, originalURL: nil) != nil
+          else {
+            throw failure("Dirty recovery session did not create a snapshot")
+          }
+        }
+        try makeRecoverySnapshot("one-page.pdf", key: "session-a", rotation: 90)
+        try makeRecoverySnapshot("three-pages.pdf", key: "session-b", rotation: 180)
+        let pendingRecoveryKeys = recoveryStore.pendingKeys()
+        try require(pendingRecoveryKeys == ["session-a", "session-b"],
+          "Multiple pending recovery snapshots were not enumerated deterministically")
+        let firstRecoveryKey = pendingRecoveryKeys[0]
+        guard let firstRecoveryBytes = try recoveryStore.latestBytes(for: firstRecoveryKey) else {
+          throw failure("The selected recovery snapshot has no bytes")
+        }
+        let promptsHandled = await drive([.button("Recover"), .button("Discard")]) {
+          guard let appDelegate = NSApp.delegate as? ApplicationDelegate else { return false }
+          appDelegate.offerRecoveryIfNeeded()
+          return true
+        }
+        let recoveredRecoveryDocuments = NSDocumentController.shared.documents
+          .compactMap { $0 as? SPDFDocument }
+          .filter { $0.fileURL == nil && $0.recoveryKey == firstRecoveryKey }
+        try require(promptsHandled && recoveredRecoveryDocuments.count == 1,
+          "Startup did not recover the chosen document while handling the next pending record")
+        try require(
+          try recoveredRecoveryDocuments[0].data(ofType: "com.adobe.pdf") == firstRecoveryBytes,
+          "Recovered document bytes do not match the selected snapshot")
+        let remainingRecoveryKeys = Set(recoveryStore.pendingKeys())
+        try require(remainingRecoveryKeys == [firstRecoveryKey],
+          "Discarding the second recovery changed the wrong record")
+        recoveredRecoveryDocuments[0].close()
+        try require(recoveryStore.pendingKeys().isEmpty,
+          "Closing the restored document did not clear its recovery record")
+        record("startup offers every pending recovery document once and preserves the selected snapshot")
 
         let report: [String: Any] = [
           "passed": true, "cases": accepted, "date": ISO8601DateFormatter().string(from: Date()),

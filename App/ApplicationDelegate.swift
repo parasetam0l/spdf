@@ -110,6 +110,21 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
         Task { await TerminationSmoke.run(fixtures: fixtures, output: output) }
         return
       }
+      if let index = CommandLine.arguments.firstIndex(of: "--test-recovery-seed"),
+        CommandLine.arguments.count > index + 2
+      {
+        let fixtures = URL(fileURLWithPath: CommandLine.arguments[index + 1], isDirectory: true)
+        let output = URL(fileURLWithPath: CommandLine.arguments[index + 2], isDirectory: true)
+        Task { await TerminationSmoke.seedRecoveryForRestart(fixtures: fixtures, output: output) }
+        return
+      }
+      if let index = CommandLine.arguments.firstIndex(of: "--test-recovery-resume"),
+        CommandLine.arguments.count > index + 1
+      {
+        let output = URL(fileURLWithPath: CommandLine.arguments[index + 1], isDirectory: true)
+        Task { await TerminationSmoke.resumeRecoveryAfterRestart(output: output) }
+        return
+      }
       if let index = CommandLine.arguments.firstIndex(of: "--smoke-test"),
         CommandLine.arguments.count > index + 2
       {
@@ -133,40 +148,47 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
   }
 
   /// P10-020: offer to restore unsaved edits from a previous session.
-  private func offerRecoveryIfNeeded() {
+  /// Internal so the native termination diagnostic can exercise startup recovery prompts.
+  func offerRecoveryIfNeeded() {
     let store = SPDFDocument.makeRecoveryStore()
-    guard let key = store.pendingKeys().first else { return }
-    let record = try? store.latest(for: key)
-    let alert = NSAlert()
-    alert.messageText = "Recover unsaved changes?"
-    if let record {
-      alert.informativeText =
-        "sPDF Editor found unsaved edits from "
-        + "\(record.savedAt.formatted(date: .abbreviated, time: .shortened))."
-    } else {
-      alert.informativeText = "sPDF Editor found unsaved edits from a previous session."
+    let pendingKeys = store.pendingKeys()
+    guard !pendingKeys.isEmpty else { return }
+    var restoredDocument = false
+    for key in pendingKeys {
+      let record = try? store.latest(for: key)
+      let alert = NSAlert()
+      alert.messageText = "Recover unsaved changes?"
+      if let record {
+        alert.informativeText =
+          "sPDF Editor found unsaved edits from "
+          + "\(record.savedAt.formatted(date: .abbreviated, time: .shortened))."
+      } else {
+        alert.informativeText = "sPDF Editor found unsaved edits from a previous session."
+      }
+      alert.addButton(withTitle: "Recover")
+      alert.addButton(withTitle: "Discard")
+      guard alert.runModal() == .alertFirstButtonReturn else {
+        try? store.discard(for: key)
+        continue
+      }
+      do {
+        guard let bytes = try store.latestBytes(for: key),
+          let document = try documents.makeUntitledDocument(ofType: "com.adobe.pdf")
+            as? SPDFDocument
+        else { throw CocoaError(.fileReadCorruptFile) }
+        // An empty untitled document has no source to display. Load its recovery
+        // snapshot before creating and showing the document's window.
+        try document.loadRecovered(bytes, recoveryKey: key)
+        documents.addDocument(document)
+        document.showWindows()
+        restoredDocument = true
+      } catch {
+        // Keep this snapshot available if restoration failed, then continue
+        // offering the other recoverable documents from the same session.
+        documents.presentError(error)
+      }
     }
-    alert.addButton(withTitle: "Recover")
-    alert.addButton(withTitle: "Discard")
-    guard alert.runModal() == .alertFirstButtonReturn else {
-      try? store.discard(for: key)
-      return
-    }
-    do {
-      guard let bytes = try store.latestBytes(for: key),
-        let document = try documents.makeUntitledDocument(ofType: "com.adobe.pdf")
-          as? SPDFDocument
-      else { throw CocoaError(.fileReadCorruptFile) }
-      // An empty untitled document has no source to display. Load its recovery
-      // snapshot before creating and showing the document's window.
-      try document.loadRecovered(bytes, recoveryKey: key)
-      documents.addDocument(document)
-      document.showWindows()
-      welcome?.close()
-    } catch {
-      // Keep the snapshot available if restoration failed.
-      documents.presentError(error)
-    }
+    if restoredDocument { welcome?.close() }
   }
 
   func applicationShouldOpenUntitledFile(_ sender: NSApplication) -> Bool { false }
@@ -205,6 +227,8 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
         || CommandLine.arguments.contains("--test-corpus-paragraphs")
         || CommandLine.arguments.contains("--test-corpus-image")
         || CommandLine.arguments.contains("--test-corpus-access")
+        || CommandLine.arguments.contains("--test-recovery-seed")
+        || CommandLine.arguments.contains("--test-recovery-resume")
         || CommandLine.arguments.contains("--survey-imported-paragraphs")
       {
         sender.reply(toOpenOrPrint: .success)

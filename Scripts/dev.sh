@@ -73,6 +73,25 @@ case "${1:-}" in
     "$app" --test-termination "$task_root/Tests/Fixtures" "$task_root/Work/Termination" \
       -ApplePersistenceIgnoreState YES
     ;;
+  recovery-crash-smoke)
+    app="$task_root/Work/Build/Build/Products/Debug/sPDF Editor.app/Contents/MacOS/sPDF Editor"
+    if [[ ! -x "$app" ]]; then
+      printf 'Build the Debug app first: bash Scripts/dev.sh build Debug\n' >&2
+      exit 2
+    fi
+    output="${2:-}"
+    if [[ -z "$output" || -e "$output" ]]; then
+      printf 'Pass a new, unused output directory for this disposable recovery check.\n' >&2
+      exit 2
+    fi
+    mkdir -p "$output"
+    "$app" --test-recovery-seed "$task_root/Tests/Fixtures" "$output" \
+      -ApplePersistenceIgnoreState YES
+    cmp "$task_root/Tests/Fixtures/one-page.pdf" "$output/source.pdf"
+    "$app" --test-recovery-resume "$output" -ApplePersistenceIgnoreState YES
+    qpdf --check "$output/expected.pdf"
+    qpdf --check "$output/restored.pdf"
+    ;;
   release)
     if [[ "$(uname -m)" != arm64 ]]; then
       printf 'The signed release path currently targets Apple Silicon only.\n' >&2
