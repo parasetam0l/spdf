@@ -380,6 +380,28 @@ struct RenderingTests {
     #expect(session.pageNumber == 1)
   }
 
+  /// PDFKit's widgets are a display projection. Mutating them directly would
+  /// not update the core graph that Save writes, so the viewer copy exposes
+  /// widget values read-only while preserving the rendered field state.
+  @Test @MainActor func viewerFormWidgetsAreReadOnlyProjection() throws {
+    let data = try PDFFixtures.formPages()
+    let originalDocument = try #require(PDFDocument(data: data))
+    let originalAgree = try #require(
+      originalDocument.page(at: 0)?.annotations.first { $0.fieldName == "agree" })
+    #expect(originalAgree.type == "Widget")
+    #expect(!originalAgree.isReadOnly)
+
+    let session = PDFViewingSession()
+    try session.open(PDFSource(data: data))
+    let viewedAgree = try #require(
+      session.view.document?.page(at: 0)?.annotations.first { $0.fieldName == "agree" })
+    #expect(viewedAgree.type == "Widget")
+    #expect(viewedAgree.isReadOnly)
+    #expect(viewedAgree.widgetStringValue == originalAgree.widgetStringValue)
+    #expect(viewedAgree.buttonWidgetState == originalAgree.buttonWidgetState)
+    #expect(!originalAgree.isReadOnly)
+  }
+
   /// P22-028 interoperability: flattening removes the annotations from
   /// Apple's view while the page still renders the marks as content, and the
   /// untouched link keeps working.

@@ -458,6 +458,16 @@ public final class PDFViewingSession: NSObject, ObservableObject, PDFViewDelegat
       documentState = .failed("Apple's renderer could not open this PDF")
       throw PDFError(.malformed, "Apple's renderer could not open this PDF")
     }
+    // PDFKit widgets belong to this disposable renderer document. Letting
+    // them mutate would change only PDFKit's copy, while Save serializes the
+    // canonical edit-session graph. Keep renderer widgets read-only; supported
+    // edits go through the app's form panel or the inline text-field overlay.
+    for pageIndex in 0..<document.pageCount {
+      guard let page = document.page(at: pageIndex) else { continue }
+      for annotation in page.annotations where annotation.type == "Widget" {
+        annotation.isReadOnly = true
+      }
+    }
     clearSearch()
     backStack.removeAll()
     forwardStack.removeAll()
@@ -1279,7 +1289,7 @@ private final class ReadOnlyPDFView: PDFView {
     let point = convert(event.locationInWindow, from: nil)
     if let page = page(for: point, nearest: false),
       let annotation = page.annotation(at: convert(point, to: page)),
-      annotation.type == PDFAnnotationSubtype.widget.rawValue
+      annotation.type == "Widget"
     {
       return
     }

@@ -3,8 +3,10 @@ import MacServices
 import PDFEditing
 import SwiftUI
 
-/// Routes page text to the direct canvas and form widgets to native fields.
-/// Outside Edit PDF, ordinary page text selection passes through to PDFKit.
+/// Routes page text and text widgets through the canonical edit session.
+/// Button and choice widgets are edited through the Forms panel, not PDFKit's
+/// disposable renderer document. Outside Edit PDF, ordinary text selection
+/// passes through to PDFKit.
 struct PageEditOverlay: NSViewRepresentable {
   @ObservedObject var viewer: PDFViewingSession
 
