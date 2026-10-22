@@ -20,6 +20,7 @@ struct WorkspaceView: View {
   var onReplyComment: (Comment) -> Void
   var onSetStateComment: (Comment, PDFName?) -> Void
   var onSubmitFormText: (String, String) -> Void
+  var onDraftFormText: (String, String) -> Void
   var onToggleForm: (String, Bool) -> Void
   var onSelectFormChoice: (String, String) -> Void
   var onSelectFormField: (FormField) -> Void
@@ -476,7 +477,7 @@ struct WorkspaceView: View {
           fields: forms.fields, orphanedWidgetCount: forms.orphanedWidgetCount,
           canEditContent: canEdit, editingRestrictionNotice: viewer.editingRestrictionNotice,
           onSubmitText: onSubmitFormText,
-          onDraftText: { forms.pendingText[$0] = $1 }, onToggle: onToggleForm,
+          onDraftText: onDraftFormText, onToggle: onToggleForm,
           onSelectChoice: onSelectFormChoice, onSelect: onSelectFormField)
       case .signatures:
         SignaturesPanel(entries: signatures.entries, onSelect: onSelectSignature)

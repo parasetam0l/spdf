@@ -39,6 +39,22 @@ public final class NativeTextFormatting {
   private let licensedPreviewFonts: [String: NSFont]
   public var onChange: (() -> Void)?
 
+  /// Resolve a new page-text block's initial style to a font the PDF writer
+  /// can actually serialize. Imported fonts exposed while editing an existing
+  /// paragraph are scoped to that paragraph; only standard faces and fonts
+  /// provisioned through the accepted-license flow can carry over to new text.
+  public static func defaultsForNewText(
+    requestedFamily: String, size: Double, color: [Double], opacity: Double,
+    licensedFonts: [CustomTextFont]
+  ) -> (familyName: String, format: PageTextFormat) {
+    if let licensed = licensedFonts.first(where: { $0.faceName == requestedFamily }) {
+      return (licensed.faceName,
+        PageTextFormat(size: size, color: color, customFont: licensed, opacity: opacity))
+    }
+    let font = StandardTextFont(rawValue: requestedFamily) ?? .helvetica
+    return (font.rawValue, PageTextFormat(font: font, size: size, color: color, opacity: opacity))
+  }
+
   public init(view: NSTextView, fragments: [PageTextFragment], initial: PageTextFormat,
     profiles: [PDFName: PageTextFontProfile] = [:], licensedFonts: [CustomTextFont] = []) {
     sourceFonts = NativeParagraphEditing.fonts(profiles: profiles)

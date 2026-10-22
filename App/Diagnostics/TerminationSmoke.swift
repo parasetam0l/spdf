@@ -175,7 +175,9 @@
         record("external-change cancellation preserves disk bytes and pending edits")
 
         let form = try await open("form-pages.pdf", as: "pending-form.pdf")
-        form.formsModel.pendingText["name"] = "Pending termination value"
+        form.stageFormTextDraft(fieldName: "name", text: "Pending termination value")
+        try require(form.isDocumentEdited && form.workspaceDocumentState.hasChanges,
+          "An unsubmitted form draft did not mark the document dirty")
         let formSaved = await drive([.button("Save")]) { await request() }
         let formParsed = try PDFParser.parse(Data(contentsOf: output.appendingPathComponent("pending-form.pdf")))
         let reopenedFields = try FormInventory.fields(in: formParsed.graph, pageIDs: formParsed.pageIDs)

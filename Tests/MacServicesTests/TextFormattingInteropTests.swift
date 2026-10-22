@@ -15,6 +15,34 @@ private final class FormatTestTextView: NSTextView {
 
 @Suite("Native character formatting and saved PDF text")
 struct TextFormattingInteropTests {
+  @Test @MainActor func newTextUsesWritableFontAfterImportedFontSelection() throws {
+    let color = [0.1, 0.2, 0.3]
+    let defaults = NativeTextFormatting.defaultsForNewText(
+      requestedFamily: "DejaVuSans", size: 18, color: color, opacity: 0.8,
+      licensedFonts: [])
+    #expect(defaults.familyName == "Helvetica")
+    #expect(defaults.format == PageTextFormat(
+      font: .helvetica, size: 18, color: color, opacity: 0.8))
+
+    let view = FormatTestTextView(frame: .zero)
+    let formatting = NativeTextFormatting(view: view, fragments: [], initial: defaults.format)
+    let value = "New text after imported-font editing"
+    view.insertText(value, replacementRange: NSRange(location: 0, length: 0))
+    let fragments = formatting.fragments()
+    #expect(fragments == [.init(text: value, format: defaults.format)])
+
+    let parsed = try PDFParser.parse(BlankPDF.data())
+    let pageID = parsed.pageIDs[0]
+    let line = PageTextLine(text: value, x: 48, baseline: 700,
+      segments: fragments.map { .init(text: $0.text, x: 48, format: $0.format) })
+    let edited = try PDFEditingEngine.commit(PDFTransaction([
+      AddPageTextLinesCommand(pageID: pageID, lines: [line],
+        box: PageTextBox(x: 48, firstBaseline: 700, width: 300, lineSpacing: 22))
+    ]), to: parsed.graph)
+    let bytes = try PDFWriter.write(edited)
+    #expect(PDFDocument(data: bytes)?.string?.contains(value) == true)
+  }
+
   @Test @MainActor func nativePreviewRetainsConstantTextOpacity() throws {
     let view = FormatTestTextView(frame: .zero)
     let format = PageTextFormat(size: 16, opacity: 0.5)

@@ -256,7 +256,15 @@ final class InlinePageTextCanvas: NSView, NSTextViewDelegate {
       ? attributed!.attributes(at: 0, effectiveRange: nil) : [:]
     let input = target?.style
     let pointSize = input?.fontSize ?? viewer.pageTextStyle.fontSize
-    let family = input?.fontFamily ?? viewer.pageTextStyle.fontFamily
+    let requestedFamily = input?.fontFamily ?? viewer.pageTextStyle.fontFamily
+    let licensedFonts = ProvisionedFontStore.availableFonts(
+      in: SPDFDocument.fontsInstallDirectoryOverride)
+    let newTextDefaults = NativeTextFormatting.defaultsForNewText(
+      requestedFamily: requestedFamily, size: pointSize,
+      color: input?.fillColor ?? viewer.pageTextStyle.color,
+      opacity: input?.opacity ?? viewer.pageTextStyle.opacity,
+      licensedFonts: licensedFonts)
+    let family = target == nil ? newTextDefaults.familyName : requestedFamily
     let resolvedFont =
       (target == nil ? nil : attributes[.font] as? NSFont)
       ?? NSFont(name: family, size: pointSize) ?? .systemFont(ofSize: pointSize)
@@ -291,14 +299,12 @@ final class InlinePageTextCanvas: NSView, NSTextViewDelegate {
     textView.textContainer?.lineFragmentPadding = 0
     textView.acceptsLineBreaks = wrapsText
     textView.string = target?.text ?? ""
-    let initialFormat = target?.paragraph?.fragments.first?.format
-      ?? StandardTextFont(rawValue: family).map { PageTextFormat(font: $0, size: pointSize, color: style.color) }
-    if let initial = initialFormat, target == nil || target?.paragraph != nil {
+    let initialFormat = target?.paragraph?.fragments.first?.format ?? newTextDefaults.format
+    if target == nil || target?.paragraph != nil {
       formatting = NativeTextFormatting(view: textView,
-        fragments: target?.paragraph?.fragments ?? [], initial: initial,
+        fragments: target?.paragraph?.fragments ?? [], initial: initialFormat,
         profiles: target?.paragraph?.fontProfiles ?? [:],
-        licensedFonts: ProvisionedFontStore.availableFonts(
-          in: SPDFDocument.fontsInstallDirectoryOverride))
+        licensedFonts: licensedFonts)
       formatting?.onChange = { [weak self] in self?.formattingChanged() }
       textView.toggleBold = { [weak self] in self?.toggleFormat(italic: false) }
       textView.toggleItalic = { [weak self] in self?.toggleFormat(italic: true) }

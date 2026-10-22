@@ -79,6 +79,7 @@ final class SPDFDocument: NSDocument {
   private var textBlockCache: [Int: [PageTextTarget]] = [:]
   private var textEditRefusalCache: [Int: [PageTextEditRefusalTarget]] = [:]
   private nonisolated let pendingPageText = PendingPageTextState()
+  private nonisolated let pendingFormText = PendingFormTextState()
 
   // AppKit constructs concurrent-reading documents on its worker queue.
   // No views or other main-actor objects are created until makeWindowControllers().
@@ -90,7 +91,8 @@ final class SPDFDocument: NSDocument {
     // For an opened file, the canonical graph and pending page text decide
     // whether Save is needed, including Undo back to the saved graph.
     // Untitled/recovered documents still need their initial Save As.
-    (fileURL == nil && super.isDocumentEdited) || editSession.isDirty || pendingPageText.hasChanges
+    (fileURL == nil && super.isDocumentEdited) || editSession.isDirty
+      || pendingPageText.hasChanges || pendingFormText.hasChanges
   }
   nonisolated override class func canConcurrentlyReadDocuments(ofType typeName: String) -> Bool {
     true
@@ -531,6 +533,9 @@ final class SPDFDocument: NSDocument {
         onSetStateComment: { [weak self] comment, state in self?.setState(state, on: comment) },
         onSubmitFormText: { [weak self] name, text in
           self?.fillFormText(fieldName: name, text: text)
+        },
+        onDraftFormText: { [weak self] name, text in
+          self?.stageFormTextDraft(fieldName: name, text: text)
         },
         onToggleForm: { [weak self] name, isOn in self?.setFormButton(fieldName: name, isOn: isOn)
         },
@@ -1381,9 +1386,28 @@ final class SPDFDocument: NSDocument {
       return false
     }
     formsModel.pendingText[fieldName] = nil
+    pendingFormText.setPending(false, for: fieldName)
     noteUserEdit()
     refreshViewer(preservingPage: viewer?.pageNumber ?? 1)
     return true
+  }
+
+  /// Keep a sidebar text-field draft visible to NSDocument's save, title-bar,
+  /// and close-decision state before the user presses Return.
+  func stageFormTextDraft(fieldName: String, text: String) {
+    guard canEditContent else { return }
+    let committed = formsModel.fields.first(where: { $0.name == fieldName })?.stringValue ?? ""
+    if text == committed {
+      formsModel.pendingText[fieldName] = nil
+      pendingFormText.setPending(false, for: fieldName)
+    } else {
+      formsModel.pendingText[fieldName] = text
+      pendingFormText.setPending(true, for: fieldName)
+    }
+    refreshWorkspaceActions()
+    for controller in windowControllers {
+      controller.window?.isDocumentEdited = isDocumentEdited
+    }
   }
 
   /// P24-013: resolve an editable text widget under a page point.
@@ -4689,6 +4713,7 @@ final class SPDFDocument: NSDocument {
     for (name, text) in formsModel.pendingText {
       if editSession.formFields().first(where: { $0.name == name })?.stringValue == text {
         formsModel.pendingText[name] = nil
+        pendingFormText.setPending(false, for: name)
       } else if !fillFormText(fieldName: name, text: text) {
         return false
       }

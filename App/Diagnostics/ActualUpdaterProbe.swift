@@ -37,7 +37,8 @@
           guard let document = document as? SPDFDocument else { throw CocoaError(.fileReadCorruptFile) }
           documents.append(document)
         }
-        documents[0].formsModel.pendingText["name"] = "Actual authenticated update"
+        documents[0].stageFormTextDraft(
+          fieldName: "name", text: "Actual authenticated update")
         let pages = documents[1]
         pages.viewer?.setContinuous(false)
         pages.viewer?.go(to: 2)
