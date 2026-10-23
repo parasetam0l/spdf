@@ -31,6 +31,34 @@ struct TextRun {
   let hasKnownOffset: Bool
 }
 
+extension TextRun {
+  /// TXT-01: the page-space scale when the composed text matrix is an
+  /// unrotated uniform scale plus translation. Paragraph reflow writes
+  /// identity text matrices, so it can only represent these transforms (by
+  /// folding the factor into the emitted font size). Rotated, skewed, or
+  /// nonuniform transforms return nil and must be refused.
+  var uniformPageSpaceScale: Double? {
+    let matrix = TextCanvasSupport.concatenate(ctm, self.matrix)
+    let xScale = (matrix[0] * matrix[0] + matrix[1] * matrix[1]).squareRoot()
+    let yScale = (matrix[2] * matrix[2] + matrix[3] * matrix[3]).squareRoot()
+    let scale = max(xScale, yScale)
+    guard scale > 0, scale.isFinite else { return nil }
+    let tolerance = max(0.0001, scale * 0.001)
+    guard abs(xScale - yScale) <= tolerance,
+      abs(matrix[0] * matrix[2] + matrix[1] * matrix[3]) <= tolerance * scale,
+      matrix[0] > 0, matrix[3] > 0,
+      abs(matrix[1]) <= tolerance, abs(matrix[2]) <= tolerance
+    else { return nil }
+    return yScale
+  }
+
+  /// Effective font size in page space for paragraph layout and reflow.
+  /// Unsupported transforms keep the raw size; reflow refuses them separately.
+  var pageSpaceFontSize: Double {
+    fontSize * (uniformPageSpaceScale ?? 1)
+  }
+}
+
 /// P13-011..P13-014: walks parsed instructions tracking text objects, font
 /// and spacing state, text/line matrices, and the text-show operators.
 enum TextRunIndexer {

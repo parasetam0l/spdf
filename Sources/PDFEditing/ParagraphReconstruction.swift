@@ -113,6 +113,9 @@ public enum ParagraphReconstruction {
     guard !layout.clusters.isEmpty else { return [] }
     let content = try PageContent.load(pageID: pageID, in: graph)
     let runs = try TextRunIndexer.runs(in: content, graph: graph)
+    // TXT-01: paragraph geometry uses page-space font size so a raw `1 Tf`
+    // multiplied by a uniform text matrix groups by its visible size.
+    let effectiveFontSizes = runs.map(\.pageSpaceFontSize)
     // P35-029: callers reconstructing many pages compute the role map once and
     // pass it in; a single call still computes it lazily.
     let roleByMCID = roles ?? structureRoles(pageID: pageID, in: graph)
@@ -132,7 +135,7 @@ public enum ParagraphReconstruction {
       for entry in indexed {
         if let last = currentSegment.last {
           let gap = entry.cluster.bounds[0] - last.cluster.bounds[2]
-          if gap > max(30, 3 * entry.cluster.fontSize) {
+          if gap > max(30, 3 * effectiveFontSizes[entry.cluster.runIndex]) {
             segments.append(currentSegment)
             currentSegment = []
           }
@@ -143,7 +146,7 @@ public enum ParagraphReconstruction {
       for segment in segments where !segment.isEmpty {
         lineInfo.append(makeLineInfo(
           segment: segment, lineIndex: lineIndex, bodySize: bodySize,
-          mcidByCluster: mcidByCluster))
+          mcidByCluster: mcidByCluster, effectiveFontSizes: effectiveFontSizes))
       }
     }
     guard !lineInfo.isEmpty else { return [] }
@@ -207,7 +210,8 @@ public enum ParagraphReconstruction {
         }
         return ParagraphStyle(
           fontResource: String(decoding: run.fontResource.bytes, as: UTF8.self),
-          fontSize: run.fontSize, fillColor: run.fillColor, baseFont: baseFont)
+          fontSize: effectiveFontSizes[runIndex],
+          fillColor: run.fillColor, baseFont: baseFont)
       }
       let text = block.map { layout.text(in: $0.range) }
         .map { $0.trimmingCharacters(in: .whitespaces) }
@@ -263,7 +267,7 @@ public enum ParagraphReconstruction {
 
   private static func makeLineInfo(
     segment: [(index: Int, cluster: TextCluster)], lineIndex: Int, bodySize: Double,
-    mcidByCluster: [Int: Int]
+    mcidByCluster: [Int: Int], effectiveFontSizes: [Double]
   ) -> LineInfo {
     var bounds = [Double.greatestFiniteMagnitude, Double.greatestFiniteMagnitude,
                   -Double.greatestFiniteMagnitude, -Double.greatestFiniteMagnitude]
@@ -273,9 +277,10 @@ public enum ParagraphReconstruction {
     var cursor: Double?
     for entry in segment {
       let cluster = entry.cluster
+      let effectiveSize = effectiveFontSizes[cluster.runIndex]
       let estimatedWidth =
         cluster.advance
-        ?? (0.5 * cluster.fontSize * Double(max(cluster.text.count, 1)))
+        ?? (0.5 * effectiveSize * Double(max(cluster.text.count, 1)))
       let start = max(cluster.bounds[0], cursor ?? cluster.bounds[0])
       let end = max(cluster.bounds[2], start + estimatedWidth)
       cursor = end
@@ -289,7 +294,7 @@ public enum ParagraphReconstruction {
     let lastIndex = segment.last?.index ?? firstIndex
     return LineInfo(
       lineIndex: lineIndex, range: firstIndex..<(lastIndex + 1), bounds: bounds,
-      baseline: baseline, maxFontSize: segment.map { $0.cluster.fontSize }.max() ?? bodySize,
+      baseline: baseline, maxFontSize: segment.map { effectiveFontSizes[$0.cluster.runIndex] }.max() ?? bodySize,
       runIndices: unique(segment.map { $0.cluster.runIndex }),
       mcid: mcidByCluster[firstIndex])
   }

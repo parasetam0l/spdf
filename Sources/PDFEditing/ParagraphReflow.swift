@@ -133,8 +133,7 @@ public enum ParagraphReflow {
     let content: PageContent
     let runs: [TextRun]
     let styles: [ParagraphStyle]
-    let fonts: [SimpleFont]
-    let metricFonts: [IndexedTextFont?]
+    let fonts: [IndexedTextFont]
   }
 
   /// Resolve the paragraph's runs, per-style fonts, and editable segment.
@@ -161,8 +160,51 @@ public enum ParagraphReflow {
     guard case .dictionary(let page)? = graph.objects[pageID] else {
       throw PDFError(.malformed, "The page is missing")
     }
+    // TXT-02: reflow can replace a complete TJ array, but not a subset of its
+    // string members. Partial selections would leave the unselected text
+    // behind and shift it when the array is rewritten.
     for run in selected where run.operandPath.count == 2 {
-      throw PDFError(.unsupported, "Paragraphs inside TJ arrays are not reflowed yet")
+      guard run.operandPath.first == 0,
+        run.instructionIndex >= 0, run.instructionIndex < content.instructions.count,
+        content.instructions[run.instructionIndex].operatorName == "TJ",
+        let array = content.instructions[run.instructionIndex].operands.first,
+        case .array(let members) = array.value
+      else {
+        throw PDFError(.unsupported, "The paragraph's TJ array is malformed")
+      }
+      let selectedMembers = Set(
+        selected.filter { $0.instructionIndex == run.instructionIndex }
+          .map { $0.operandPath[1] })
+      let stringMembers = members.indices.filter { index in
+        guard case .string(let bytes) = members[index] else { return false }
+        // Whitespace-only members carry spacing, not paragraph content; they
+        // may be cleared with the array without being in the selection.
+        return !String(decoding: bytes, as: UTF8.self).allSatisfy(\.isWhitespace)
+      }
+      guard Set(stringMembers).isSubset(of: selectedMembers) else {
+        throw PDFError(
+          .unsupported,
+          "Reflow needs the complete TJ array; the selection covers only part of it")
+      }
+    }
+    // TXT-01: reflow emits identity text matrices with an explicit font size.
+    // It can only represent an unrotated uniform scale folded into that size;
+    // rotated, skewed, nonuniform, or spaced runs must refuse rather than move
+    // or distort the text.
+    for run in selected {
+      // Sub-point tracking from TJ compensation is normalized to zero by the
+      // identity-matrix rewrite; larger tracking, horizontal scaling, or a
+      // baseline rise would visibly change the text and must refuse.
+      guard run.uniformPageSpaceScale != nil,
+        abs(run.horizontalScale - 100) < 0.01,
+        abs(run.charSpacing) < 0.5,
+        abs(run.wordSpacing) < 0.5,
+        abs(run.rise) < 0.01
+      else {
+        throw PDFError(
+          .unsupported,
+          "The paragraph uses a rotated, skewed, nonuniform, or spaced text transform that reflow cannot preserve exactly")
+      }
     }
     // P19-010: one font per style, resolved from the runs themselves.
     var styles = candidate.runStyles
@@ -170,14 +212,13 @@ public enum ParagraphReflow {
       styles = [
         ParagraphStyle(
           fontResource: String(decoding: selected[0].fontResource.bytes, as: UTF8.self),
-          fontSize: selected[0].fontSize, fillColor: selected[0].fillColor)
+          fontSize: selected[0].pageSpaceFontSize, fillColor: selected[0].fillColor)
       ]
     }
-    var fonts: [SimpleFont] = []
-    var metricFonts: [IndexedTextFont?] = []
+    var fonts: [IndexedTextFont] = []
     for style in styles {
       let resource = PDFName(style.fontResource)
-      guard let font = SimpleFont.resolve(
+      guard let font = IndexedTextFont.resolve(
         resource: resource, page: page, in: graph), font.isSupported
       else {
         throw PDFError(
@@ -185,51 +226,50 @@ public enum ParagraphReflow {
       }
       // P14-023: reflow reuses existing glyph programs (verified per code in
       // encode); a Type 3 font without readable programs refuses here.
-      guard font.isEditable else {
+      guard font.isEditableForReflow else {
         throw PDFError(
           .unsupported,
           "The paragraph uses a Type 3 font without readable glyph programs; the text is preserved, not rewritten")
       }
       fonts.append(font)
-      metricFonts.append(IndexedTextFont.resolve(resource: resource, page: page, in: graph))
     }
-    guard let segmentIndex = content.segmentIndex(for: selected[0].stringSpan) else {
-      throw PDFError(.unsupported, "The paragraph is outside the page content streams")
-    }
-    for run in selected where content.segmentIndex(for: run.stringSpan) != segmentIndex {
-      throw PDFError(.unsupported, "The paragraph spans multiple content streams")
-    }
-    guard content.segments[segmentIndex].isEditable else {
-      throw PDFError(.unsupported, "This content stream uses unsupported filters for editing")
+    // TXT-02: a paragraph may span multiple /Contents streams. Each selected
+    // run's stream must be editable; the content writer rewrites every touched
+    // segment and refuses ambiguous repeated stream objects.
+    for run in selected {
+      guard let indices = content.segmentIndices(for: run.stringSpan),
+        indices.allSatisfy({ content.segments[$0].isEditable })
+      else {
+        throw PDFError(
+          .unsupported, "This content stream uses unsupported filters for editing")
+      }
     }
     return Context(
-      content: content, runs: selected, styles: styles, fonts: fonts,
-      metricFonts: metricFonts)
+      content: content, runs: selected, styles: styles, fonts: fonts)
   }
 
   /// Advance of a string in text space (exact when widths exist, estimated
   /// otherwise).
-  static func advance(
-    of text: String, font: SimpleFont, metrics: IndexedTextFont? = nil, size: Double
-  ) -> Double {
+  static func advance(of text: String, font: IndexedTextFont, size: Double) -> Double {
     guard let codes = font.encode(text) else { return 0 }
     if let measured = font.advance(
-      of: codes, fontSize: size, charSpacing: 0, wordSpacing: 0, horizontalScale: 100) {
+      of: codes, fontSize: size, charSpacing: 0, wordSpacing: 0, horizontalScale: 100)
+    {
       return measured
     }
-    if let measured = metrics?.standard14Advance(
-      of: codes, fontSize: size, charSpacing: 0, wordSpacing: 0, horizontalScale: 100) {
+    if let measured = font.standard14Advance(
+      of: codes, fontSize: size, charSpacing: 0, wordSpacing: 0, horizontalScale: 100)
+    {
       return measured
     }
-    var total = 0.0
-    for code in codes {
-      if let width = font.width(of: code) {
-        total += width / 1000 * size
-      } else {
-        total += 0.5 * size
+    if let glyphs = font.glyphs(codes) {
+      var total = 0.0
+      for glyph in glyphs {
+        total += (glyph.width ?? 500) / 1000 * size
       }
+      return total
     }
-    return total
+    return 0.5 * size * Double(max(codes.count, 1))
   }
 
   struct Token {
@@ -655,13 +695,13 @@ public enum ParagraphReflow {
     let style = context.styles[token.styleIndex]
     return advance(
       of: token.text, font: context.fonts[token.styleIndex],
-      metrics: context.metricFonts[token.styleIndex], size: style.fontSize * scale)
+      size: style.fontSize * scale)
   }
 
   static func spaceWidth(of styleIndex: Int, context: Context, scale: Double) -> Double {
     let style = context.styles[styleIndex]
     return advance(
-      of: " ", font: context.fonts[styleIndex], metrics: context.metricFonts[styleIndex],
+      of: " ", font: context.fonts[styleIndex],
       size: style.fontSize * scale)
   }
 
@@ -694,7 +734,6 @@ public enum ParagraphReflow {
           text: currentText, styleIndex: currentStyle,
           width: advance(
             of: currentText, font: context.fonts[currentStyle],
-            metrics: context.metricFonts[currentStyle],
             size: context.styles[currentStyle].fontSize * scale)))
       currentText = ""
     }
@@ -846,8 +885,21 @@ public struct ReflowParagraphCommand: PDFEditCommand, Equatable, Sendable {
       options: options)
     let context = try ParagraphReflow.context(pageID: pageID, candidate: candidate, in: page)
     var ranges: [(range: Range<Int>, replacement: [UInt8])] = []
+    var clearedTJInstructions = Set<Int>()
     for run in context.runs {
-      ranges.append((run.stringSpan, ReplaceTextCommand.literalStringBytes([])))
+      if run.operandPath.count == 2 {
+        // Clear the complete TJ array once; the coverage check in `context`
+        // guarantees every string member belongs to this paragraph.
+        guard !clearedTJInstructions.contains(run.instructionIndex),
+          run.instructionIndex >= 0,
+          run.instructionIndex < context.content.instructions.count,
+          let array = context.content.instructions[run.instructionIndex].operands.first
+        else { continue }
+        clearedTJInstructions.insert(run.instructionIndex)
+        ranges.append((array.span, Array("[]".utf8)))
+      } else {
+        ranges.append((run.stringSpan, ReplaceTextCommand.literalStringBytes([])))
+      }
     }
     let lastInstruction = context.runs.map(\.instructionIndex).max()
     guard let lastInstruction, lastInstruction < context.content.instructions.count else {

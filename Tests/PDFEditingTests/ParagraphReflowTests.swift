@@ -22,7 +22,65 @@ struct ParagraphReflowTests {
       content.append(
         Data("BT /F1 \(line.3) Tf \(line.1) \(line.2) Td (\(line.0)) Tj ET\n".utf8))
     }
+    return graph(content: content)
+  }
+
+  private func transformedFixture() -> PDFGraph {
+    var content = Data()
+    let lines = [
+      (text: "First transformed line", y: 711.46),
+      (text: "Second transformed line", y: 700.0),
+      (text: "Third transformed line", y: 688.54),
+    ]
+    for line in lines {
+      content.append(
+        Data(
+          "BT /F1 1 Tf 10.02 0 0 10.02 42 \(line.y) Tm (\(line.text)) Tj ET\n".utf8))
+    }
+    return graph(content: content)
+  }
+
+  private func crossStreamFixture() -> PDFGraph {
+    let first = Data("BT /F1 12 Tf 42 700 Td (First cross-stream line) Tj ET\n".utf8)
+    let second = Data("BT /F1 12 Tf 42 680 Td (Second cross-stream line) Tj ET\n".utf8)
     return PDFGraph(
+      objects: [
+        PDFObjectID(1): .dictionary([
+          PDFName("Type"): .name(PDFName("Catalog")),
+          PDFName("Pages"): .reference(PDFObjectID(2)),
+        ]),
+        PDFObjectID(2): .dictionary([
+          PDFName("Type"): .name(PDFName("Pages")),
+          PDFName("Count"): .integer(1),
+          PDFName("Kids"): .array([.reference(PDFObjectID(4))]),
+        ]),
+        PDFObjectID(3): .dictionary([
+          PDFName("Type"): .name(PDFName("Font")),
+          PDFName("Subtype"): .name(PDFName("Type1")),
+          PDFName("BaseFont"): .name(PDFName("Helvetica")),
+          PDFName("Encoding"): .name(PDFName("WinAnsiEncoding")),
+        ]),
+        PDFObjectID(4): .dictionary([
+          PDFName("Type"): .name(PDFName("Page")),
+          PDFName("Parent"): .reference(PDFObjectID(2)),
+          PDFName("MediaBox"): .array([
+            .integer(0), .integer(0), .integer(612), .integer(792),
+          ]),
+          PDFName("Resources"): .dictionary([
+            PDFName("Font"): .dictionary([PDFName("F1"): .reference(PDFObjectID(3))])
+          ]),
+          PDFName("Contents"): .array([
+            .reference(PDFObjectID(5)), .reference(PDFObjectID(6)),
+          ]),
+        ]),
+        PDFObjectID(5): .stream(PDFStream(bytes: first)),
+        PDFObjectID(6): .stream(PDFStream(bytes: second)),
+      ],
+      trailer: [PDFName("Root"): .reference(PDFObjectID(1))])
+  }
+
+  private func graph(content: Data) -> PDFGraph {
+    PDFGraph(
       objects: [
         PDFObjectID(1): .dictionary([
           PDFName("Type"): .name(PDFName("Catalog")),
@@ -62,14 +120,14 @@ struct ParagraphReflowTests {
     return try #require(candidates.first { $0.kind == .flowing })
   }
 
-  private func measurementFonts(_ graph: PDFGraph, pageID: PDFObjectID) throws
-    -> (SimpleFont, IndexedTextFont?)
+  private func measurementFont(_ graph: PDFGraph, pageID: PDFObjectID) throws
+    -> IndexedTextFont
   {
     guard case .dictionary(let page)? = graph.objects[pageID] else {
       throw PDFError(.malformed, "Fixture page is missing")
     }
-    let simple = try #require(SimpleFont.resolve(resource: PDFName("F1"), page: page, in: graph))
-    return (simple, IndexedTextFont.resolve(resource: PDFName("F1"), page: page, in: graph))
+    return try #require(
+      IndexedTextFont.resolve(resource: PDFName("F1"), page: page, in: graph))
   }
 
   private func pageText(_ graph: PDFGraph, pageID: PDFObjectID) throws -> String {
@@ -110,6 +168,122 @@ struct ParagraphReflowTests {
     #expect(reparsedText.contains("Quarterly Report"))
   }
 
+  @Test func reflowReplacesParagraphAcrossContentStreams() throws {
+    let graph = crossStreamFixture()
+    let pageID = try PDFPageTree.pageIDs(in: graph)[0]
+    let candidate = try paragraph(graph, pageID: pageID)
+    #expect(candidate.text.contains("cross-stream line"))
+    let replacement = "Replacement text across both page content streams."
+    let edited = try PDFEditingEngine.commit(
+      PDFTransaction([
+        ReflowParagraphCommand(
+          pageID: pageID, candidate: candidate, replacement: replacement)
+      ]), to: graph)
+    let text = try pageText(edited, pageID: pageID)
+    #expect(text.contains("Replacement text across both"))
+    #expect(!text.contains("First cross-stream line"))
+    #expect(!text.contains("Second cross-stream line"))
+  }
+
+  @Test func reflowReplacesCompleteTJArrays() throws {
+    var content = Data()
+    content.append(
+      Data("BT /F1 12 Tf 42 700 Td [(First TJ line) -120 (continues here)] TJ ET\n".utf8))
+    content.append(
+      Data("BT /F1 12 Tf 42 680 Td [(Second TJ line) -80 (ends here)] TJ ET\n".utf8))
+    let graph = graph(content: content)
+    let pageID = try PDFPageTree.pageIDs(in: graph)[0]
+    let candidate = try paragraph(graph, pageID: pageID)
+    #expect(candidate.text.contains("First TJ line"))
+    let replacement = "Replacement TJ text that replaces both source arrays cleanly."
+    let edited = try PDFEditingEngine.commit(
+      PDFTransaction([
+        ReflowParagraphCommand(
+          pageID: pageID, candidate: candidate, replacement: replacement)
+      ]), to: graph)
+    let text = try pageText(edited, pageID: pageID)
+    #expect(text.contains("Replacement TJ text"))
+    #expect(!text.contains("First TJ line"))
+    #expect(!text.contains("Second TJ line"))
+  }
+
+  @Test func reflowRefusesAPartialTJArraySelection() throws {
+    var content = Data()
+    content.append(
+      Data(
+        "BT /F1 12 Tf 42 700 Td [(Selected paragraph line) -120 (Unselected tail)] TJ ET\n"
+          .utf8))
+    content.append(Data("BT /F1 12 Tf 42 680 Td (Second line of the selection) Tj ET\n".utf8))
+    let graph = graph(content: content)
+    let pageID = try PDFPageTree.pageIDs(in: graph)[0]
+    let candidates = try ParagraphReconstruction.candidatesForEditing(
+      pageID: pageID, in: graph)
+    guard
+      var candidate = candidates.first(where: { $0.text.contains("Selected paragraph line") })
+    else {
+      Issue.record("Expected the first TJ string as a candidate")
+      return
+    }
+    // Restrict the candidate to the first string member of the TJ array.
+    candidate = TextParagraphCandidate(
+      kind: candidate.kind, lineIndices: candidate.lineIndices,
+      runIndices: Array(candidate.runIndices.prefix(1)),
+      lineRunIndices: candidate.lineRunIndices, runStyles: candidate.runStyles,
+      clusterRange: candidate.clusterRange, text: candidate.text,
+      bounds: candidate.bounds, fontSize: candidate.fontSize,
+      alignment: candidate.alignment, firstLineIndent: candidate.firstLineIndent,
+      lineSpacing: candidate.lineSpacing, confidence: candidate.confidence,
+      structureRole: candidate.structureRole)
+    #expect(throws: PDFError.self) {
+      _ = try ParagraphReflow.plan(
+        pageID: pageID, candidate: candidate,
+        replacement: "Replacement", in: graph)
+    }
+  }
+
+  @Test func reflowFoldsUniformScaleIntoEmittedFontSize() throws {
+    let graph = transformedFixture()
+    let pageID = try PDFPageTree.pageIDs(in: graph)[0]
+    let candidate = try paragraph(graph, pageID: pageID)
+    #expect(abs(candidate.fontSize - 10.02) < 0.02)
+
+    let replacement = "Replacement line one\nReplacement line two"
+    let edited = try PDFEditingEngine.commit(
+      PDFTransaction([
+        ReflowParagraphCommand(
+          pageID: pageID, candidate: candidate, replacement: replacement)
+      ]), to: graph)
+    let reparsed = try PDFParser.parse(try PDFWriter.write(edited))
+    let content = try PageContent.load(pageID: reparsed.pageIDs[0], in: reparsed.graph)
+    let runs = try TextRunIndexer.runs(in: content, graph: reparsed.graph)
+    let replacementRuns = runs.filter { $0.text.contains("Replacement") }
+    #expect(!replacementRuns.isEmpty)
+    #expect(replacementRuns.allSatisfy { abs($0.fontSize - 10.02) < 0.02 })
+    #expect(replacementRuns.allSatisfy { $0.uniformPageSpaceScale != nil })
+    let text = try pageText(reparsed.graph, pageID: reparsed.pageIDs[0])
+    #expect(text.contains("Replacement line one"))
+    #expect(text.contains("Replacement line two"))
+  }
+
+  @Test func reflowRefusesRotatedTextTransforms() throws {
+    var content = Data()
+    for offset in [0.0, 18.0] {
+      content.append(
+        Data(
+          "BT /F1 12 Tf 0 1 -1 0 300 \(400 + offset) Tm (Rotated paragraph line) Tj ET\n".utf8))
+    }
+    let graph = graph(content: content)
+    let pageID = try PDFPageTree.pageIDs(in: graph)[0]
+    let candidates = try ParagraphReconstruction.candidatesForEditing(
+      pageID: pageID, in: graph)
+    let candidate = try #require(candidates.first)
+    #expect(throws: PDFError.self) {
+      _ = try ParagraphReflow.plan(
+        pageID: pageID, candidate: candidate,
+        replacement: "Replacement text", in: graph)
+    }
+  }
+
   @Test func lineBreakingHonorsPunctuationAndLongWords() throws {
     let graph = fixture()
     let pageID = try PDFPageTree.pageIDs(in: graph)[0]
@@ -145,7 +319,7 @@ struct ParagraphReflowTests {
     let graph = fixture()
     let pageID = try PDFPageTree.pageIDs(in: graph)[0]
     let candidate = try paragraph(graph, pageID: pageID)
-    let (font, metrics) = try measurementFonts(graph, pageID: pageID)
+    let font = try measurementFont(graph, pageID: pageID)
     let replacement = "Alignment probe text that wraps into two or three lines."
     let centered = try ParagraphReflow.plan(
       pageID: pageID, candidate: candidate, replacement: replacement, in: graph,
@@ -153,7 +327,7 @@ struct ParagraphReflowTests {
     #expect(centered.lines.count >= 2)
     for line in centered.lines {
       let width = ParagraphReflow.advance(
-        of: line.text, font: font, metrics: metrics, size: line.fontSize)
+        of: line.text, font: font, size: line.fontSize)
       let center = line.x + width / 2
       let boxCenter = (candidate.bounds[0] + candidate.bounds[2]) / 2
       #expect(abs(center - boxCenter) < 1)
@@ -170,7 +344,7 @@ struct ParagraphReflowTests {
     let boxWidth = candidate.bounds[2] - candidate.bounds[0]
     let boundaryWord = (1...100).map { String(repeating: "x", count: $0) }.first { word in
       let width = ParagraphReflow.advance(
-        of: word, font: font, metrics: metrics, size: 12)
+        of: word, font: font, size: 12)
       return width > boxWidth - 30 && width <= boxWidth
     }
     let word = try #require(boundaryWord)

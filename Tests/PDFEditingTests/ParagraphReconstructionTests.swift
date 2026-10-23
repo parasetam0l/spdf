@@ -19,7 +19,11 @@ struct ParagraphReconstructionTests {
         Data(
           "BT /F1 \(line.size) Tf \(line.x) \(line.y) Td (\(escaped)) Tj ET\n".utf8))
     }
-    return PDFGraph(
+    return graph(content: content)
+  }
+
+  private func graph(content: Data) -> PDFGraph {
+    PDFGraph(
       objects: [
         PDFObjectID(1): .dictionary([
           PDFName("Type"): .name(PDFName("Catalog")),
@@ -203,6 +207,30 @@ struct ParagraphReconstructionTests {
         .first { $0.lineIndices.count == 3 })
     #expect(indentedBlock.firstLineIndent > 20)
     #expect(indentedBlock.alignment == .left)
+  }
+
+  @Test func uniformTextMatrixGroupsByPageSpaceFontSize() throws {
+    var content = Data()
+    let lines = [
+      (text: "First transformed line", y: 711.46),
+      (text: "Second transformed line", y: 700.0),
+      (text: "Third transformed line", y: 688.54),
+    ]
+    for line in lines {
+      content.append(
+        Data(
+          "BT /F1 1 Tf 10.02 0 0 10.02 72 \(line.y) Tm (\(line.text)) Tj ET\n".utf8))
+    }
+    let graph = graph(content: content)
+    let pageID = try PDFPageTree.pageIDs(in: graph)[0]
+    let candidates = try ParagraphReconstruction.candidatesForEditing(
+      pageID: pageID, in: graph)
+    let paragraph = try #require(
+      candidates.first { $0.text.contains("Second transformed line") })
+    #expect(paragraph.lineIndices.count == 3)
+    #expect(abs(paragraph.fontSize - 10.02) < 0.02)
+    #expect(abs(paragraph.lineSpacing - 11.46) < 0.2)
+    #expect(paragraph.runStyles.allSatisfy { abs($0.fontSize - 10.02) < 0.02 })
   }
 
   @Test func analysisStaysBoundedOnManyLines() throws {

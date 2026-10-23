@@ -296,6 +296,13 @@ struct IndexedTextFont {
     switch value { case .real(let n): return n; case .integer(let n): return Double(n); default: return nil }
   }
   var isSupported: Bool { simple?.isSupported ?? !mapping.isEmpty }
+  /// Reflow reuses the existing font resource and codes; simple Type 3 fonts
+  /// still need readable CharProcs, while a composite font needs its code
+  /// mapping but not a new embedded program.
+  var isEditableForReflow: Bool {
+    if let simple { return simple.isEditable }
+    return !mapping.isEmpty
+  }
   var isInlineEditable: Bool { simple.map { $0.isEditable && !$0.isType3 } ?? (program != nil) }
   var hasEmbeddedProgram: Bool { program != nil }
 
