@@ -90,6 +90,29 @@ struct DocumentAssemblyTests {
     }
   }
 
+  @Test func multiPageCropUsesEachPageMediaBoxAndOneTransaction() throws {
+    let graph = try graph()
+    let pageIDs = try PDFPageTree.pageIDs(in: graph)
+    let boxes = [
+      pageIDs[0]: [20.0, 20, 500, 700],
+      pageIDs[1]: [10.0, 10, 400, 600],
+    ]
+    let cropped = try PDFEditingEngine.commit(
+      PDFTransaction([DocumentAssembly.SetCropBoxCommand(boxes: boxes)]), to: graph)
+    let attributes = PDFDocumentInventory.pageAttributes(
+      pageIDs: Array(boxes.keys), in: cropped)
+    for attribute in attributes {
+      #expect(attribute.cropBox == boxes[attribute.pageObjectID])
+    }
+    // A box outside its own MediaBox refuses before mutating anything.
+    #expect(throws: PDFError.self) {
+      _ = try PDFEditingEngine.commit(
+        PDFTransaction([
+          DocumentAssembly.SetCropBoxCommand(boxes: [pageIDs[0]: [-10, -10, 100, 100]])
+        ]), to: graph)
+    }
+  }
+
   // MARK: - P23-008/P23-009/P23-014/P23-015/P23-017
 
   @Test func extractionKeepsSelectedPagesAndDropsForeignTargets() throws {

@@ -657,6 +657,96 @@ final class SPDFDocument: NSDocument {
     refreshViewer(preservingPage: viewer.pageNumber)
   }
 
+  /// PAG-05: crop pages non-destructively by margins from each page's own
+  /// MediaBox. Units are converted to points before the single transaction.
+  func presentCropPages() {
+    guard canEditContent, let graph = editSession.currentGraph,
+      let viewer, viewer.pageCount > 0
+    else { return }
+    let unit = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 120, height: 24))
+    unit.addItems(withTitles: ["Points", "Millimeters", "Inches"])
+    let margins = ["Left", "Bottom", "Right", "Top"].map { _ in
+      let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 70, height: 22))
+      field.stringValue = "0"
+      return field
+    }
+    let pageField = NSTextField(frame: NSRect(x: 0, y: 0, width: 120, height: 22))
+    pageField.stringValue = "\(viewer.pageNumber)"
+    var rows: [[NSView]] = [[NSTextField(labelWithString: "Units:"), unit]]
+    for (label, field) in zip(["Left", "Bottom", "Right", "Top"], margins) {
+      rows.append([NSTextField(labelWithString: "\(label) margin:"), field])
+    }
+    rows.append([NSTextField(labelWithString: "Pages:"), pageField])
+    let grid = NSGridView(views: rows)
+    grid.column(at: 0).xPlacement = .trailing
+    grid.frame = NSRect(x: 0, y: 0, width: 300, height: 170)
+    let alert = NSAlert()
+    alert.messageText = "Crop Pages"
+    alert.informativeText =
+      "Margins are measured from each page's MediaBox. Cropping changes the visible page box; "
+      + "it does not remove hidden content or image pixels. Use pages such as 1, 3-5. The change is one undo step."
+    alert.accessoryView = grid
+    alert.addButton(withTitle: "Crop")
+    alert.addButton(withTitle: "Cancel")
+    guard alert.runModal() == .alertFirstButtonReturn else { return }
+    let factor: Double = [1.0, 72.0 / 25.4, 72.0][max(0, unit.indexOfSelectedItem)]
+    let values = margins.compactMap { Double($0.stringValue) }
+    guard values.count == 4, values.allSatisfy({ $0.isFinite && $0 >= 0 }) else {
+      NSSound.beep()
+      return
+    }
+    let indices = pageIndices(from: pageField.stringValue, count: editSession.pageIDs.count)
+    guard !indices.isEmpty else {
+      NSSound.beep()
+      return
+    }
+    let inventory = PrintPreflightInventory.inventory(graph, pageIDs: editSession.pageIDs)
+    var boxes: [PDFObjectID: [Double]] = [:]
+    for index in indices {
+      guard let boxesForPage = inventory.pages.first(where: { $0.pageIndex == index })
+      else { continue }
+      let media = boxesForPage.mediaBox
+      let box = [
+        media[0] + values[0] * factor, media[1] + values[1] * factor,
+        media[2] - values[2] * factor, media[3] - values[3] * factor,
+      ]
+      guard box[2] > box[0], box[3] > box[1] else {
+        NSSound.beep()
+        return
+      }
+      boxes[editSession.pageIDs[index]] = box
+    }
+    do {
+      try editSession.apply(
+        PDFTransaction([DocumentAssembly.SetCropBoxCommand(boxes: boxes)]))
+    } catch {
+      presentError(error)
+      return
+    }
+    noteUserEdit()
+    refreshViewer(preservingPage: viewer.pageNumber)
+  }
+
+  /// Parse a 1-based page list such as `1, 3-5` into zero-based indices.
+  private func pageIndices(from spec: String, count: Int) -> [Int] {
+    var result = Set<Int>()
+    for part in spec.split(separator: ",") {
+      let text = part.trimmingCharacters(in: .whitespaces)
+      guard !text.isEmpty else { continue }
+      if let dash = text.firstIndex(of: "-") {
+        guard let first = Int(text[..<dash]),
+          let last = Int(text[text.index(after: dash)...])
+        else { continue }
+        for page in min(first, last)...max(first, last) where (1...count).contains(page) {
+          result.insert(page - 1)
+        }
+      } else if let page = Int(text), (1...count).contains(page) {
+        result.insert(page - 1)
+      }
+    }
+    return result.sorted()
+  }
+
   /// Move the current page by `offset` positions (negative moves it up).
   func moveCurrentPage(by offset: Int) {
     guard canEditContent, let viewer, viewer.pageCount > 0 else { return }

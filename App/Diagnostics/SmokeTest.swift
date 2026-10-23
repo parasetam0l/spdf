@@ -1122,6 +1122,28 @@
           try first.data(ofType: "com.adobe.pdf") == original
         else { throw PDFError(.malformed, "Archival staging or accessibility audit failed") }
 
+        // PAG-05: crop pages through one transaction, verify the saved
+        // CropBox, and undo back to the original bytes.
+        if let graph = first.editSession.currentGraph {
+          let pageID = first.editSession.pageIDs[0]
+          let attributes = PDFDocumentInventory.pageAttributes(
+            pageIDs: [pageID], in: graph)
+          let media = attributes[0].mediaBox
+          let box = [media[0] + 10, media[1] + 10, media[2] - 10, media[3] - 10]
+          try first.editSession.apply(
+            PDFTransaction([DocumentAssembly.SetCropBoxCommand(boxes: [pageID: box])]))
+          let cropped = try first.data(ofType: "com.adobe.pdf")
+          let croppedParsed = try PDFParser.parse(cropped)
+          let croppedAttributes = PDFDocumentInventory.pageAttributes(
+            pageIDs: [croppedParsed.pageIDs[0]], in: croppedParsed.graph)
+          guard croppedAttributes[0].cropBox == box else {
+            throw PDFError(.malformed, "Page crop did not round-trip")
+          }
+          guard first.undoEdit(), try first.data(ofType: "com.adobe.pdf") == original else {
+            throw PDFError(.malformed, "Page crop undo did not restore the original bytes")
+          }
+        }
+
         // Owned-core edit pipeline: rotate page 1, verify the edited bytes,
         // undo back to the exact original, redo, save an edited copy through
         // the native write path, and reparse the saved file.

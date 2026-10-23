@@ -166,6 +166,36 @@ public enum DocumentAssembly {
     return graph
   }
 
+  /// PAG-05: set one CropBox per page in one undoable transaction. Each box is
+  /// validated against that page's own MediaBox, so mixed-size documents work.
+  public struct SetCropBoxCommand: PDFEditCommand, Equatable, Sendable {
+    public let boxes: [PDFObjectID: [Double]]
+
+    public init(boxes: [PDFObjectID: [Double]]) {
+      self.boxes = boxes
+    }
+
+    public var name: String { "Crop Pages" }
+    public func affectedPageIDs(in graph: PDFGraph) -> [PDFObjectID] { boxes.keys.sorted() }
+
+    public func validate(in graph: PDFGraph) throws {
+      guard !boxes.isEmpty else {
+        throw PDFError(.malformed, "Choose at least one page to crop")
+      }
+      for (pageID, box) in boxes {
+        _ = try DocumentAssembly.setCropBox(box, pageID: pageID, in: graph)
+      }
+    }
+
+    public func apply(to graph: PDFGraph) throws -> PDFGraph {
+      var graph = graph
+      for (pageID, box) in boxes.sorted(by: { $0.key < $1.key }) {
+        graph = try DocumentAssembly.setCropBox(box, pageID: pageID, in: graph)
+      }
+      return graph
+    }
+  }
+
   /// P23-008/P23-009: extract the selected pages into a new document. Content,
   /// annotations, and resources come along; destinations and outlines are
   /// remapped when their targets survive and dropped (with a report) when they
