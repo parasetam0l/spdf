@@ -25,6 +25,9 @@ public struct RedactRegionsCommand: PDFEditCommand, Equatable, Sendable {
   /// P17-012: the page this command changes.
   public func affectedPageIDs(in graph: PDFGraph) -> [PDFObjectID] { [pageID] }
   public var name: String { "Redact Regions" }
+  /// SAF-02: an incremental save would retain the removed content in the
+  /// previous revision, so the session must write a full rewrite.
+  public var requiresFullRewriteOnSave: Bool { true }
 
   public func validate(in graph: PDFGraph) throws {
     try AnnotationSupport.validatePage(pageID, in: graph)
@@ -493,6 +496,9 @@ public struct SanitizeDocumentCommand: PDFEditCommand, Equatable, Sendable {
   public init() {}
 
   public var name: String { "Sanitize Document" }
+  /// SAF-02: pruning only unreachable objects still leaves them in an
+  /// incremental base revision, so a sanitized graph needs a full rewrite.
+  public var requiresFullRewriteOnSave: Bool { true }
 
   public func validate(in graph: PDFGraph) throws {}
 

@@ -1214,7 +1214,8 @@ final class SPDFDocument: NSDocument {
     alert.messageText = "Redact the selected content?"
     alert.informativeText =
       "Redaction removes the selected text, images, and marks from the document. "
-      + "The edit can be undone until the document is saved."
+      + "The edit can be undone until the document is saved. Saving writes a full rewrite, "
+      + "so the removed content is not retained in an earlier revision."
     alert.addButton(withTitle: "Redact")
     alert.addButton(withTitle: "Cancel")
     guard alert.runModal() == .alertFirstButtonReturn else { return }
@@ -1247,21 +1248,43 @@ final class SPDFDocument: NSDocument {
     return true
   }
 
-  /// P27-022/P27-024: write a sanitized copy through a verified temporary
-  /// file. The copy is always a full rewrite: no earlier revisions and no
-  /// unreachable objects.
-  func writeSanitizedCopy(to url: URL) throws {
+  /// SAF-01: build a sanitized derivative from the current graph and write it
+  /// through a verified temporary file. The session graph is not mutated. The
+  /// copy is always a full rewrite with no earlier revisions, and the report
+  /// states what the policy removed and what it deliberately kept.
+  @discardableResult
+  func writeSanitizedCopy(
+    to url: URL, policy: SanitizerPolicy = .sanitizedCopy
+  ) throws -> SanitizerReport {
     guard canEditContent, let graph = editSession.currentGraph else {
       throw PDFError(.malformed, "The document has no editable graph")
     }
-    let data = try PDFWriter.write(graph, limits: SPDFDocumentResourcePolicy.parsingLimits)
+    let prepared = try SanitizedCopyBuilder.prepare(
+      graph, policy: policy, limits: SPDFDocumentResourcePolicy.parsingLimits)
+    let data = try PDFWriter.write(
+      prepared.graph, limits: SPDFDocumentResourcePolicy.parsingLimits)
     try VerifiedFileWriter.write(
-      data, to: url, expectedGraph: graph,
+      data, to: url, expectedGraph: prepared.graph,
       limits: SPDFDocumentResourcePolicy.parsingLimits)
+    return prepared.report
   }
 
   func saveSanitizedCopy() {
     guard canEditContent else { return }
+    let policy = SanitizerPolicy.sanitizedCopy
+    let confirmation = NSAlert()
+    confirmation.messageText = "Save Sanitized Copy"
+    var disclosure = "The copy removes document metadata, document scripts, and embedded files. "
+    if !policy.removeOptionalContent {
+      disclosure += "Optional-content layers are kept and will be reported. "
+    }
+    disclosure +=
+      "Earlier revisions and unreachable objects are not copied. The original document is not modified."
+    confirmation.informativeText = disclosure
+    confirmation.addButton(withTitle: "Choose Destination…")
+    confirmation.addButton(withTitle: "Cancel")
+    guard confirmation.runModal() == .alertFirstButtonReturn else { return }
+
     let panel = NSSavePanel()
     let base = fileURL?.deletingPathExtension().lastPathComponent ?? "document"
     panel.nameFieldStringValue = base + "-sanitized.pdf"
@@ -1269,11 +1292,27 @@ final class SPDFDocument: NSDocument {
     panel.begin { [weak self] response in
       guard response == .OK, let url = panel.url, let self else { return }
       do {
-        try self.writeSanitizedCopy(to: url)
+        let report = try self.writeSanitizedCopy(to: url, policy: policy)
+        self.presentSanitizedCopyReport(report, destination: url)
       } catch {
         self.presentError(error)
       }
     }
+  }
+
+  private func presentSanitizedCopyReport(_ report: SanitizerReport, destination: URL) {
+    let alert = NSAlert()
+    alert.messageText = "Sanitized copy saved"
+    var lines = "Saved to \(destination.lastPathComponent).\n\n" + report.summary
+    if !report.retained.isEmpty {
+      lines += "\n\nKept by policy: \(report.retainedSummary)."
+    }
+    lines +=
+      "\n\nThe copy contains no earlier revisions or unreachable objects. "
+      + "The original document was not modified."
+    alert.informativeText = lines
+    alert.addButton(withTitle: "OK")
+    alert.runModal()
   }
 
   // MARK: - Encrypted export (P28-016–P28-019)
@@ -4449,6 +4488,13 @@ final class SPDFDocument: NSDocument {
     }
     noteUserEdit()
     refreshViewer(preservingPage: viewer?.pageNumber ?? 1)
+    // SAF-02: pre-redaction recovery snapshots still contain the removed
+    // content. Replace them with a secure snapshot of the current state before
+    // the next autosave interval.
+    if editSession.requiresSecureRewrite {
+      discardRecoveryRecords()
+      snapshotRecoveryNow()
+    }
     return true
   }
 

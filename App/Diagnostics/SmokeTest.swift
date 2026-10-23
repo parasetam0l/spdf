@@ -8,6 +8,46 @@
   import PDFKit
   import Security
 
+  /// SAF-01: seeds metadata, a JavaScript action, and unreachable objects on
+  /// the session graph so the native sanitized-copy route must remove them.
+  private struct SeedHiddenDataForSanitizeCheck: PDFEditCommand {
+    var name: String { "Seed Hidden Data" }
+    func validate(in graph: PDFGraph) throws {}
+    func apply(to graph: PDFGraph) throws -> PDFGraph {
+      var graph = graph
+      graph.trailer[PDFName("Info")] = .dictionary([
+        PDFName("Title"): .string(Data("sanitize-seed-info".utf8))
+      ])
+      let xmp = Data("sanitize-seed-xmp".utf8)
+      graph.objects[PDFObjectID(900)] = .stream(
+        PDFStream(
+          dictionary: [
+            PDFName("Type"): .name(PDFName("Metadata")),
+            PDFName("Length"): .integer(Int64(xmp.count)),
+          ],
+          bytes: xmp))
+      graph.objects[PDFObjectID(901)] = .dictionary([
+        PDFName("S"): .name(PDFName("JavaScript")),
+        PDFName("JS"): .string(Data("sanitize-seed-script".utf8)),
+      ])
+      let orphan = Data("sanitize-seed-orphan".utf8)
+      graph.objects[PDFObjectID(902)] = .stream(
+        PDFStream(
+          dictionary: [
+            PDFName("Subtype"): .name(PDFName("Image")),
+            PDFName("Length"): .integer(Int64(orphan.count)),
+          ],
+          bytes: orphan))
+      if case .reference(let rootID)? = graph.trailer[PDFName("Root")],
+        case .dictionary(var catalog)? = graph.objects[rootID]
+      {
+        catalog[PDFName("OpenAction")] = .reference(PDFObjectID(901))
+        graph.objects[rootID] = .dictionary(catalog)
+      }
+      return graph
+    }
+  }
+
   @MainActor
   enum SmokeTest {
     static func run(fixtures: URL, output: URL) async {
@@ -2050,7 +2090,11 @@
           throw PDFError(.malformed, "Redaction did not commit")
         }
         let redactedBytes = try first.data(ofType: "com.adobe.pdf")
-        // The session's incremental save keeps earlier revisions by design;
+        // SAF-02: redaction forces a secure full rewrite, so the earlier
+        // revision with the removed text is not part of the saved bytes.
+        guard first.editSession.requiresSecureRewrite,
+          redactedBytes.range(of: Data("/Prev".utf8)) == nil
+        else { throw PDFError(.malformed, "Redaction save was not a secure full rewrite") }
         // PDFKit reads the current revision, where the text is gone.
         guard let redactedDocument = PDFDocument(data: redactedBytes),
           let redactedPageText = redactedDocument.page(at: 0)?.string,
@@ -2058,22 +2102,37 @@
           redactedPageText.contains("Original Swift-generated content"),
           (try? PDFParser.parse(redactedBytes)) != nil
         else { throw PDFError(.malformed, "Redaction did not remove the targeted text") }
-        guard first.applySanitize() else {
-          throw PDFError(.malformed, "Sanitization did not commit")
-        }
+        // SAF-01: the menu route must sanitize a staged graph. Seed metadata,
+        // a script action, and an unreachable image on the session, then write
+        // the copy without applying SanitizeDocumentCommand to the session.
+        try first.editSession.apply(PDFTransaction([SeedHiddenDataForSanitizeCheck()]))
+        let seededGraph = first.editSession.currentGraph
         let sanitizedURL = output.appendingPathComponent("sanitized.pdf")
-        try first.writeSanitizedCopy(to: sanitizedURL)
+        let sanitizeReport = try first.writeSanitizedCopy(to: sanitizedURL)
+        guard first.editSession.currentGraph == seededGraph else {
+          throw PDFError(.malformed, "Sanitized copy mutated the session graph")
+        }
+        guard sanitizeReport.removedMetadata >= 1, sanitizeReport.removedScripts >= 1 else {
+          throw PDFError(.malformed, "Sanitized copy did not report hidden-data removal")
+        }
         let sanitizedData = try Data(contentsOf: sanitizedURL)
-        guard sanitizedData.range(of: Data("/Prev".utf8)) == nil,
+        guard let sanitizedParsed = try? PDFParser.parse(sanitizedData),
+          sanitizedParsed.graph.objects[PDFObjectID(900)] == nil,
+          sanitizedParsed.graph.objects[PDFObjectID(901)] == nil,
+          sanitizedParsed.graph.objects[PDFObjectID(902)] == nil,
+          sanitizedParsed.graph.trailer[PDFName("Info")] == nil,
+          sanitizedData.range(of: Data("/Prev".utf8)) == nil,
           sanitizedData.range(of: Data("(sPDF Editor fixture - page 1)".utf8)) == nil,
-          (try? PDFParser.parse(sanitizedData)) != nil
+          sanitizedData.range(of: Data("sanitize-seed-".utf8)) == nil
         else { throw PDFError(.malformed, "Sanitized copy is not a clean full rewrite") }
         while first.editSession.canUndo,
           try first.data(ofType: "com.adobe.pdf") != redactionBaseline
         {
           _ = first.undoEdit()
         }
-        guard try first.data(ofType: "com.adobe.pdf") == redactionBaseline else {
+        guard !first.editSession.requiresSecureRewrite,
+          try first.data(ofType: "com.adobe.pdf") == redactionBaseline
+        else {
           throw PDFError(.malformed, "Redaction undo did not restore the baseline bytes")
         }
         checkpoint("redaction and sanitization passed")

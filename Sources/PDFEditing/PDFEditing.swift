@@ -18,10 +18,15 @@ public protocol PDFEditCommand: Sendable {
   func validate(in graph: PDFGraph) throws
   /// Produce the next graph from a staged copy. Only called after `validate`.
   func apply(to graph: PDFGraph) throws -> PDFGraph
+  /// SAF-02: true when an earlier saved revision would still expose content
+  /// this command removed. Such a graph must never be written as an
+  /// incremental revision.
+  var requiresFullRewriteOnSave: Bool { get }
 }
 
 extension PDFEditCommand {
   public func affectedPageIDs(in graph: PDFGraph) -> [PDFObjectID] { [] }
+  public var requiresFullRewriteOnSave: Bool { false }
 }
 
 /// One or more commands committed atomically. All preconditions are checked

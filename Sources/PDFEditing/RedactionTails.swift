@@ -487,6 +487,19 @@ public struct SanitizerPolicy: Sendable, Equatable {
   }
 
   public static var redactionDefault: SanitizerPolicy { SanitizerPolicy() }
+
+  /// SAF-01: the policy used by the user-facing "Save Sanitized Copy" route.
+  /// Metadata, document scripts and embedded files are removed. Optional
+  /// content is retained until layer removal can rewrite `/OC` content
+  /// properties safely; the report names that exclusion explicitly.
+  public static var sanitizedCopy: SanitizerPolicy {
+    SanitizerPolicy(
+      removeMetadata: true,
+      removeAttachmentsExcept: [],
+      removeScripts: true,
+      removeEmbeddedFilesExcept: [],
+      removeOptionalContent: false)
+  }
 }
 
 public struct SanitizerReport: Sendable, Equatable {
@@ -496,9 +509,16 @@ public struct SanitizerReport: Sendable, Equatable {
   public let removedEmbeddedFiles: Int
   public let removedOptionalContent: Int
   public let transformations: [String]
+  /// Categories deliberately kept by the policy. The UI must show these so a
+  /// sanitized copy never implies more removal than was performed.
+  public let retained: [String]
 
   public var summary: String {
     transformations.isEmpty ? "no changes" : transformations.joined(separator: ", ")
+  }
+
+  public var retainedSummary: String {
+    retained.isEmpty ? "nothing" : retained.joined(separator: ", ")
   }
 }
 
@@ -520,6 +540,19 @@ public enum SanitizerPass {
         graph.trailer[PDFName("Info")] = nil
         removedMetadata += 1
       }
+      // Strip every /Metadata reference before deleting the streams so the
+      // rewrite cannot retain a dangling page-level reference.
+      for (id, value) in graph.objects {
+        if case .dictionary(var dictionary) = value, dictionary[PDFName("Metadata")] != nil {
+          dictionary[PDFName("Metadata")] = nil
+          graph.objects[id] = .dictionary(dictionary)
+          removedMetadata += 1
+        } else if case .stream(var stream) = value, stream.dictionary[PDFName("Metadata")] != nil {
+          stream.dictionary[PDFName("Metadata")] = nil
+          graph.objects[id] = .stream(stream)
+          removedMetadata += 1
+        }
+      }
       for (id, value) in graph.objects {
         let dictionary: [PDFName: PDFValue]?
         if case .dictionary(let direct) = value { dictionary = direct }
@@ -530,25 +563,46 @@ public enum SanitizerPass {
           removedMetadata += 1
         }
       }
-      if case .reference(let rootID)? = graph.trailer[PDFName("Root")],
-        case .dictionary(var catalog)? = graph.objects[rootID],
-        catalog[PDFName("Metadata")] != nil
-      {
-        catalog[PDFName("Metadata")] = nil
-        graph.objects[rootID] = .dictionary(catalog)
-      }
-      if removedMetadata > 0 { transformations.append("removed \(removedMetadata) metadata objects") }
+      if removedMetadata > 0 { transformations.append("removed \(removedMetadata) metadata entries") }
     }
 
     // Attachments + embedded files: /EmbeddedFiles name tree + /EF streams.
     let embeddedIDs = embeddedFileIDs(in: graph)
+    var removedAttachmentIDs: Set<PDFObjectID> = []
     for id in embeddedIDs {
       let name = embeddedFileName(id: id, in: graph) ?? "unnamed"
       let allowed = policy.removeAttachmentsExcept.contains(name) || policy.removeEmbeddedFilesExcept.contains(name)
       if !allowed {
-        graph.objects[id] = nil
+        removedAttachmentIDs.insert(id)
         removedAttachments += 1
       }
+    }
+    if !removedAttachmentIDs.isEmpty {
+      // File-spec wrappers and file-attachment annotations would otherwise
+      // keep a dangling /EF reference or a payload-less annotation.
+      var removedSpecIDs: Set<PDFObjectID> = []
+      for (id, value) in graph.objects {
+        guard case .dictionary(let dictionary) = value,
+          case .dictionary(let ef)? = dictionary[PDFName("EF")]
+        else { continue }
+        let referencesRemovedFile = ef.values.contains { value in
+          if case .reference(let target) = value { return removedAttachmentIDs.contains(target) }
+          return false
+        }
+        if referencesRemovedFile { removedSpecIDs.insert(id) }
+      }
+      var removedAnnotationIDs: Set<PDFObjectID> = []
+      for (id, value) in graph.objects {
+        guard case .dictionary(let dictionary) = value,
+          dictionary[PDFName("Subtype")] == .name(PDFName("FileAttachment"))
+        else { continue }
+        if case .reference(let spec)? = dictionary[PDFName("FS")], removedSpecIDs.contains(spec) {
+          removedAnnotationIDs.insert(id)
+        }
+      }
+      let removed = removedAttachmentIDs.union(removedSpecIDs).union(removedAnnotationIDs)
+      for id in removed { graph.objects[id] = nil }
+      removeReferences(to: removed, in: &graph)
     }
     if removedAttachments > 0 { transformations.append("removed \(removedAttachments) attachments/embedded files") }
     // Drop the name tree when it no longer resolves.
@@ -580,27 +634,55 @@ public enum SanitizerPass {
         // Annotation /A and /AA entries with JavaScript or Launch.
         graph.objects[rootID] = .dictionary(catalog)
       }
+      // Collect document/annotation JavaScript and Launch actions. Ordinary
+      // links (URI, GoTo) and other action types are preserved: they are not
+      // hidden script content, and removing them would silently break links.
+      var unsafeActionIDs: Set<PDFObjectID> = []
       for (id, value) in graph.objects {
-        if case .dictionary(var dictionary) = value {
-          var changed = false
-          for key in [PDFName("A"), PDFName("AA")] where dictionary[key] != nil {
+        guard case .dictionary(let dictionary) = value else { continue }
+        if dictionary[PDFName("S")] == .name(PDFName("JavaScript"))
+          || dictionary[PDFName("S")] == .name(PDFName("Launch"))
+        {
+          unsafeActionIDs.insert(id)
+        }
+      }
+      func isUnsafeAction(_ value: PDFValue) -> Bool {
+        switch value {
+        case .reference(let target):
+          return unsafeActionIDs.contains(target)
+        case .dictionary(let dictionary):
+          return dictionary[PDFName("S")] == .name(PDFName("JavaScript"))
+            || dictionary[PDFName("S")] == .name(PDFName("Launch"))
+        default:
+          return false
+        }
+      }
+      for (id, value) in graph.objects where !unsafeActionIDs.contains(id) {
+        guard case .dictionary(var dictionary) = value else { continue }
+        var changed = false
+        for key in [PDFName("A"), PDFName("AA")] {
+          guard let action = dictionary[key] else { continue }
+          if key == PDFName("AA"), case .dictionary(var events) = action {
+            // /AA maps event names to actions; drop only unsafe events.
+            for (event, eventAction) in events where isUnsafeAction(eventAction) {
+              events[event] = nil
+              changed = true
+            }
+            dictionary[key] = events.isEmpty ? nil : .dictionary(events)
+          } else if isUnsafeAction(action) {
             dictionary[key] = nil
             changed = true
           }
-          // Embedded /JS strings inside actions.
-          if dictionary[PDFName("S")] == .name(PDFName("JavaScript"))
-            || dictionary[PDFName("S")] == .name(PDFName("Launch")) {
-            graph.objects[id] = nil
-            removedScripts += 1
-            continue
-          }
-          if changed {
-            graph.objects[id] = .dictionary(dictionary)
-            removedScripts += 1
-          }
+        }
+        if changed {
+          graph.objects[id] = .dictionary(dictionary)
+          removedScripts += 1
         }
       }
-      // Standalone /JS string objects reachable only through actions.
+      if !unsafeActionIDs.isEmpty {
+        for id in unsafeActionIDs { graph.objects[id] = nil }
+        removeReferences(to: unsafeActionIDs, in: &graph)
+      }
       if removedScripts > 0 { transformations.append("removed \(removedScripts) script/action entries") }
     }
 
@@ -633,11 +715,48 @@ public enum SanitizerPass {
     if pruned > 0 { transformations.append("pruned \(pruned) unreachable objects") }
     // Embedded-file removals are reported together with attachments.
     removedEmbedded = 0
+    var retained: [String] = []
+    if !policy.removeMetadata { retained.append("document metadata") }
+    if !policy.removeScripts { retained.append("script actions") }
+    if !policy.removeOptionalContent { retained.append("optional-content layers") }
+    if !policy.removeAttachmentsExcept.isEmpty || !policy.removeEmbeddedFilesExcept.isEmpty {
+      retained.append("allow-listed attachments")
+    }
     let report = SanitizerReport(
       removedMetadata: removedMetadata, removedAttachments: removedAttachments,
       removedScripts: removedScripts, removedEmbeddedFiles: removedEmbedded,
-      removedOptionalContent: removedOC, transformations: transformations)
+      removedOptionalContent: removedOC, transformations: transformations, retained: retained)
     return (graph, report)
+  }
+
+  /// Drops every reference to `ids` from object dictionaries, arrays, stream
+  /// dictionaries and the trailer. A removed file-specification wrapper or
+  /// annotation must not leave a dangling reference in the rewritten output.
+  static func removeReferences(to ids: Set<PDFObjectID>, in graph: inout PDFGraph) {
+    guard !ids.isEmpty else { return }
+    func cleaned(_ value: PDFValue) -> PDFValue? {
+      switch value {
+      case .reference(let id):
+        return ids.contains(id) ? nil : value
+      case .array(let values):
+        return .array(values.compactMap(cleaned))
+      case .dictionary(let dictionary):
+        return .dictionary(dictionary.compactMapValues(cleaned))
+      case .stream(var stream):
+        stream.dictionary = stream.dictionary.compactMapValues(cleaned)
+        return .stream(stream)
+      default:
+        return value
+      }
+    }
+    for (id, value) in graph.objects {
+      if let value = cleaned(value) {
+        graph.objects[id] = value
+      } else {
+        graph.objects[id] = nil
+      }
+    }
+    graph.trailer = graph.trailer.compactMapValues(cleaned)
   }
 
   static func embeddedFileIDs(in graph: PDFGraph) -> [PDFObjectID] {
@@ -717,6 +836,48 @@ public enum SanitizedDerivativeCheck {
         }
       }
     }
+  }
+}
+
+// MARK: - SAF-01 sanitized copy built for the menu route
+
+/// SAF-01: builds the graph the user-facing "Save Sanitized Copy" route
+/// writes. The session graph is never mutated. The policy runs on a staged
+/// copy, the cleaned graph is validated (references and page tree) and
+/// checked against the same policy, and only then is it handed to a verified
+/// full rewrite. The original graph remains the caller's source of truth.
+public enum SanitizedCopyBuilder {
+  public struct Result: Sendable {
+    public let graph: PDFGraph
+    public let report: SanitizerReport
+
+    public init(graph: PDFGraph, report: SanitizerReport) {
+      self.graph = graph
+      self.report = report
+    }
+  }
+
+  public static func prepare(
+    _ graph: PDFGraph, policy: SanitizerPolicy = .sanitizedCopy,
+    limits: PDFLimits = PDFLimits()
+  ) throws -> Result {
+    let (sanitized, report) = try SanitizerPass.run(in: graph, policy: policy)
+    try sanitized.validate(limits: limits)
+    let retainedNames = Set(
+      sanitized.objects.compactMap { id, value -> String? in
+        guard case .stream(let stream) = value,
+          stream.dictionary[PDFName("Type")] == .name(PDFName("EmbeddedFile"))
+        else { return nil }
+        return SanitizerPass.embeddedFileName(id: id, in: sanitized)
+      })
+    try SanitizedDerivativeCheck.verify(
+      in: sanitized, allowedAttachments: retainedNames,
+      allowMetadata: !policy.removeMetadata, allowScripts: !policy.removeScripts)
+    let reachable = SanitizeDocumentCommand.reachableObjectIDs(in: sanitized)
+    guard reachable.count == sanitized.objects.count else {
+      throw PDFError(.malformed, "Sanitized copy retains unreachable objects")
+    }
+    return Result(graph: sanitized, report: report)
   }
 }
 

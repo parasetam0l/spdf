@@ -313,4 +313,101 @@ struct RedactionTailsTests {
     #expect(!failing.passed)
     #expect(!failing.reasons.isEmpty)
   }
+
+  @Test func sanitizedCopyBuilderRemovesSeededHiddenDataWithoutMutatingSource() throws {
+    let parsed = try PDFParser.parse(PDFFixtures.onePage())
+    let pageID = parsed.pageIDs[0]
+    var graph = parsed.graph
+    graph.trailer[PDFName("Info")] = .dictionary([
+      PDFName("Title"): .string(Data("SECRET-INFO".utf8))
+    ])
+    graph.objects[PDFObjectID(90)] = .stream(
+      PDFStream(
+        dictionary: [PDFName("Type"): .name(PDFName("Metadata"))],
+        bytes: Data("<x>SECRET-XMP</x>".utf8)))
+    graph.objects[PDFObjectID(91)] = .dictionary([
+      PDFName("S"): .name(PDFName("JavaScript")),
+      PDFName("JS"): .string(Data("SECRET-SCRIPT".utf8)),
+    ])
+    graph.objects[PDFObjectID(92)] = .stream(
+      PDFStream(
+        dictionary: [
+          PDFName("Type"): .name(PDFName("EmbeddedFile")),
+          PDFName("F"): .string(Data("secret.txt".utf8)),
+        ],
+        bytes: Data("SECRET-ATTACHMENT".utf8)))
+    graph.objects[PDFObjectID(93)] = .dictionary([
+      PDFName("Type"): .name(PDFName("Filespec")),
+      PDFName("F"): .string(Data("secret.txt".utf8)),
+      PDFName("EF"): .dictionary([PDFName("F"): .reference(PDFObjectID(92))]),
+    ])
+    graph.objects[PDFObjectID(94)] = .stream(
+      PDFStream(
+        dictionary: [PDFName("Subtype"): .name(PDFName("Image"))],
+        bytes: Data("SECRET-ORPHAN-IMAGE".utf8)))
+    graph.objects[PDFObjectID(95)] = .dictionary([
+      PDFName("Contents"): .string(Data("SECRET-ORPHAN-TEXT".utf8))
+    ])
+    graph.objects[PDFObjectID(96)] = .dictionary([
+      PDFName("Type"): .name(PDFName("Annot")),
+      PDFName("Subtype"): .name(PDFName("Link")),
+      PDFName("Rect"): .array([.integer(10), .integer(10), .integer(100), .integer(30)]),
+      PDFName("A"): .dictionary([
+        PDFName("S"): .name(PDFName("URI")),
+        PDFName("URI"): .string(Data("https://example.invalid/".utf8)),
+      ]),
+    ])
+    if case .dictionary(var page)? = graph.objects[pageID] {
+      page[PDFName("Annots")] = .array([.reference(PDFObjectID(96))])
+      graph.objects[pageID] = .dictionary(page)
+    }
+    if case .reference(let rootID)? = graph.trailer[PDFName("Root")],
+      case .dictionary(var catalog)? = graph.objects[rootID]
+    {
+      catalog[PDFName("OpenAction")] = .reference(PDFObjectID(91))
+      catalog[PDFName("Names")] = .dictionary([
+        PDFName("EmbeddedFiles"): .dictionary([
+          PDFName("Names"): .array([
+            .string(Data("secret.txt".utf8)), .reference(PDFObjectID(93)),
+          ])
+        ])
+      ])
+      graph.objects[rootID] = .dictionary(catalog)
+    }
+    let source = graph
+
+    let result = try SanitizedCopyBuilder.prepare(graph)
+
+    #expect(result.report.removedMetadata >= 1)
+    #expect(result.report.removedAttachments >= 1)
+    #expect(result.report.removedScripts >= 1)
+    #expect(result.report.retained.contains("optional-content layers"))
+    #expect(result.graph.trailer[PDFName("Info")] == nil)
+    for id in [90, 91, 92, 93, 94, 95] {
+      #expect(result.graph.objects[PDFObjectID(id)] == nil)
+    }
+    #expect(graph == source, "Sanitizing must not mutate the session graph")
+    try result.graph.validate()
+    // Ordinary URI links are not script actions and must survive.
+    #expect(result.graph.objects[PDFObjectID(96)] != nil)
+    if case .dictionary(let annotation)? = result.graph.objects[PDFObjectID(96)] {
+      #expect(annotation[PDFName("A")] != nil)
+    }
+    let data = try PDFWriter.write(result.graph)
+    #expect(data.range(of: Data("/Prev".utf8)) == nil)
+    let reparsed = try PDFParser.parse(data)
+    for id in [90, 91, 92, 93, 94, 95] {
+      #expect(reparsed.graph.objects[PDFObjectID(id)] == nil)
+    }
+    #expect(reparsed.graph.trailer[PDFName("Info")] == nil)
+    // Ordinary URI links are not script actions and must survive.
+    if case .dictionary(let annotation)? = reparsed.graph.objects[PDFObjectID(96)],
+      case .dictionary(let action)? = annotation[PDFName("A")]
+    {
+      #expect(action[PDFName("S")] == .name(PDFName("URI")))
+      #expect(action[PDFName("URI")] == .string(Data("https://example.invalid/".utf8)))
+    } else {
+      Issue.record("The URI link did not survive the sanitized rewrite")
+    }
+  }
 }

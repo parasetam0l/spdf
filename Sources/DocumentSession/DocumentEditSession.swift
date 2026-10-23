@@ -35,6 +35,9 @@ public final class DocumentEditSession: @unchecked Sendable {
     /// Pages the edit that produced the *next* state touched, so undo can
     /// invalidate exactly those previews.
     let changedPageIDs: [PDFObjectID]
+    /// SAF-02: the secure-rewrite requirement at this point in history, so
+    /// undoing the removal itself restores the earlier (safe) save policy.
+    let secureRewriteRequired: Bool
   }
 
   private let lock = NSLock()
@@ -67,6 +70,11 @@ public final class DocumentEditSession: @unchecked Sendable {
   /// P38-022: repaired documents whose graph did not fully validate stay
   /// read-only until the repair is accepted.
   private var repairedEditSafe = true
+  /// SAF-02: a security-sensitive removal has been applied since the last
+  /// verified save. Bytes for the next save must be a full rewrite with
+  /// unreachable objects pruned; an incremental update would retain the
+  /// removed content in the base revision.
+  private var secureRewriteRequired = false
 
   public init(limits: PDFLimits = PDFLimits()) {
     self.limits = limits
@@ -155,6 +163,9 @@ public final class DocumentEditSession: @unchecked Sendable {
     lock.withLock { repairedEditSafe = editSafe }
   }
   public var isDirty: Bool { lock.withLock { graphIsDirty } }
+  /// SAF-02: the next save must be a full rewrite because a redaction or
+  /// sanitize command removed content the current base revision still holds.
+  public var requiresSecureRewrite: Bool { lock.withLock { secureRewriteRequired } }
   public var canUndo: Bool { lock.withLock { !undoStack.isEmpty } }
   public var canRedo: Bool { lock.withLock { !redoStack.isEmpty } }
   public var pageIDs: [PDFObjectID] { lock.withLock { pages } }
@@ -306,6 +317,9 @@ public final class DocumentEditSession: @unchecked Sendable {
       if affected.isEmpty { affected = fallback }
       let updated = try PDFEditingEngine.commit(transaction, to: editing, limits: limits)
       publish(updated, changedPageIDs: affected)
+      if transaction.commands.contains(where: { $0.requiresFullRewriteOnSave }) {
+        secureRewriteRequired = true
+      }
       refreshPagesLocked()
     }
   }
@@ -441,8 +455,12 @@ public final class DocumentEditSession: @unchecked Sendable {
     lock.withLock {
       guard let previous = undoStack.popLast(), let currentGraph = current else { return false }
       // The popped entry knows which pages the edit it undoes touched.
-      redoStack.append(UndoEntry(graph: currentGraph, changedPageIDs: previous.changedPageIDs))
+      redoStack.append(
+        UndoEntry(
+          graph: currentGraph, changedPageIDs: previous.changedPageIDs,
+          secureRewriteRequired: secureRewriteRequired))
       current = previous.graph
+      secureRewriteRequired = previous.secureRewriteRequired
       revision &+= 1
       lastChangeSet = EditChangeSet(revision: revision, pageIDs: previous.changedPageIDs)
       recordChangeLocked()
@@ -455,11 +473,15 @@ public final class DocumentEditSession: @unchecked Sendable {
   public func redo() -> Bool {
     lock.withLock {
       guard let next = redoStack.popLast(), let currentGraph = current else { return false }
-      undoStack.append(UndoEntry(graph: currentGraph, changedPageIDs: next.changedPageIDs))
+      undoStack.append(
+        UndoEntry(
+          graph: currentGraph, changedPageIDs: next.changedPageIDs,
+          secureRewriteRequired: secureRewriteRequired))
       if undoStack.count > Self.undoLimit {
         undoStack.removeFirst(undoStack.count - Self.undoLimit)
       }
       current = next.graph
+      secureRewriteRequired = next.secureRewriteRequired
       revision &+= 1
       lastChangeSet = EditChangeSet(revision: revision, pageIDs: next.changedPageIDs)
       recordChangeLocked()
@@ -487,6 +509,9 @@ public final class DocumentEditSession: @unchecked Sendable {
       }
       pendingRevision = nil
       saved = current
+      // The destination write for this revision was a full rewrite, so the
+      // new base no longer contains the removed content.
+      secureRewriteRequired = false
       return true
     }
   }
@@ -532,24 +557,35 @@ public final class DocumentEditSession: @unchecked Sendable {
       // signatures, protection and referenced hints retain writer refusals.
       let normalized = PDFWriter.droppingLinearization(currentGraph)
       let saveGraph = normalized.graph
+      // SAF-02: after a redaction or sanitize command, prune objects that are
+      // no longer reachable and full-rewrite the graph so no earlier revision
+      // retains the removed content. A normal edit keeps the incremental path.
+      let writeGraph: PDFGraph
+      if secureRewriteRequired {
+        writeGraph = try PDFEditingEngine.commit(
+          PDFTransaction([SanitizeDocumentCommand()]), to: saveGraph, limits: limits)
+      } else {
+        writeGraph = saveGraph
+      }
       let output: Data
-      if plan.mode == .incrementalUpdate, let base = parsedBase,
-        !(normalized.dropped && PDFWriter.droppingLinearization(base.graph).dropped) {
+      if !secureRewriteRequired, plan.mode == .incrementalUpdate, let base = parsedBase,
+        !(normalized.dropped && PDFWriter.droppingLinearization(base.graph).dropped)
+      {
         do {
-          output = try PDFWriter.incrementalUpdate(from: base, to: saveGraph, limits: limits)
+          output = try PDFWriter.incrementalUpdate(from: base, to: writeGraph, limits: limits)
         } catch let error as PDFError where error.kind == .unsupported {
           // Other ineligible bases use a full rewrite with the same
           // signature/protection and structural eligibility checks.
-          output = try PDFWriter.write(saveGraph, limits: limits)
+          output = try PDFWriter.write(writeGraph, limits: limits)
         }
       } else {
-        output = try PDFWriter.write(saveGraph, limits: limits)
+        output = try PDFWriter.write(writeGraph, limits: limits)
       }
       let reparsed = try PDFParser.parse(output, limits: limits)
       // /Size is derived per save mode: an incremental revision covers freed
       // object numbers while a full rewrite covers only live objects, so the
       // declared count may legitimately differ from the in-memory graph.
-      var expected = saveGraph
+      var expected = writeGraph
       if let savedSize = reparsed.graph.trailer[PDFName("Size")] {
         expected.trailer[PDFName("Size")] = savedSize
       }
@@ -601,7 +637,10 @@ public final class DocumentEditSession: @unchecked Sendable {
 
   private func publish(_ updated: PDFGraph, changedPageIDs: [PDFObjectID]) {
     guard let currentGraph = current, updated != currentGraph else { return }
-    undoStack.append(UndoEntry(graph: currentGraph, changedPageIDs: changedPageIDs))
+    undoStack.append(
+      UndoEntry(
+        graph: currentGraph, changedPageIDs: changedPageIDs,
+        secureRewriteRequired: secureRewriteRequired))
     if undoStack.count > Self.undoLimit {
       undoStack.removeFirst(undoStack.count - Self.undoLimit)
     }
