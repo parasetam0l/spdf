@@ -312,15 +312,26 @@ enum PageTextLineWriter {
   static func hasMatchingSharedGlyphMetrics(
     source: IndexedTextFont, candidate: IndexedTextFont, sourceText: String
   ) -> Bool {
+    let sourceProfile = source.profile
+    let candidateProfile = candidate.profile
+    guard (!source.hasEmbeddedProgram || sourceProfile != nil),
+      (!candidate.hasEmbeddedProgram || candidateProfile != nil)
+    else { return false }
+
     var sharedGlyphs = Set<String>()
     for scalar in sourceText.unicodeScalars {
       let text = String(scalar)
       guard let sourceCodes = source.encode(text), let sourceGlyphs = source.glyphs(sourceCodes),
         sourceGlyphs.count == 1, sourceGlyphs[0].text == text,
-        let sourceWidth = sourceGlyphs[0].width, sourceWidth.isFinite,
         let candidateCodes = candidate.encode(text),
         let candidateGlyphs = candidate.glyphs(candidateCodes),
-        candidateGlyphs.count == 1, candidateGlyphs[0].text == text,
+        candidateGlyphs.count == 1, candidateGlyphs[0].text == text
+      else { continue }
+      if let sourceProfile,
+        !source.sourceGlyphsMatchProfile(sourceGlyphs, profile: sourceProfile) { continue }
+      if let candidateProfile,
+        !candidate.sourceGlyphsMatchProfile(candidateGlyphs, profile: candidateProfile) { continue }
+      guard let sourceWidth = sourceGlyphs[0].width, sourceWidth.isFinite,
         let candidateWidth = candidateGlyphs[0].width, candidateWidth.isFinite
       else { continue }
       guard abs(sourceWidth - candidateWidth) <= 0.001 else { return false }
@@ -409,7 +420,9 @@ enum PageTextLineWriter {
     defaultOpacity: Double = 1, clippingRect: [Double]? = nil, in graph: inout PDFGraph
   ) throws {
     try validate(lines, box: box)
-    try validateFonts(lines, pageID: pageID, in: graph)
+    let fallbackWitnessText = lines.map(\.text).joined()
+    try validateFonts(lines, pageID: pageID, in: graph,
+      fallbackWitnessText: fallbackWitnessText)
     guard defaultOpacity.isFinite, (0...1).contains(defaultOpacity) else {
       throw PDFError(.malformed, "Invalid paragraph opacity")
     }
@@ -451,33 +464,98 @@ enum PageTextLineWriter {
       } else {
         for segment in line.segments where !segment.text.isEmpty {
           let face = segment.format.font
-          let resource: PDFName
           if let source = segment.format.sourceFont {
-            resource = source.resource
-          } else if let custom = segment.format.customFont {
-            resource = try AddedContent.selectFont(
-              style: AddedTextStyle(family: face.family, bold: face.isBold,
-                italic: face.isItalic, size: segment.format.size),
-              custom: custom, covering: segment.text, pageID: pageID, in: &graph).resourceName
-            customFontResources[custom.identifier] = resource
+            guard case .dictionary(let page)? = graph.objects[pageID],
+              let preferredFont = IndexedTextFont.resolve(
+                resource: source.resource, page: page, in: graph),
+              preferredFont.isInlineEditable
+            else {
+              throw PDFError(.unsupported,
+                "The embedded font does not contain these characters. Choose another font for them.")
+            }
+            let opacityName = try registerOpacity(segment.format.opacity)
+            if let codes = preferredFont.encode(segment.text),
+              let glyphs = preferredFont.glyphs(codes),
+              glyphs.map(\.text).joined() == segment.text,
+              let profile = preferredFont.profile,
+              preferredFont.sourceGlyphsMatchProfile(glyphs, profile: profile)
+            {
+              try emit(
+                codes, x: segment.x, baseline: line.baseline, resource: source.resource,
+                size: segment.format.size, color: segment.format.color,
+                spacing: segment.format.characterSpacing, opacityName: opacityName,
+                obliqueness: segment.format.obliqueness,
+                syntheticBoldStrokeWidth: segment.format.syntheticBoldStrokeWidth, to: &bytes)
+              count += 1
+            } else {
+              let availableFonts = indexedPageFonts(page: page, in: graph)
+              var groupResource: PDFName?
+              var groupCodes: [UInt8] = []
+              var groupX = segment.x
+              var pagePen = segment.x
+              func emitGroup() throws {
+                guard let resource = groupResource, !groupCodes.isEmpty else { return }
+                try emit(
+                  groupCodes, x: groupX, baseline: line.baseline, resource: resource,
+                  size: segment.format.size, color: segment.format.color,
+                  spacing: segment.format.characterSpacing, opacityName: opacityName,
+                  obliqueness: segment.format.obliqueness,
+                  syntheticBoldStrokeWidth: segment.format.syntheticBoldStrokeWidth,
+                  to: &bytes)
+                count += 1
+                groupCodes.removeAll(keepingCapacity: true)
+              }
+              for scalar in segment.text.unicodeScalars {
+                let text = String(scalar)
+                guard let resolved = inlineGlyph(text, preferredResource: source.resource,
+                  preferredFont: preferredFont, sourceText: fallbackWitnessText,
+                  availableFonts: availableFonts),
+                  let width = resolved.glyph.width, width.isFinite, width >= 0
+                else {
+                  throw PDFError(.unsupported,
+                    "The embedded font does not contain these characters. Choose another font for them.")
+                }
+                if groupResource != resolved.resource {
+                  try emitGroup()
+                  groupResource = resolved.resource
+                  groupX = pagePen
+                }
+                groupCodes += resolved.glyph.codes
+                pagePen += width * segment.format.size / 1_000
+                  + segment.format.characterSpacing
+                guard pagePen.isFinite else {
+                  throw PDFError(.unsupported, "The paragraph glyph advances are invalid")
+                }
+              }
+              try emitGroup()
+            }
           } else {
-            resource = try AddedContent.registerStandardFont(
-              family: face.family, bold: face.isBold, italic: face.isItalic, pageID: pageID,
-              in: &graph)
+            let resource: PDFName
+            if let custom = segment.format.customFont {
+              resource = try AddedContent.selectFont(
+                style: AddedTextStyle(family: face.family, bold: face.isBold,
+                  italic: face.isItalic, size: segment.format.size),
+                custom: custom, covering: segment.text, pageID: pageID, in: &graph).resourceName
+              customFontResources[custom.identifier] = resource
+            } else {
+              resource = try AddedContent.registerStandardFont(
+                family: face.family, bold: face.isBold, italic: face.isItalic, pageID: pageID,
+                in: &graph)
+            }
+            guard case .dictionary(let page)? = graph.objects[pageID],
+              let font = IndexedTextFont.resolve(resource: resource, page: page, in: graph),
+              font.isInlineEditable,
+              let codes = font.encode(segment.text)
+            else { throw PDFError(.unsupported, "The selected font cannot encode these characters") }
+            try emit(
+              codes, x: segment.x, baseline: line.baseline, resource: resource,
+              size: segment.format.size, color: segment.format.color,
+              spacing: segment.format.characterSpacing,
+              opacityName: try registerOpacity(segment.format.opacity),
+              obliqueness: segment.format.obliqueness,
+              syntheticBoldStrokeWidth: segment.format.syntheticBoldStrokeWidth, to: &bytes)
+            count += 1
           }
-          guard case .dictionary(let page)? = graph.objects[pageID],
-            let font = IndexedTextFont.resolve(resource: resource, page: page, in: graph),
-            font.isInlineEditable,
-            let codes = font.encode(segment.text)
-          else { throw PDFError(.unsupported, "The selected font cannot encode these characters") }
-          try emit(
-            codes, x: segment.x, baseline: line.baseline, resource: resource,
-            size: segment.format.size, color: segment.format.color,
-            spacing: segment.format.characterSpacing,
-            opacityName: try registerOpacity(segment.format.opacity),
-            obliqueness: segment.format.obliqueness,
-            syntheticBoldStrokeWidth: segment.format.syntheticBoldStrokeWidth, to: &bytes)
-          count += 1
         }
       }
       let breakStyle: PDFValue

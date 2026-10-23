@@ -531,6 +531,56 @@ struct ParagraphGraphicsStateTests {
     #expect(order.map { layout.clusters[$0].text }.joined() == "ACABAB")
   }
 
+  @Test func subsetFallbackSkipsAbsentSourceGlyphAndEmitsCompatibleSubset() throws {
+    var (graph, pageID) = try taggedSubsetFallbackFixture()
+    guard case .dictionary(var simpleFont)? = graph.objects[PDFObjectID(94)],
+      case .array(var widths)? = simpleFont[PDFName("Widths")],
+      case .stream(let toUnicode)? = graph.objects[PDFObjectID(93)],
+      widths.indices.contains(67 - 32),
+      case .dictionary(let page)? = graph.objects[pageID]
+    else { throw PDFError(.malformed, "Subset metric fixture is incomplete") }
+
+    // The simple subset can decode C through WinAnsi, but its zero declared
+    // width means C is not a glyph in that embedded subset profile.
+    widths[67 - 32] = .integer(0)
+    simpleFont[PDFName("Widths")] = .array(widths)
+    graph.objects[PDFObjectID(94)] = .dictionary(simpleFont)
+    let cmap = String(decoding: toUnicode.bytes, as: UTF8.self)
+      .replacingOccurrences(of: "3 beginbfchar\n", with: "4 beginbfchar\n")
+      .replacingOccurrences(of: "<42> <0042>\n", with: "<42> <0042>\n<43> <0043>\n")
+    graph.objects[PDFObjectID(93)] = .stream(PDFStream(bytes: Data(cmap.utf8)))
+
+    let source = try #require(IndexedTextFont.resolve(
+      resource: PDFName("F1"), page: page, in: graph))
+    let candidate = try #require(IndexedTextFont.resolve(
+      resource: PDFName("F2"), page: page, in: graph))
+    #expect(source.encode("C") != nil)
+    #expect(source.profile?.glyphs["C"] == nil)
+    #expect(candidate.profile?.glyphs["C"] != nil)
+
+    let glyph = PageTextLineWriter.inlineGlyph("C", preferredResource: PDFName("F1"),
+      preferredFont: source, sourceText: "ABC",
+      availableFonts: [PDFName("F1"): source, PDFName("F2"): candidate])
+    #expect(glyph?.resource == PDFName("F2"))
+    #expect(glyph?.glyph.text == "C")
+
+    let format = PageTextFormat(size: 12, color: [0, 0, 0],
+      sourceFont: .init(resource: PDFName("F1"), name: source.baseFont))
+    var written = graph
+    try PageTextLineWriter.append([
+      .init(text: "ABC", x: 42, baseline: 660,
+        segments: [.init(text: "ABC", x: 42, format: format)]),
+    ], box: PageTextBox(x: 42, firstBaseline: 660, width: 120, lineSpacing: 16, wraps: false),
+      pageID: pageID, defaultFont: source, defaultSize: 12, defaultColor: [0, 0, 0],
+      in: &written)
+    let reopened = try PDFParser.parse(PDFWriter.write(written))
+    let authored = try #require(AuthoredPageTextBoxes.read(pageID: pageID, in: reopened.graph)
+      .first(where: { $0.lines.map(\.text).joined() == "ABC" }))
+    #expect(authored.lines[0].segments.map(\.text) == ["AB", "C"])
+    #expect(authored.lines[0].segments.compactMap { $0.format.sourceFont?.resource }
+      == [PDFName("F1"), PDFName("F2")])
+  }
+
   @Test func oneLineTaggedParagraphUsesSameFaceSubsetForMissingGlyph() throws {
     var (graph, pageID) = try taggedSubsetFallbackFixture()
     graph.objects[PDFObjectID(5)] = .stream(PDFStream(bytes: Data("""
