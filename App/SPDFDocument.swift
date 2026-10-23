@@ -26,6 +26,23 @@ enum SPDFDocumentResourcePolicy {
   }
 }
 
+@MainActor
+private final class ParagraphReflowCandidateSelectionTarget: NSObject {
+  private let candidates: [TextParagraphCandidate]
+  private weak var replacementField: NSTextField?
+
+  init(candidates: [TextParagraphCandidate], replacementField: NSTextField) {
+    self.candidates = candidates
+    self.replacementField = replacementField
+  }
+
+  @objc func candidateDidChange(_ sender: NSPopUpButton) {
+    guard candidates.indices.contains(sender.indexOfSelectedItem) else { return }
+    replacementField?.stringValue = candidates[sender.indexOfSelectedItem].text
+      .replacingOccurrences(of: "\n", with: " ")
+  }
+}
+
 @objc(SPDFDocument)
 final class SPDFDocument: NSDocument {
   nonisolated let sourceStore = SourceStore()
@@ -1866,6 +1883,10 @@ final class SPDFDocument: NSDocument {
     }
     let replacementField = NSTextField(
       string: editable[0].text.replacingOccurrences(of: "\n", with: " "))
+    let candidateSelectionTarget = ParagraphReflowCandidateSelectionTarget(
+      candidates: editable, replacementField: replacementField)
+    popup.target = candidateSelectionTarget
+    popup.action = #selector(ParagraphReflowCandidateSelectionTarget.candidateDidChange(_:))
     let overflowPopup = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 200, height: 24))
     overflowPopup.addItems(withTitles: ["Allow overflow", "Clip (refuse)", "Shrink to fit"])
     let alignmentPopup = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 200, height: 24))
@@ -1873,7 +1894,8 @@ final class SPDFDocument: NSDocument {
       withTitles: ["Keep alignment", "Left", "Center", "Right", "Justified"])
     let lineSpacingField = NSTextField(string: "")
     lineSpacingField.placeholderString = "Keep current"
-    lineSpacingField.toolTip = "Distance between line baselines, in points."
+    lineSpacingField.toolTip =
+      "Distance between line baselines, in points; limited to 1.8 times the selected font size."
     let grid = NSGridView(views: [
       [NSTextField(labelWithString: "Paragraph:"), popup],
       [NSTextField(labelWithString: "New text:"), replacementField],
@@ -1889,22 +1911,37 @@ final class SPDFDocument: NSDocument {
         message:
           "The paragraph's own lines are rewritten; other content is checked for collisions. "
           + "Justified alignment expands spaces on nonfinal lines. Leave line spacing blank "
-          + "to keep the selected paragraph's current spacing.",
+          + "to keep the selected paragraph's current spacing. Explicit spacing is limited to "
+          + "1.8 times the selected font size so it remains available for reflow after reopening.",
         accessory: grid)
     else { return }
+    let index = max(0, min(popup.indexOfSelectedItem, editable.count - 1))
+    let candidate = editable[index]
     let spacingInput = lineSpacingField.stringValue.trimmingCharacters(
       in: .whitespacesAndNewlines)
     let lineSpacing: Double?
     if spacingInput.isEmpty {
       lineSpacing = nil
-    } else if let value = Double(spacingInput), value.isFinite, value > 0, value <= 1_000
-    {
-      lineSpacing = value
     } else {
-      presentError(PDFError(.malformed, "Line spacing must be a number between 0 and 1000 points."))
-      return
+      guard overflowPopup.indexOfSelectedItem != 2 else {
+        presentError(
+          PDFError(
+            .unsupported,
+            "Custom line spacing cannot be combined with Shrink to fit; choose Allow overflow or Clip (refuse)."))
+        return
+      }
+      let maximumLineSpacing = min(1_000, candidate.fontSize * 1.8)
+      guard let value = Double(spacingInput), value.isFinite, value > 0,
+        value <= maximumLineSpacing
+      else {
+        presentError(
+          PDFError(
+            .malformed,
+            "Line spacing must be a positive number no greater than \(String(format: "%.1f", maximumLineSpacing)) points for this paragraph."))
+        return
+      }
+      lineSpacing = value
     }
-    let index = max(0, min(popup.indexOfSelectedItem, editable.count - 1))
     let alignment: TextParagraphCandidate.Alignment?
     switch alignmentPopup.indexOfSelectedItem {
     case 1: alignment = .left
@@ -1920,7 +1957,7 @@ final class SPDFDocument: NSDocument {
         ParagraphReflowOptions.Overflow.allow, .clip, .shrinkToFit,
       ][max(0, min(overflowPopup.indexOfSelectedItem, 2))])
     _ = reflowParagraph(
-      pageID: pageID, candidate: editable[index], replacement: replacementField.stringValue,
+      pageID: pageID, candidate: candidate, replacement: replacementField.stringValue,
       options: options)
   }
 
