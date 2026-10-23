@@ -1515,12 +1515,6 @@ public struct RewritePageTextCommand: PDFEditCommand, Equatable, Sendable {
     content: PageContent, runs: [TextRun], advances: [Double], graph: PDFGraph
   ) throws -> [(range: Range<Int>, replacement: [UInt8])]? {
     func refuse(at line: UInt) -> [(range: Range<Int>, replacement: [UInt8])]? {
-#if DEBUG
-      if CommandLine.arguments.contains("--diagnose-tagged-rewrite") {
-        let message = "tagged-rewrite-refused: PageTextLines.swift guard line \(line)\n"
-        FileHandle.standardError.write(Data(message.utf8))
-      }
-#endif
       return nil
     }
 
@@ -1748,9 +1742,11 @@ public struct RewritePageTextCommand: PDFEditCommand, Equatable, Sendable {
         let mayUseSegmentStandardMetrics = segmentStandardFont != nil
           && standardIndices.map { segmentRunIndices.allSatisfy($0.contains) } == true
           && segmentFont.simple?.differences.isEmpty == true && segmentFont.simple?.toUnicode == nil
-        guard abs(segment.x - pagePen) <= 0.02,
-          PageTextSourceFont.canWriteInline(segment.text)
-        else { return refuse(at: #line) }
+        guard PageTextSourceFont.canWriteInline(segment.text) else { return refuse(at: #line) }
+        // TJ adjustments between PDF strings are reflected in segment.x but
+        // not in font advances. Resume at that recorded position so the
+        // rewrite preserves the source gap instead of rejecting the line.
+        pagePen = segment.x
         var encodedGlyphs: [(resource: PDFName, glyph: IndexedTextFont.Glyph)] = []
         if let encoded = segmentFont.encode(segment.text),
           let glyphs = segmentFont.glyphs(encoded),
