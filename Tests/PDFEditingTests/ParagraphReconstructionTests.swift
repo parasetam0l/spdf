@@ -113,6 +113,32 @@ struct ParagraphReconstructionTests {
     #expect(candidates.contains { $0.kind == .flowing })
   }
 
+  @Test func nearbyColumnGutterDoesNotJoinParagraphAndNeighbor() throws {
+    let paragraphLine = "A paragraph line that extends close to the gutter"
+    let widthGraph = fixture(lines: [(paragraphLine, 60, 700, 10)])
+    let widthPage = try PDFPageTree.pageIDs(in: widthGraph)[0]
+    let widthLayout = try PageTextLayout.buildForParagraphEditing(
+      pageID: widthPage, in: widthGraph)
+    let firstLine = try #require(widthLayout.lines.first)
+    let paragraphRightEdge = firstLine.map { widthLayout.clusters[$0].bounds[2] }.max() ?? 0
+    let neighborX = paragraphRightEdge + 26.85
+
+    let graph = fixture(lines: [
+      (paragraphLine, 60, 700, 10),
+      ("Neighbor bullet item", neighborX, 700, 10),
+      (paragraphLine, 60, 685, 10),
+      ("Neighbor second item", neighborX, 685, 10),
+    ])
+    let pageID = try PDFPageTree.pageIDs(in: graph)[0]
+    let candidates = try ParagraphReconstruction.candidatesForEditing(
+      pageID: pageID, in: graph)
+
+    let paragraph = try #require(candidates.first { $0.text.hasPrefix(paragraphLine) })
+    #expect(paragraph.text == "\(paragraphLine)\n\(paragraphLine)")
+    #expect(!paragraph.text.contains("Neighbor"))
+    #expect(candidates.contains { $0.text.hasPrefix("Neighbor bullet item") })
+  }
+
   /// Two-pass fixture: measure each line's width with the same estimator the
   /// analysis uses, then position lines for exact alignment.
   private func alignedFixture(

@@ -222,7 +222,10 @@ public struct PageTextLayout: Sendable {
       var currentItems: [TextCluster] = []
       var previousEnd: Double?
       for cluster in ordered {
-        let threshold = max(3.0 * cluster.fontSize, 24)
+        // A three-em cutoff can swallow narrow but real column gutters (for
+        // example, 26.85 pt beside 10 pt body text). Keep the 24 pt floor,
+        // but split at two em so adjacent columns remain separate.
+        let threshold = max(2.0 * cluster.fontSize, 24)
         if let previousEnd, cluster.bounds[0] - previousEnd > threshold {
           gutters.append((previousEnd, cluster.bounds[0]))
           segments.append(Segment(column: 0, baseline: line.baseline, items: currentItems))
