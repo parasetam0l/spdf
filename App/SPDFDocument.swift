@@ -1871,22 +1871,39 @@ final class SPDFDocument: NSDocument {
     let alignmentPopup = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 200, height: 24))
     alignmentPopup.addItems(
       withTitles: ["Keep alignment", "Left", "Center", "Right", "Justified"])
+    let lineSpacingField = NSTextField(string: "")
+    lineSpacingField.placeholderString = "Keep current"
+    lineSpacingField.toolTip = "Distance between line baselines, in points."
     let grid = NSGridView(views: [
       [NSTextField(labelWithString: "Paragraph:"), popup],
       [NSTextField(labelWithString: "New text:"), replacementField],
       [NSTextField(labelWithString: "Overflow:"), overflowPopup],
       [NSTextField(labelWithString: "Alignment:"), alignmentPopup],
+      [NSTextField(labelWithString: "Line spacing (pt):"), lineSpacingField],
     ])
     grid.column(at: 0).xPlacement = .trailing
-    grid.frame = NSRect(x: 0, y: 0, width: 460, height: 100)
+    grid.frame = NSRect(x: 0, y: 0, width: 460, height: 128)
     guard
       runFormDialog(
         title: "Reflow Paragraph",
         message:
           "The paragraph's own lines are rewritten; other content is checked for collisions. "
-          + "Justified alignment expands spaces on nonfinal lines.",
+          + "Justified alignment expands spaces on nonfinal lines. Leave line spacing blank "
+          + "to keep the selected paragraph's current spacing.",
         accessory: grid)
     else { return }
+    let spacingInput = lineSpacingField.stringValue.trimmingCharacters(
+      in: .whitespacesAndNewlines)
+    let lineSpacing: Double?
+    if spacingInput.isEmpty {
+      lineSpacing = nil
+    } else if let value = Double(spacingInput), value.isFinite, value > 0, value <= 1_000
+    {
+      lineSpacing = value
+    } else {
+      presentError(PDFError(.malformed, "Line spacing must be a number between 0 and 1000 points."))
+      return
+    }
     let index = max(0, min(popup.indexOfSelectedItem, editable.count - 1))
     let alignment: TextParagraphCandidate.Alignment?
     switch alignmentPopup.indexOfSelectedItem {
@@ -1898,6 +1915,7 @@ final class SPDFDocument: NSDocument {
     }
     let options = ParagraphReflowOptions(
       alignment: alignment,
+      lineSpacing: lineSpacing,
       overflow: [
         ParagraphReflowOptions.Overflow.allow, .clip, .shrinkToFit,
       ][max(0, min(overflowPopup.indexOfSelectedItem, 2))])
