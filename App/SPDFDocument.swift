@@ -1009,9 +1009,7 @@ final class SPDFDocument: NSDocument {
   func optimizeDocument(
     to url: URL, options: PDFOptimizationOptions = PDFOptimizationOptions()
   ) throws -> PDFOptimizationReport {
-    guard let graph = editSession.currentGraph else {
-      throw PDFError(.malformed, "The document has no editable graph")
-    }
+    let graph = try prepareDerivative(to: url)
     let sourceBytes = (try? editSession.bytesForSave().count) ?? 0
     let (_, data, report) = try PDFOptimizer.lossless(
       graph, options: options, sourceBytes: sourceBytes,
@@ -1030,6 +1028,7 @@ final class SPDFDocument: NSDocument {
   /// P31-019/P31-021: show before/after sizes and the transformations before
   /// any destination is written; metadata removal is an explicit checkbox.
   func presentOptimizeDocument() {
+    guard finishPendingEdits() else { return }
     guard let graph = editSession.currentGraph else { return }
     let sourceBytes = (try? editSession.bytesForSave().count) ?? 0
     let preview: (graph: PDFGraph, data: Data, report: PDFOptimizationReport)
@@ -1256,9 +1255,7 @@ final class SPDFDocument: NSDocument {
   func writeSanitizedCopy(
     to url: URL, policy: SanitizerPolicy = .sanitizedCopy
   ) throws -> SanitizerReport {
-    guard canEditContent, let graph = editSession.currentGraph else {
-      throw PDFError(.malformed, "The document has no editable graph")
-    }
+    let graph = try prepareDerivative(to: url)
     let prepared = try SanitizedCopyBuilder.prepare(
       graph, policy: policy, limits: SPDFDocumentResourcePolicy.parsingLimits)
     let data = try PDFWriter.write(
@@ -1270,7 +1267,7 @@ final class SPDFDocument: NSDocument {
   }
 
   func saveSanitizedCopy() {
-    guard canEditContent else { return }
+    guard canEditContent, finishPendingEdits() else { return }
     let policy = SanitizerPolicy.sanitizedCopy
     let confirmation = NSAlert()
     confirmation.messageText = "Save Sanitized Copy"
@@ -1325,9 +1322,7 @@ final class SPDFDocument: NSDocument {
     permissions: Int32 = -4, encryptMetadata: Bool = true,
     unencryptedEmbeddedFiles: Bool = false
   ) throws {
-    guard canEditContent, let graph = editSession.currentGraph else {
-      throw PDFError(.malformed, "The document has no editable graph")
-    }
+    let graph = try prepareDerivative(to: url, allowProtected: true)
     let data = try PDFWriter.write(
       graph,
       encryption: PDFEncryptionOptions(
@@ -1362,7 +1357,7 @@ final class SPDFDocument: NSDocument {
   }
 
   func exportEncryptedCopy() {
-    guard canEditContent else { return }
+    guard canEditContent, finishPendingEdits() else { return }
     let userField = NSSecureTextField(frame: NSRect(x: 0, y: 0, width: 220, height: 24))
     userField.placeholderString = "Required"
     let ownerField = NSSecureTextField(frame: NSRect(x: 0, y: 0, width: 220, height: 24))
@@ -1624,6 +1619,7 @@ final class SPDFDocument: NSDocument {
   var canExportText: Bool { editSession.currentGraph != nil }
 
   func exportText() {
+    guard finishPendingEdits() else { return }
     guard let graph = editSession.currentGraph else { return }
     let encodingPopup = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 160, height: 24))
     encodingPopup.addItems(withTitles: ["UTF-8", "UTF-16"])
@@ -1671,6 +1667,7 @@ final class SPDFDocument: NSDocument {
     panel.begin { [weak self] response in
       guard response == .OK, let url = panel.url, let self else { return }
       do {
+        try DerivativeOutputPolicy.validateDestination(url, source: self.fileURL)
         try data.write(to: url, options: .atomic)
       } catch {
         self.presentError(error)
@@ -1680,9 +1677,8 @@ final class SPDFDocument: NSDocument {
 
   /// Testable path behind the panel: write the export directly.
   func exportText(to url: URL, options: PDFTextExportOptions = .init()) throws {
-    guard let graph = editSession.currentGraph else {
-      throw PDFError(.malformed, "There is no document to export")
-    }
+    let graph = try prepareDerivative(
+      to: url, requiresEditable: false, allowSigned: true)
     let data = try PDFTextExport.plainText(
       pageIDs: editSession.pageIDs, in: graph, options: options)
     try data.write(to: url, options: .atomic)
@@ -1786,6 +1782,7 @@ final class SPDFDocument: NSDocument {
   var canExportHTML: Bool { editSession.currentGraph != nil }
 
   func exportHTML() {
+    guard finishPendingEdits() else { return }
     guard let graph = editSession.currentGraph else { return }
     let modePopup = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 200, height: 24))
     modePopup.addItems(withTitles: ["Semantic (text and structure)", "Appearance (page images)"])
@@ -1822,6 +1819,7 @@ final class SPDFDocument: NSDocument {
     panel.begin { [weak self] response in
       guard response == .OK, let url = panel.url, let self else { return }
       do {
+        try DerivativeOutputPolicy.validateDestination(url, source: self.fileURL)
         try result.html.data(using: .utf8)?.write(to: url, options: .atomic)
         try self.writeHTMLResources(result.resources, nextTo: url)
       } catch {
@@ -1832,9 +1830,8 @@ final class SPDFDocument: NSDocument {
 
   /// Testable path behind the panel.
   func exportHTML(to url: URL, options: PDFHTMLExportOptions = .init()) throws {
-    guard let graph = editSession.currentGraph else {
-      throw PDFError(.malformed, "There is no document to export")
-    }
+    let graph = try prepareDerivative(
+      to: url, requiresEditable: false, allowSigned: true)
     let result = try PDFHTMLExport.export(pageIDs: editSession.pageIDs, in: graph, options: options)
     try result.html.data(using: .utf8)?.write(to: url, options: .atomic)
     try writeHTMLResources(result.resources, nextTo: url)
@@ -2817,7 +2814,7 @@ final class SPDFDocument: NSDocument {
   /// P34-023/P34-024: print-to-PDF derivative with an explicit flattening
   /// disclosure before the save panel.
   func exportPrintPDF() {
-    guard let graph = editSession.currentGraph else { return }
+    guard finishPendingEdits() else { return }
     let alert = NSAlert()
     alert.messageText = "Export Print PDF"
     alert.informativeText =
@@ -2831,7 +2828,7 @@ final class SPDFDocument: NSDocument {
     panel.begin { [weak self] response in
       guard response == .OK, let url = panel.url, let self else { return }
       do {
-        try PDFPrintExport.writePDF(pageIDs: self.editSession.pageIDs, in: graph, to: url)
+        try self.exportPrintPDF(to: url)
       } catch {
         self.presentError(error)
       }
@@ -2840,9 +2837,8 @@ final class SPDFDocument: NSDocument {
 
   /// Testable path behind the panel.
   func exportPrintPDF(to url: URL) throws {
-    guard let graph = editSession.currentGraph else {
-      throw PDFError(.malformed, "There is no document to export")
-    }
+    let graph = try prepareDerivative(
+      to: url, requiresEditable: false, allowSigned: true)
     try PDFPrintExport.writePDF(pageIDs: editSession.pageIDs, in: graph, to: url)
   }
 
@@ -2917,6 +2913,7 @@ final class SPDFDocument: NSDocument {
 
   /// P35-015–P35-019: export the document as an editable DOCX reconstruction.
   func exportDOCX() {
+    guard finishPendingEdits() else { return }
     guard editSession.currentGraph != nil, !editSession.pageIDs.isEmpty else { return }
     let alert = NSAlert()
     alert.messageText = "Export DOCX"
@@ -2988,9 +2985,8 @@ final class SPDFDocument: NSDocument {
   /// Testable path behind the panel.
   @discardableResult
   func exportDOCX(to url: URL, mode: DOCXExportMode = .editable) async throws -> Int {
-    guard let graph = editSession.currentGraph else {
-      throw PDFError(.malformed, "There is no document to export")
-    }
+    let graph = try prepareDerivative(
+      to: url, requiresEditable: false, allowSigned: true)
     let job = try beginDocumentJob(title: "Exporting DOCX", total: 1)
     defer { jobCenter.finish(id: job) }
     return try await DOCXDocumentExport.export(
@@ -3059,6 +3055,7 @@ final class SPDFDocument: NSDocument {
   /// transformations only), then validate it with an independent validator
   /// when one is available. No PDF/A identifier is ever written.
   func createArchivalCopy() {
+    guard finishPendingEdits() else { return }
     guard let graph = editSession.currentGraph, !editSession.pageIDs.isEmpty else { return }
     let plan = ArchivalDerivative.plan(graph, pageIDs: editSession.pageIDs)
     let alert = NSAlert()
@@ -3077,10 +3074,18 @@ final class SPDFDocument: NSDocument {
     panel.begin { [weak self] response in
       guard response == .OK, let url = panel.url, let self else { return }
       do {
+        let graph = try self.prepareDerivative(to: url)
+        let plan = ArchivalDerivative.plan(graph, pageIDs: self.editSession.pageIDs)
         let staged = try ArchivalDerivative.stage(
           graph, plan: plan, applying: plan.safeKinds)
         let data = try PDFWriter.write(staged.graph)
-        try data.write(to: url, options: .atomic)
+        try VerifiedFileWriter.write(data, to: url) { written in
+          let reparsed = try PDFParser.parse(
+            written, limits: SPDFDocumentResourcePolicy.parsingLimits)
+          guard reparsed.pageCount == self.editSession.pageIDs.count else {
+            throw PDFError(.malformed, "Archival copy failed page verification")
+          }
+        }
         let validation = ArchivalDerivative.validate(data)
         let validationText =
           validation?.report()
@@ -3108,6 +3113,7 @@ final class SPDFDocument: NSDocument {
   /// P37-024: explicit color conversion with before/after previews. Only
   /// supported 8-bit device images are converted; nothing else is guessed.
   func convertColors() {
+    guard finishPendingEdits() else { return }
     guard let graph = editSession.currentGraph, !editSession.pageIDs.isEmpty else { return }
     let choice = NSAlert()
     choice.messageText = "Convert Colors"
@@ -3179,8 +3185,20 @@ final class SPDFDocument: NSDocument {
     panel.begin { [weak self] response in
       guard response == .OK, let url = panel.url, let self else { return }
       do {
-        let data = try PDFWriter.write(converted.graph)
-        try data.write(to: url, options: .atomic)
+        let graph = try self.prepareDerivative(to: url)
+        let fresh = try ColorConversion.convert(
+          graph, pageIDs: self.editSession.pageIDs, to: target)
+        guard fresh.report.convertedImages > 0 else {
+          throw PDFError(.unsupported, "Nothing remained to convert")
+        }
+        let data = try PDFWriter.write(fresh.graph)
+        try VerifiedFileWriter.write(data, to: url) { written in
+          let reparsed = try PDFParser.parse(
+            written, limits: SPDFDocumentResourcePolicy.parsingLimits)
+          guard reparsed.pageCount == self.editSession.pageIDs.count else {
+            throw PDFError(.malformed, "Converted copy failed page verification")
+          }
+        }
       } catch {
         self.presentError(error)
       }
@@ -3241,6 +3259,7 @@ final class SPDFDocument: NSDocument {
     panel.begin { [weak self] response in
       guard response == .OK, let url = panel.url, let self else { return }
       do {
+        try DerivativeOutputPolicy.validateDestination(url, source: self.fileURL)
         try repairedData.write(to: url, options: .atomic)
         let report = repaired.report
         NSDocumentController.shared.openDocument(withContentsOf: url, display: true) {
@@ -4928,6 +4947,42 @@ final class SPDFDocument: NSDocument {
     // NSDocument's canClose machinery commits registered Cocoa editors; the
     // app's native and SwiftUI editors are explicitly flushed above.
     return true
+  }
+
+  /// SAF-03: common gate for operations that write a derivative PDF. Pending
+  /// input is committed first; editable operations require an editable graph;
+  /// signed documents are refused unless the derivative preserves them; and
+  /// the destination must not be the open source.
+  @discardableResult
+  private func prepareDerivative(
+    to url: URL, requiresEditable: Bool = true, allowSigned: Bool = false,
+    allowProtected: Bool = false
+  ) throws -> PDFGraph {
+    guard finishPendingEdits() else {
+      throw PDFError(.unsupported, "Finish the current edit before creating a derivative")
+    }
+    if requiresEditable {
+      guard canEditContent else {
+        throw PDFError(.unsupported, "This document is read-only for editing")
+      }
+      if !allowProtected {
+        guard !editSession.isProtected else {
+          throw PDFError(
+            .unsupported,
+            "Save an unlocked, unencrypted copy before creating this derivative")
+        }
+      }
+    }
+    if !allowSigned, hasSignatures {
+      throw PDFError(
+        .unsupported,
+        "This derivative would invalidate existing signatures; remove them first")
+    }
+    try DerivativeOutputPolicy.validateDestination(url, source: fileURL)
+    guard let graph = editSession.currentGraph else {
+      throw PDFError(.malformed, "The document has no editable graph")
+    }
+    return graph
   }
 
   override func canClose(
