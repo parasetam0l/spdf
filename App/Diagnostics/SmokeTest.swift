@@ -1715,6 +1715,8 @@
             let menu = imageViewer.view.menu(for: event)
           {
             guard menu.items.contains(where: { $0.title == "Rotate Image 90°" }),
+              menu.items.contains(where: { $0.title == "Flip Image Horizontally" }),
+              menu.items.contains(where: { $0.title == "Crop Image…" }),
               menu.items.contains(where: { $0.title == "Replace All Shared Instances…" })
             else { throw PDFError(.malformed, "Image context menu is missing operations") }
           } else {
@@ -1732,6 +1734,31 @@
         }
         guard third.undoEdit(), try third.data(ofType: "com.adobe.pdf") == imageBaseline else {
           throw PDFError(.malformed, "Image rotation undo did not restore the baseline bytes")
+        }
+        // IMG-01: flip and nondestructive crop use the same session route as
+        // the image context menu and undo cleanly.
+        guard third.flipImage(pageIndex: 0, placementIndex: 0, horizontal: true) else {
+          throw PDFError(.malformed, "Image flip did not commit")
+        }
+        let flippedGraph = try PDFParser.parse(try third.data(ofType: "com.adobe.pdf")).graph
+        let flippedPlacements = try ImageInventory.placements(
+          in: flippedGraph, pageID: third.editSession.pageIDs[0])
+        guard flippedPlacements[0].matrix == [-120, 0, 0, 120, 200, 600] else {
+          throw PDFError(.malformed, "Image flip did not round-trip")
+        }
+        guard third.undoEdit(), try third.data(ofType: "com.adobe.pdf") == imageBaseline else {
+          throw PDFError(.malformed, "Image flip undo did not restore the baseline bytes")
+        }
+        guard
+          third.cropImage(
+            pageIndex: 0, placementIndex: 0, unitRect: [0.25, 0.25, 0.75, 0.75])
+        else { throw PDFError(.malformed, "Image crop did not commit") }
+        let croppedBytes = try third.data(ofType: "com.adobe.pdf")
+        guard String(decoding: croppedBytes, as: UTF8.self).contains(" W n") else {
+          throw PDFError(.malformed, "Image crop did not write a clip path")
+        }
+        guard third.undoEdit(), try third.data(ofType: "com.adobe.pdf") == imageBaseline else {
+          throw PDFError(.malformed, "Image crop undo did not restore the baseline bytes")
         }
         // Preview-first gestures (joint session): rotation keeps the
         // footprint inside the page, and overlay drags on a native image

@@ -568,6 +568,54 @@ public struct RotateImageCommand: PDFEditCommand, Equatable, Sendable {
   }
 }
 
+/// IMG-01: mirror one image placement around its own footprint center. The
+/// image data and every other placement stay byte-identical.
+public struct FlipImageCommand: PDFEditCommand, Equatable, Sendable {
+  public let pageID: PDFObjectID
+  public let placementIndex: Int
+  public let horizontal: Bool
+
+  public init(pageID: PDFObjectID, placementIndex: Int, horizontal: Bool) {
+    self.pageID = pageID
+    self.placementIndex = placementIndex
+    self.horizontal = horizontal
+  }
+
+  public func affectedPageIDs(in graph: PDFGraph) -> [PDFObjectID] { [pageID] }
+  public var name: String { horizontal ? "Flip Image Horizontally" : "Flip Image Vertically" }
+
+  public func validate(in graph: PDFGraph) throws {
+    _ = try editableImagePlacement(pageID: pageID, placementIndex: placementIndex, in: graph)
+  }
+
+  public func apply(to graph: PDFGraph) throws -> PDFGraph {
+    let limits = PDFLimits()
+    let placement = try editableImagePlacement(
+      pageID: pageID, placementIndex: placementIndex, in: graph)
+    let mirror: [Double] = horizontal ? [-1, 0, 0, 1, 0, 0] : [1, 0, 0, -1, 0, 0]
+    let m = placement.matrix
+    let local = [m[0], m[1], m[2], m[3], 0, 0]
+    let mirrored = ImageInventory.concat(mirror, local)
+    // Keep the footprint centered: only the orientation changes.
+    let bounds = ImageInventory.bounds(of: m)
+    let center = [(bounds[0] + bounds[2]) / 2, (bounds[1] + bounds[3]) / 2]
+    let e = center[0] - (mirrored[0] + mirrored[2]) / 2
+    let f = center[1] - (mirrored[1] + mirrored[3]) / 2
+    let desiredPage = [mirrored[0], mirrored[1], mirrored[2], mirrored[3], e, f]
+    guard let inverseOuter = ImageViewMapping.invert(placement.outerMatrix) else {
+      throw PDFError(.unsupported, "The image has a singular enclosing transform")
+    }
+    let result = ImageInventory.concat(inverseOuter, desiredPage)
+    let content = try PageContent.load(pageID: pageID, in: graph, limits: limits)
+    let ranges = zip(placement.operandSpans, result).map {
+      ($0.0, Array(ImageInventory.numberToken($0.1).utf8))
+    }
+    var graph = try content.replacing(ranges: ranges, in: graph, limits: limits)
+    try ImageOCRRelations.invalidateGeneratedLayer(pageID: pageID, in: &graph)
+    return graph
+  }
+}
+
 /// P20-007: replace the pixel data of one image instance with new DeviceRGB
 /// 8-bit samples. The image object is copied before it is changed and only
 /// the target page's resource mapping points at the copy, so other pages or

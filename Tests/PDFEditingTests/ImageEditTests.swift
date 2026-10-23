@@ -246,6 +246,40 @@ struct ImageEditTests {
       - (before[2] - before[0])) < 0.0001)
   }
 
+  @Test func flipMirrorsTheImageWithoutChangingItsFootprint() throws {
+    let parsed = try PDFParser.parse(PDFFixtures.imagePages())
+    let page = parsed.pageIDs[0]
+    let initial = try ImageInventory.placements(in: parsed.graph, pageID: page)
+    #expect(initial[0].matrix == [120, 0, 0, 120, 80, 600])
+
+    let horizontal = try PDFEditingEngine.commit(
+      PDFTransaction([
+        FlipImageCommand(pageID: page, placementIndex: 0, horizontal: true)
+      ]), to: parsed.graph)
+    let horizontalPlacements = try ImageInventory.placements(
+      in: horizontal, pageID: page)
+    let horizontalPlacement = horizontalPlacements[0]
+    #expect(horizontalPlacement.matrix == [-120, 0, 0, 120, 200, 600])
+    #expect(horizontalPlacement.bounds == initial[0].bounds)
+    // The second placement is untouched.
+    #expect(horizontalPlacements[1].matrix == initial[1].matrix)
+
+    let twice = try PDFEditingEngine.commit(
+      PDFTransaction([
+        FlipImageCommand(pageID: page, placementIndex: 0, horizontal: true)
+      ]), to: horizontal)
+    let twicePlacements = try ImageInventory.placements(in: twice, pageID: page)
+    #expect(twicePlacements[0].matrix == initial[0].matrix)
+
+    let vertical = try PDFEditingEngine.commit(
+      PDFTransaction([
+        FlipImageCommand(pageID: page, placementIndex: 0, horizontal: false)
+      ]), to: parsed.graph)
+    let verticalPlacement = try ImageInventory.placements(in: vertical, pageID: page)[0]
+    #expect(verticalPlacement.matrix == [120, 0, 0, -120, 80, 720])
+    #expect(verticalPlacement.bounds == initial[0].bounds)
+  }
+
   @Test func moveRefusesUnsupportedMatrixPatterns() throws {
     var graph = try PDFParser.parse(PDFFixtures.imagePages()).graph
     guard case .stream(let stream)? = graph.objects[PDFObjectID(5)] else {

@@ -3977,6 +3977,8 @@ final class SPDFDocument: NSDocument {
     enum Kind {
       case rotate(Int)
       case scale(Double)
+      case flip(horizontal: Bool)
+      case crop
       case replace(shared: Bool)
     }
 
@@ -4036,6 +4038,9 @@ final class SPDFDocument: NSDocument {
     }
     add("Rotate Image 90°", .rotate(90))
     add("Rotate Image −90°", .rotate(-90))
+    add("Flip Image Horizontally", .flip(horizontal: true))
+    add("Flip Image Vertically", .flip(horizontal: false))
+    add("Crop Image…", .crop)
     menu.addItem(.separator())
     add("Scale Image Up", .scale(1.1))
     add("Scale Image Down", .scale(1 / 1.1))
@@ -4054,6 +4059,13 @@ final class SPDFDocument: NSDocument {
     case .scale(let factor):
       _ = scaleImage(
         pageIndex: command.pageIndex, placementIndex: command.placementIndex, factor: factor)
+    case .flip(let horizontal):
+      _ = flipImage(
+        pageIndex: command.pageIndex, placementIndex: command.placementIndex,
+        horizontal: horizontal)
+    case .crop:
+      promptCropImage(
+        pageIndex: command.pageIndex, placementIndex: command.placementIndex)
     case .replace(let shared):
       promptReplaceImage(
         pageIndex: command.pageIndex, placementIndex: command.placementIndex, shared: shared)
@@ -4065,6 +4077,24 @@ final class SPDFDocument: NSDocument {
     guard let pageID = pageID(at: pageIndex) else { return false }
     return applyImageTransaction([
       RotateImageCommand(pageID: pageID, placementIndex: placementIndex, degrees: degrees)
+    ])
+  }
+
+  @discardableResult
+  func flipImage(pageIndex: Int, placementIndex: Int, horizontal: Bool) -> Bool {
+    guard let pageID = pageID(at: pageIndex) else { return false }
+    return applyImageTransaction([
+      FlipImageCommand(
+        pageID: pageID, placementIndex: placementIndex, horizontal: horizontal)
+    ])
+  }
+
+  @discardableResult
+  func cropImage(pageIndex: Int, placementIndex: Int, unitRect: [Double]) -> Bool {
+    guard let pageID = pageID(at: pageIndex) else { return false }
+    return applyImageTransaction([
+      ClipImageDrawCommand(
+        pageID: pageID, placementIndex: placementIndex, unitRect: unitRect)
     ])
   }
 
@@ -4481,6 +4511,44 @@ final class SPDFDocument: NSDocument {
     noteUserEdit()
     refreshViewer(preservingPage: viewer?.pageNumber ?? 1)
     return true
+  }
+
+  private func promptCropImage(pageIndex: Int, placementIndex: Int) {
+    guard canEditContent else { return }
+    let labels = ["Left", "Bottom", "Right", "Top"]
+    let fields = labels.enumerated().map { index, _ -> NSTextField in
+      let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 70, height: 22))
+      field.stringValue = index < 2 ? "0" : "100"
+      return field
+    }
+    let rows = zip(labels, fields).map { label, field -> [NSView] in
+      [NSTextField(labelWithString: "\(label) %:"), field]
+    }
+    let grid = NSGridView(views: rows)
+    grid.column(at: 0).xPlacement = .trailing
+    grid.frame = NSRect(x: 0, y: 0, width: 240, height: 120)
+    let alert = NSAlert()
+    alert.messageText = "Crop Image"
+    alert.informativeText =
+      "Values are percentages of the image from its left, bottom, right and top edges. "
+      + "The crop is nondestructive: the image data is preserved and the change can be undone."
+    alert.accessoryView = grid
+    alert.addButton(withTitle: "Crop")
+    alert.addButton(withTitle: "Cancel")
+    guard alert.runModal() == .alertFirstButtonReturn else { return }
+    let values = fields.compactMap { Double($0.stringValue) }
+    guard values.count == 4,
+      values.allSatisfy({ $0.isFinite && (0...100).contains($0) }),
+      values[0] < values[2], values[1] < values[3]
+    else {
+      NSSound.beep()
+      return
+    }
+    _ = cropImage(
+      pageIndex: pageIndex, placementIndex: placementIndex,
+      unitRect: [
+        values[0] / 100, values[1] / 100, values[2] / 100, values[3] / 100,
+      ])
   }
 
   private func promptReplaceImage(pageIndex: Int, placementIndex: Int, shared: Bool) {
