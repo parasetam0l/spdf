@@ -9,10 +9,13 @@ public struct ParagraphSpan: Sendable, Equatable {
   public let text: String
   /// Index into the candidate's `runStyles`.
   public let styleIndex: Int
+  /// True when this span continues the previous span's word without a space.
+  public let joinsPrevious: Bool
 
-  public init(text: String, styleIndex: Int) {
+  public init(text: String, styleIndex: Int, joinsPrevious: Bool = false) {
     self.text = text
     self.styleIndex = styleIndex
+    self.joinsPrevious = joinsPrevious
   }
 }
 
@@ -344,9 +347,26 @@ public enum ParagraphReflow {
   }
 
   struct Token {
-    let text: String
-    let styleIndex: Int
+    struct Segment: Equatable {
+      var text: String
+      let styleIndex: Int
+    }
+
+    var segments: [Segment]
     var isParagraphEnd = false
+
+    var text: String { segments.map(\.text).joined() }
+    var styleIndex: Int { segments.first?.styleIndex ?? 0 }
+
+    init(text: String, styleIndex: Int, isParagraphEnd: Bool = false) {
+      self.segments = [Segment(text: text, styleIndex: styleIndex)]
+      self.isParagraphEnd = isParagraphEnd
+    }
+
+    init(segments: [Segment], isParagraphEnd: Bool = false) {
+      self.segments = segments
+      self.isParagraphEnd = isParagraphEnd
+    }
   }
 
   public static func plan(
@@ -452,8 +472,6 @@ public enum ParagraphReflow {
       let segments = groupedSegments(tokens, context: context, scale: scale)
       let width = segments.reduce(0.0) { partial, segment in
         partial + segment.width
-      } + segments.dropFirst().reduce(0.0) { partial, segment in
-        partial + spaceWidth(of: segment.styleIndex, context: context, scale: scale)
       }
       let x: Double
       switch alignment {
@@ -471,12 +489,17 @@ public enum ParagraphReflow {
       if shouldJustify {
         let addedSpace = (availableWidth - naturalWidth) / Double(tokens.count - 1)
         for (tokenIndex, token) in tokens.enumerated() {
-          let tokenWidth = tokenWidth(token, context: context, scale: scale)
-          placed.append(
-            ReflowSegment(
-              text: token.text, styleIndex: token.styleIndex, x: cursor,
-              width: tokenWidth))
-          cursor += tokenWidth
+          for segment in token.segments {
+            let segmentWidth = advance(
+              of: segment.text, font: context.fonts[segment.styleIndex],
+              sourceCodes: context.sourceCodes[segment.styleIndex],
+              size: context.styles[segment.styleIndex].fontSize * scale)
+            placed.append(
+              ReflowSegment(
+                text: segment.text, styleIndex: segment.styleIndex, x: cursor,
+                width: segmentWidth))
+            cursor += segmentWidth
+          }
           if tokenIndex + 1 < tokens.count {
             let nextStyle = tokens[tokenIndex + 1].styleIndex
             let wordSpace = spaceWidth(of: nextStyle, context: context, scale: scale)
@@ -487,16 +510,12 @@ public enum ParagraphReflow {
           }
         }
       } else {
-        for (segmentIndex, segment) in segments.enumerated() {
+        for segment in segments {
           placed.append(
             ReflowSegment(
               text: segment.text, styleIndex: segment.styleIndex, x: cursor,
               width: segment.width))
           cursor += segment.width
-          if segmentIndex + 1 < segments.count {
-            cursor += spaceWidth(
-              of: segments[segmentIndex + 1].styleIndex, context: context, scale: scale)
-          }
         }
       }
       lines.append(
@@ -658,49 +677,91 @@ public enum ParagraphReflow {
       if !spans.isEmpty { return spans }
     }
     // A fragmented subset may need several font resources to cover one
-    // paragraph. Reflow must not guess a segmentation that inserts spaces
-    // inside words; the mixed-style token model belongs to TXT-02.
+    // paragraph. Automatic mixed-font segmentation is gated until the
+    // emitted advances agree with every source font's glyph metrics; a silent
+    // garble is worse than a refusal. Explicit `options.spans` can still use
+    // the multi-segment token model.
     return [ParagraphSpan(text: replacement, styleIndex: 0)]
   }
 
   /// Split styled spans into token paragraphs, keeping combining marks with
-  /// their base character (P19-011).
+  /// their base character and joining span fragments that belong to the same
+  /// word without inserting a space.
   static func tokenParagraphs(spans: [ParagraphSpan]) -> [[Token]] {
     var result: [[Token]] = []
     var current: [Token] = []
-    for span in spans {
-      let characters = Array(span.text)
-      var word = ""
-      func flush() {
-        guard !word.isEmpty else { return }
-        current.append(Token(text: word, styleIndex: span.styleIndex))
-        word = ""
+    var word: [Token.Segment] = []
+
+    func flushWord() {
+      guard !word.isEmpty else { return }
+      current.append(Token(segments: word))
+      word = []
+    }
+
+    func append(_ character: Character, styleIndex: Int) {
+      if word.isEmpty {
+        word = [Token.Segment(text: String(character), styleIndex: styleIndex)]
+      } else if let last = word.indices.last, word[last].styleIndex == styleIndex {
+        word[last].text.append(character)
+      } else {
+        word.append(Token.Segment(text: String(character), styleIndex: styleIndex))
       }
-      for character in characters {
+    }
+
+    for span in spans {
+      var isFirstCharacter = true
+      for character in span.text {
         if character == "\n" {
-          flush()
+          flushWord()
           if let lastIndex = current.indices.last {
             current[lastIndex].isParagraphEnd = true
           }
           result.append(current)
           current = []
+          isFirstCharacter = false
           continue
         }
         if character == " " {
-          flush()
+          flushWord()
+          isFirstCharacter = false
           continue
         }
-        if word.isEmpty, let scalar = character.unicodeScalars.first,
-          CharacterSet.nonBaseCharacters.contains(scalar), let last = current.popLast()
+        if isFirstCharacter, let scalar = character.unicodeScalars.first,
+          CharacterSet.nonBaseCharacters.contains(scalar)
         {
-          // A combining mark never starts a word; attach it to the previous.
-          word = last.text + String(character)
+          // A combining mark never starts a word. Attach a leading mark to the
+          // previous word, even across a span boundary, and keep the base
+          // character's style.
+          if !word.isEmpty {
+            word[word.count - 1].text.append(character)
+          } else if let tokenIndex = current.indices.last,
+            let segmentIndex = current[tokenIndex].segments.indices.last
+          {
+            current[tokenIndex].segments[segmentIndex].text.append(character)
+          } else {
+            append(character, styleIndex: span.styleIndex)
+          }
+          isFirstCharacter = false
           continue
         }
-        word.append(character)
+        if isFirstCharacter, !span.joinsPrevious, !word.isEmpty {
+          // A new span that does not join starts a new word even if the
+          // previous span omitted its trailing space.
+          flushWord()
+        }
+        if let scalar = character.unicodeScalars.first,
+          CharacterSet.nonBaseCharacters.contains(scalar), !word.isEmpty
+        {
+          // A combining mark never starts a word; attach it to the previous
+          // character and keep that character's style.
+          word[word.count - 1].text.append(character)
+        } else {
+          append(character, styleIndex: span.styleIndex)
+        }
+        isFirstCharacter = false
       }
-      flush()
     }
+    flushWord()
     if let lastIndex = current.indices.last {
       current[lastIndex].isParagraphEnd = true
     }
@@ -769,11 +830,13 @@ public enum ParagraphReflow {
   }
 
   static func tokenWidth(_ token: Token, context: Context, scale: Double) -> Double {
-    let style = context.styles[token.styleIndex]
-    return advance(
-      of: token.text, font: context.fonts[token.styleIndex],
-      sourceCodes: context.sourceCodes[token.styleIndex],
-      size: style.fontSize * scale)
+    token.segments.reduce(0.0) { total, segment in
+      let style = context.styles[segment.styleIndex]
+      return total + advance(
+        of: segment.text, font: context.fonts[segment.styleIndex],
+        sourceCodes: context.sourceCodes[segment.styleIndex],
+        size: style.fontSize * scale)
+    }
   }
 
   static func spaceWidth(of styleIndex: Int, context: Context, scale: Double) -> Double {
@@ -788,7 +851,11 @@ public enum ParagraphReflow {
     guard tokens.count > 1 else { return 0 }
     var total = 0.0
     for index in 1..<tokens.count {
-      total += spaceWidth(of: tokens[index].styleIndex, context: context, scale: scale)
+      let style = tokens[index].styleIndex
+      let spaceStyle =
+        context.encode(" ", styleIndex: style) != nil
+        ? style : tokens[index - 1].styleIndex
+      total += spaceWidth(of: spaceStyle, context: context, scale: scale)
     }
     return total
   }
@@ -799,7 +866,9 @@ public enum ParagraphReflow {
     let width: Double
   }
 
-  /// Group consecutive same-style tokens into segments.
+  /// Group consecutive same-style token segments into placed segments. A
+  /// space is included before every token except the first so the emitted
+  /// text and measured width agree.
   static func groupedSegments(
     _ tokens: [Token], context: Context, scale: Double
   ) -> [UnplacedSegment] {
@@ -817,13 +886,29 @@ public enum ParagraphReflow {
             size: context.styles[currentStyle].fontSize * scale)))
       currentText = ""
     }
-    for token in tokens {
-      if token.styleIndex != currentStyle {
+    func append(_ text: String, style: Int) {
+      if style != currentStyle {
         flush()
-        currentStyle = token.styleIndex
-        currentText = token.text
+        currentStyle = style
+        currentText = text
       } else {
-        currentText += " " + token.text
+        currentText += text
+      }
+    }
+    for (tokenIndex, token) in tokens.enumerated() {
+      if tokenIndex > 0 {
+        let style = token.styleIndex
+        if context.encode(" ", styleIndex: style) != nil
+          || context.encode(" ", styleIndex: tokens[tokenIndex - 1].styleIndex) != nil
+        {
+          let spaceStyle =
+            context.encode(" ", styleIndex: style) != nil
+            ? style : tokens[tokenIndex - 1].styleIndex
+          append(" ", style: spaceStyle)
+        }
+      }
+      for segment in token.segments {
+        append(segment.text, style: segment.styleIndex)
       }
     }
     flush()

@@ -857,6 +857,19 @@ struct ParagraphReflowTests {
     #expect(text.contains("Bold"))
   }
 
+  @Test func tokenParagraphsKeepMixedStyleWordsTogether() throws {
+    let paragraphs = ParagraphReflow.tokenParagraphs(spans: [
+      ParagraphSpan(text: "Hel", styleIndex: 0),
+      ParagraphSpan(text: "lo", styleIndex: 1, joinsPrevious: true),
+      ParagraphSpan(text: " world", styleIndex: 1),
+    ])
+    #expect(paragraphs.count == 1)
+    let tokens = try #require(paragraphs.first)
+    #expect(tokens.map(\.text) == ["Hello", "world"])
+    #expect(tokens[0].segments.map(\.styleIndex) == [0, 1])
+    #expect(tokens[0].segments.map(\.text) == ["Hel", "lo"])
+  }
+
   @Test func combiningMarksStayWithTheirBase() throws {
     // A combining mark that would start a token attaches to the previous one.
     let paragraphs = ParagraphReflow.tokenParagraphs(spans: [
