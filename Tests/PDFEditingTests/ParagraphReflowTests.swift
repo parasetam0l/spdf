@@ -162,6 +162,45 @@ struct ParagraphReflowTests {
     #expect(abs(indented.lines[1].x - candidate.bounds[0]) < 0.01)
   }
 
+  @Test func justifiedAlignmentFillsNonfinalLinesAndKeepsFinalLineNatural() throws {
+    let graph = fixture()
+    let pageID = try PDFPageTree.pageIDs(in: graph)[0]
+    let candidate = try paragraph(graph, pageID: pageID)
+    let replacement =
+      "Alpha beta gamma supercalifragilisticexpialidocious delta epsilon zeta eta theta iota kappa lambda."
+    let options = ParagraphReflowOptions(alignment: .justified)
+    let plan = try ParagraphReflow.plan(
+      pageID: pageID, candidate: candidate, replacement: replacement, in: graph,
+      options: options).plan
+
+    #expect(plan.lines.count >= 2)
+    #expect(!plan.warnings.contains { $0.contains("falls back to left") })
+    let expandedLines = plan.lines.dropLast().filter { $0.segments.count > 1 }
+    #expect(!expandedLines.isEmpty)
+    for line in expandedLines {
+      #expect(line.segments.map(\.text).joined() == line.text)
+      let lastSegment = try #require(line.segments.last)
+      let rightEdge = lastSegment.x + lastSegment.width
+      #expect(abs(rightEdge - candidate.bounds[2]) < 0.01)
+    }
+    let finalLine = try #require(plan.lines.last)
+    #expect(finalLine.segments.count == 1)
+
+    let edited = try PDFEditingEngine.commit(
+      PDFTransaction([
+        ReflowParagraphCommand(
+          pageID: pageID, candidate: candidate, replacement: replacement, options: options)
+      ]), to: graph)
+    let reparsed = try PDFParser.parse(PDFWriter.write(edited))
+    let savedRuns = try TextRunIndexer.runs(
+      in: PageContent.load(pageID: reparsed.pageIDs[0], in: reparsed.graph),
+      graph: reparsed.graph)
+    let savedStreamText = savedRuns.map(\.text).joined()
+    for line in plan.lines where !line.text.isEmpty {
+      #expect(savedStreamText.contains(line.text))
+    }
+  }
+
   @Test func overflowChoicesAreExplicit() throws {
     let graph = fixture()
     let pageID = try PDFPageTree.pageIDs(in: graph)[0]

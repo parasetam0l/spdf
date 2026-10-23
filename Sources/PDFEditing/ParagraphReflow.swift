@@ -26,6 +26,8 @@ public struct ParagraphReflowOptions: Sendable, Equatable {
     case shrinkToFit
   }
 
+  /// Paragraph layout. Justified nonfinal lines distribute inter-word space to
+  /// the box edge; each paragraph's final line keeps its natural spacing.
   public var alignment: TextParagraphCandidate.Alignment?
   /// Positive indents the first line; negative outdents it (hanging indent).
   public var firstLineIndent: Double?
@@ -207,6 +209,7 @@ public enum ParagraphReflow {
   struct Token {
     let text: String
     let styleIndex: Int
+    var isParagraphEnd = false
   }
 
   public static func plan(
@@ -241,9 +244,6 @@ public enum ParagraphReflow {
     let boxHeight = max(candidate.fontSize, box[3] - box[1])
     let alignment = options.alignment ?? candidate.alignment
     var warnings: [String] = []
-    if alignment == .justified {
-      warnings.append("Justified alignment falls back to left for now.")
-    }
     let paragraphs = tokenParagraphs(spans: spans)
     let baseSize = context.styles.map(\.fontSize).max() ?? candidate.fontSize
 
@@ -308,15 +308,40 @@ public enum ParagraphReflow {
       }
       var cursor = x
       var placed: [ReflowSegment] = []
-      for (segmentIndex, segment) in segments.enumerated() {
-        placed.append(
-          ReflowSegment(
-            text: segment.text, styleIndex: segment.styleIndex, x: cursor,
-            width: segment.width))
-        cursor += segment.width
-        if segmentIndex + 1 < segments.count {
-          cursor += spaceWidth(
-            of: segments[segmentIndex + 1].styleIndex, context: context, scale: scale)
+      let availableWidth = max(0, box[2] - x)
+      let naturalWidth = lineWidth(tokens, context: context, scale: scale)
+      let shouldJustify = alignment == .justified && tokens.count > 1
+        && !(tokens.last?.isParagraphEnd ?? true)
+        && naturalWidth < availableWidth - 0.01
+      if shouldJustify {
+        let addedSpace = (availableWidth - naturalWidth) / Double(tokens.count - 1)
+        for (tokenIndex, token) in tokens.enumerated() {
+          let tokenWidth = tokenWidth(token, context: context, scale: scale)
+          placed.append(
+            ReflowSegment(
+              text: token.text, styleIndex: token.styleIndex, x: cursor,
+              width: tokenWidth))
+          cursor += tokenWidth
+          if tokenIndex + 1 < tokens.count {
+            let nextStyle = tokens[tokenIndex + 1].styleIndex
+            let wordSpace = spaceWidth(of: nextStyle, context: context, scale: scale)
+            placed.append(
+              ReflowSegment(
+                text: " ", styleIndex: nextStyle, x: cursor, width: wordSpace))
+            cursor += wordSpace + addedSpace
+          }
+        }
+      } else {
+        for (segmentIndex, segment) in segments.enumerated() {
+          placed.append(
+            ReflowSegment(
+              text: segment.text, styleIndex: segment.styleIndex, x: cursor,
+              width: segment.width))
+          cursor += segment.width
+          if segmentIndex + 1 < segments.count {
+            cursor += spaceWidth(
+              of: segments[segmentIndex + 1].styleIndex, context: context, scale: scale)
+          }
         }
       }
       lines.append(
@@ -495,6 +520,9 @@ public enum ParagraphReflow {
       for character in characters {
         if character == "\n" {
           flush()
+          if let lastIndex = current.indices.last {
+            current[lastIndex].isParagraphEnd = true
+          }
           result.append(current)
           current = []
           continue
@@ -513,6 +541,9 @@ public enum ParagraphReflow {
         word.append(character)
       }
       flush()
+    }
+    if let lastIndex = current.indices.last {
+      current[lastIndex].isParagraphEnd = true
     }
     result.append(current)
     return result

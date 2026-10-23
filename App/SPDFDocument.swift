@@ -1869,7 +1869,8 @@ final class SPDFDocument: NSDocument {
     let overflowPopup = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 200, height: 24))
     overflowPopup.addItems(withTitles: ["Allow overflow", "Clip (refuse)", "Shrink to fit"])
     let alignmentPopup = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 200, height: 24))
-    alignmentPopup.addItems(withTitles: ["Keep alignment", "Left", "Center", "Right"])
+    alignmentPopup.addItems(
+      withTitles: ["Keep alignment", "Left", "Center", "Right", "Justified"])
     let grid = NSGridView(views: [
       [NSTextField(labelWithString: "Paragraph:"), popup],
       [NSTextField(labelWithString: "New text:"), replacementField],
@@ -1882,15 +1883,21 @@ final class SPDFDocument: NSDocument {
       runFormDialog(
         title: "Reflow Paragraph",
         message:
-          "The paragraph's own lines are rewritten; other content is checked for collisions.",
+          "The paragraph's own lines are rewritten; other content is checked for collisions. "
+          + "Justified alignment expands spaces on nonfinal lines.",
         accessory: grid)
     else { return }
     let index = max(0, min(popup.indexOfSelectedItem, editable.count - 1))
+    let alignment: TextParagraphCandidate.Alignment?
+    switch alignmentPopup.indexOfSelectedItem {
+    case 1: alignment = .left
+    case 2: alignment = .center
+    case 3: alignment = .right
+    case 4: alignment = .justified
+    default: alignment = nil
+    }
     let options = ParagraphReflowOptions(
-      alignment: alignmentPopup.indexOfSelectedItem == 0
-        ? nil
-        : [TextParagraphCandidate.Alignment.left, .center, .right][
-          max(0, min(alignmentPopup.indexOfSelectedItem - 1, 2))],
+      alignment: alignment,
       overflow: [
         ParagraphReflowOptions.Overflow.allow, .clip, .shrinkToFit,
       ][max(0, min(overflowPopup.indexOfSelectedItem, 2))])
