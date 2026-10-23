@@ -755,6 +755,7 @@ final class SPDFDocument: NSDocument {
   @discardableResult
   func undoEdit() -> Bool {
     guard canEditContent else { return false }
+    if viewer?.isEditingPageText == true, viewer?.pageTextUndo?() == true { return true }
     if viewer?.isEditingPageText == true, !(viewer?.pendingEditFinisher?() ?? true) { return false }
     // The manager is the app's undo surface; each of its actions performs
     // exactly one session step. An entry that no longer matches live history
@@ -774,6 +775,7 @@ final class SPDFDocument: NSDocument {
   @discardableResult
   func redoEdit() -> Bool {
     guard canEditContent else { return false }
+    if viewer?.isEditingPageText == true, viewer?.pageTextRedo?() == true { return true }
     if viewer?.isEditingPageText == true, !(viewer?.pendingEditFinisher?() ?? true) { return false }
     if let undoManager, undoManager.canRedo {
       let before = editSession.documentRevision

@@ -367,6 +367,16 @@ final class InlinePageTextCanvas: NSView, NSTextViewDelegate {
     viewer.isTypingPageText = isTyping
     viewer.pageTextBeginTyping = { [weak self] in self?.beginTyping() }
     viewer.pageTextCancel = { [weak self] in self?.cancel() }
+    viewer.pageTextUndo = { [weak self] in
+      guard let self, self.textView.typingUndo.canUndo else { return false }
+      self.textView.typingUndo.undo()
+      return true
+    }
+    viewer.pageTextRedo = { [weak self] in
+      guard let self, self.textView.typingUndo.canRedo else { return false }
+      self.textView.typingUndo.redo()
+      return true
+    }
     viewer.pageTextPositionApplier = { [weak self] x, y in
       guard let self else { return }
       self.dx = x - self.sourceRect.minX
@@ -815,6 +825,8 @@ final class InlinePageTextCanvas: NSView, NSTextViewDelegate {
     viewer?.canRedoPageTyping = false
     viewer?.pageTextBeginTyping = nil
     viewer?.pageTextCancel = nil
+    viewer?.pageTextUndo = nil
+    viewer?.pageTextRedo = nil
     viewer?.pageTextPositionApplier = nil
     viewer?.pageTextAlignmentApplier = nil
     viewer?.pageTextStyleApplier = nil

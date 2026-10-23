@@ -1602,15 +1602,23 @@
         throw PDFError(.malformed, "Selected-word formatting lost its traits or scope")
       }
       checkpoint("character formatting selected-word verification passed")
-      formatted.textView.typingUndo.undo()
+      guard window.makeFirstResponder(formatted), document.undoEdit(),
+        viewer.isEditingPageText
+      else {
+        throw PDFError(.malformed, "Document Undo did not target the pending inline-format draft")
+      }
       guard emphasizedSegments().first?.format.color == [0, 0, 0] else {
-        throw PDFError(.malformed, "Native formatting Undo did not restore color independently")
+        throw PDFError(.malformed, "Inline-format Undo did not restore color independently")
       }
-      formatted.textView.typingUndo.redo()
+      guard document.redoEdit(), viewer.isEditingPageText,
+        window.makeFirstResponder(formatted.textView)
+      else {
+        throw PDFError(.malformed, "Document Redo did not target the pending inline-format draft")
+      }
       guard emphasizedSegments().first?.format == emphasized.format else {
-        throw PDFError(.malformed, "Native formatting Redo did not restore all traits")
+        throw PDFError(.malformed, "Inline-format Redo did not restore all traits")
       }
-      checkpoint("character formatting typing undo and redo passed")
+      checkpoint("document Undo and Redo routed to the pending inline-format draft")
       formatted.textView.setSelectedRange((styledText as NSString).range(of: "\n\n"))
       viewer.pageTextFormattingApplier?(.size(26))
       checkpoint("character formatting blank paragraph styled")

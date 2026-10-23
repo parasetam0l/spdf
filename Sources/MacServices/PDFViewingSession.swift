@@ -277,6 +277,10 @@ public final class PDFViewingSession: NSObject, ObservableObject, PDFViewDelegat
   @Published public var canChangePageTextTraits = true
   public var pageTextBeginTyping: (() -> Void)?
   public var pageTextCancel: (() -> Void)?
+  /// Undo and redo uncommitted inline text operations even while focus is in
+  /// the inspector. The document edit stack is not the owner of these drafts.
+  public var pageTextUndo: (() -> Bool)?
+  public var pageTextRedo: (() -> Bool)?
   public var pageTextPositionApplier: ((Double, Double) -> Void)?
   public var pageTextAlignmentApplier: ((PageObjectAlignment) -> Void)?
   public var pageTextWidthApplier: ((Double) -> Void)?
@@ -491,6 +495,8 @@ public final class PDFViewingSession: NSObject, ObservableObject, PDFViewDelegat
     canRedoPageTyping = false
     pageTextBeginTyping = nil
     pageTextCancel = nil
+    pageTextUndo = nil
+    pageTextRedo = nil
     pageTextPositionApplier = nil
     pageTextAlignmentApplier = nil
     pageTextWidthApplier = nil
