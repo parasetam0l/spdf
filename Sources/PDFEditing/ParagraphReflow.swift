@@ -134,6 +134,69 @@ public enum ParagraphReflow {
     let runs: [TextRun]
     let styles: [ParagraphStyle]
     let fonts: [IndexedTextFont]
+    /// Per-style glyph text -> original code sequence, used when the font's
+    /// Unicode encoder cannot reproduce a subset glyph.
+    let sourceCodes: [[String: [UInt8]]]
+
+    func encode(_ text: String, styleIndex: Int) -> [UInt8]? {
+      ParagraphReflow.encodeText(
+        text, font: fonts[styleIndex], sourceCodes: sourceCodes[styleIndex])
+    }
+  }
+
+  /// Encode through the font's normal Unicode mapping first, then fall back to
+  /// the exact glyph codes found in the source runs. The fallback never
+  /// invents a code: every character must exist in this paragraph's source.
+  static func encodeText(
+    _ text: String, font: IndexedTextFont, sourceCodes: [String: [UInt8]]
+  ) -> [UInt8]? {
+    if let codes = font.encode(text) { return codes }
+    guard !sourceCodes.isEmpty else { return nil }
+    let scalars = Array(text.unicodeScalars)
+    var codes: [UInt8] = []
+    var index = 0
+    while index < scalars.count {
+      var matched = false
+      let maximum = min(3, scalars.count - index)
+      for length in stride(from: maximum, through: 1, by: -1) {
+        let candidate = String(
+          scalars[index..<(index + length)].map { Character(String($0)) })
+        if let glyphCodes = sourceCodes[candidate] {
+          codes.append(contentsOf: glyphCodes)
+          index += length
+          matched = true
+          break
+        }
+      }
+      guard matched else { return nil }
+    }
+    return codes
+  }
+
+  /// Build the per-style source map. A glyph that appears with more than one
+  /// code sequence is ambiguous and is omitted rather than guessed. Maps are
+  /// keyed by font resource and shared by every style that uses it.
+  static func sourceCodeMap(
+    runs: [TextRun], styles: [ParagraphStyle], fonts: [IndexedTextFont]
+  ) -> [[String: [UInt8]]] {
+    var maps: [String: [String: [UInt8]]] = [:]
+    var ambiguous: [String: Set<String>] = [:]
+    for run in runs {
+      let resource = String(decoding: run.fontResource.bytes, as: UTF8.self)
+      guard let styleIndex = styles.firstIndex(where: { $0.fontResource == resource }),
+        let glyphs = fonts[styleIndex].glyphs(run.rawCodes)
+      else { continue }
+      for glyph in glyphs where !glyph.text.isEmpty {
+        if ambiguous[resource, default: []].contains(glyph.text) { continue }
+        if let existing = maps[resource]?[glyph.text], existing != glyph.codes {
+          maps[resource]?[glyph.text] = nil
+          ambiguous[resource, default: []].insert(glyph.text)
+        } else {
+          maps[resource, default: [:]][glyph.text] = glyph.codes
+        }
+      }
+    }
+    return styles.map { maps[$0.fontResource] ?? [:] }
   }
 
   /// Resolve the paragraph's runs, per-style fonts, and editable segment.
@@ -244,14 +307,22 @@ public enum ParagraphReflow {
           .unsupported, "This content stream uses unsupported filters for editing")
       }
     }
+    // Build the source-code fallback from the whole page, not only the
+    // selected clusters: a paragraph's spaces and punctuation can live in
+    // separate TJ members that the candidate deliberately excludes.
+    let allRuns = (try? TextRunIndexer.runs(in: content, graph: graph)) ?? selected
+    let sourceCodes = sourceCodeMap(runs: allRuns, styles: styles, fonts: fonts)
     return Context(
-      content: content, runs: selected, styles: styles, fonts: fonts)
+      content: content, runs: selected, styles: styles, fonts: fonts,
+      sourceCodes: sourceCodes)
   }
 
   /// Advance of a string in text space (exact when widths exist, estimated
   /// otherwise).
-  static func advance(of text: String, font: IndexedTextFont, size: Double) -> Double {
-    guard let codes = font.encode(text) else { return 0 }
+  static func advance(
+    of text: String, font: IndexedTextFont, sourceCodes: [String: [UInt8]], size: Double
+  ) -> Double {
+    guard let codes = encodeText(text, font: font, sourceCodes: sourceCodes) else { return 0 }
     if let measured = font.advance(
       of: codes, fontSize: size, charSpacing: 0, wordSpacing: 0, horizontalScale: 100)
     {
@@ -299,9 +370,11 @@ public enum ParagraphReflow {
         throw PDFError(.malformed, "A replacement span references a missing style")
       }
       for paragraph in span.text.split(separator: "\n", omittingEmptySubsequences: false) {
-        guard context.fonts[span.styleIndex].encode(String(paragraph)) != nil else {
-          throw PDFError(
-            .unsupported, "The replacement contains characters this font cannot encode")
+        for word in paragraph.split(separator: " ") {
+          guard context.encode(String(word), styleIndex: span.styleIndex) != nil else {
+            throw PDFError(
+              .unsupported, "The replacement contains characters this font cannot encode")
+          }
         }
       }
     }
@@ -562,28 +635,32 @@ public enum ParagraphReflow {
     candidate: TextParagraphCandidate, replacement: String, context: Context,
     preserveLineStyles: Bool
   ) -> [ParagraphSpan] {
-    guard preserveLineStyles, candidate.lineRunIndices.count > 1,
+    if preserveLineStyles, candidate.lineRunIndices.count > 1,
       !candidate.runStyles.isEmpty
-    else {
-      return [ParagraphSpan(text: replacement, styleIndex: 0)]
+    {
+      let words = replacement.split(separator: " ").map(String.init)
+      var spans: [ParagraphSpan] = []
+      for (lineIndex, runs) in candidate.lineRunIndices.enumerated() {
+        let start = words.count * lineIndex / candidate.lineRunIndices.count
+        let end = words.count * (lineIndex + 1) / candidate.lineRunIndices.count
+        guard start < end, let firstRun = runs.first else { continue }
+        let styleIndex = context.styles.firstIndex { style in
+          style.fontResource == candidate.runStyles[min(firstRun, candidate.runStyles.count - 1)]
+            .fontResource
+            && abs(
+              style.fontSize
+                - candidate.runStyles[min(firstRun, candidate.runStyles.count - 1)].fontSize)
+              < 0.1
+        } ?? 0
+        spans.append(
+          ParagraphSpan(text: words[start..<end].joined(separator: " "), styleIndex: styleIndex))
+      }
+      if !spans.isEmpty { return spans }
     }
-    let words = replacement.split(separator: " ").map(String.init)
-    var spans: [ParagraphSpan] = []
-    for (lineIndex, runs) in candidate.lineRunIndices.enumerated() {
-      let start = words.count * lineIndex / candidate.lineRunIndices.count
-      let end = words.count * (lineIndex + 1) / candidate.lineRunIndices.count
-      guard start < end, let firstRun = runs.first else { continue }
-      let styleIndex = context.styles.firstIndex { style in
-        style.fontResource == candidate.runStyles[min(firstRun, candidate.runStyles.count - 1)]
-          .fontResource
-          && abs(
-            style.fontSize
-              - candidate.runStyles[min(firstRun, candidate.runStyles.count - 1)].fontSize)
-            < 0.1
-      } ?? 0
-      spans.append(ParagraphSpan(text: words[start..<end].joined(separator: " "), styleIndex: styleIndex))
-    }
-    return spans.isEmpty ? [ParagraphSpan(text: replacement, styleIndex: 0)] : spans
+    // A fragmented subset may need several font resources to cover one
+    // paragraph. Reflow must not guess a segmentation that inserts spaces
+    // inside words; the mixed-style token model belongs to TXT-02.
+    return [ParagraphSpan(text: replacement, styleIndex: 0)]
   }
 
   /// Split styled spans into token paragraphs, keeping combining marks with
@@ -695,6 +772,7 @@ public enum ParagraphReflow {
     let style = context.styles[token.styleIndex]
     return advance(
       of: token.text, font: context.fonts[token.styleIndex],
+      sourceCodes: context.sourceCodes[token.styleIndex],
       size: style.fontSize * scale)
   }
 
@@ -702,6 +780,7 @@ public enum ParagraphReflow {
     let style = context.styles[styleIndex]
     return advance(
       of: " ", font: context.fonts[styleIndex],
+      sourceCodes: context.sourceCodes[styleIndex],
       size: style.fontSize * scale)
   }
 
@@ -734,6 +813,7 @@ public enum ParagraphReflow {
           text: currentText, styleIndex: currentStyle,
           width: advance(
             of: currentText, font: context.fonts[currentStyle],
+            sourceCodes: context.sourceCodes[currentStyle],
             size: context.styles[currentStyle].fontSize * scale)))
       currentText = ""
     }
@@ -932,8 +1012,7 @@ public struct ReflowParagraphCommand: PDFEditCommand, Equatable, Sendable {
           "1 0 0 1 \(AnnotationSupport.number(segment.x)) "
           + "\(AnnotationSupport.number(line.y)) Tm "
         bytes.append(contentsOf: Array(matrixLine.utf8))
-        let font = context.fonts[segment.styleIndex]
-        let codes = font.encode(segment.text) ?? []
+        let codes = context.encode(segment.text, styleIndex: segment.styleIndex) ?? []
         bytes.append(contentsOf: ReplaceTextCommand.literalStringBytes(codes))
         bytes.append(contentsOf: Array(" Tj\n".utf8))
       }

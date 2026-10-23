@@ -327,7 +327,7 @@ struct ParagraphReflowTests {
     #expect(centered.lines.count >= 2)
     for line in centered.lines {
       let width = ParagraphReflow.advance(
-        of: line.text, font: font, size: line.fontSize)
+        of: line.text, font: font, sourceCodes: [:], size: line.fontSize)
       let center = line.x + width / 2
       let boxCenter = (candidate.bounds[0] + candidate.bounds[2]) / 2
       #expect(abs(center - boxCenter) < 1)
@@ -344,7 +344,7 @@ struct ParagraphReflowTests {
     let boxWidth = candidate.bounds[2] - candidate.bounds[0]
     let boundaryWord = (1...100).map { String(repeating: "x", count: $0) }.first { word in
       let width = ParagraphReflow.advance(
-        of: word, font: font, size: 12)
+        of: word, font: font, sourceCodes: [:], size: 12)
       return width > boxWidth - 30 && width <= boxWidth
     }
     let word = try #require(boundaryWord)
