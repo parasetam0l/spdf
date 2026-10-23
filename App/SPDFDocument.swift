@@ -29,16 +29,16 @@ enum SPDFDocumentResourcePolicy {
 @MainActor
 private final class ParagraphReflowCandidateSelectionTarget: NSObject {
   private let candidates: [TextParagraphCandidate]
-  private weak var replacementField: NSTextField?
+  private weak var replacementTextView: NSTextView?
 
-  init(candidates: [TextParagraphCandidate], replacementField: NSTextField) {
+  init(candidates: [TextParagraphCandidate], replacementTextView: NSTextView) {
     self.candidates = candidates
-    self.replacementField = replacementField
+    self.replacementTextView = replacementTextView
   }
 
   @objc func candidateDidChange(_ sender: NSPopUpButton) {
     guard candidates.indices.contains(sender.indexOfSelectedItem) else { return }
-    replacementField?.stringValue = candidates[sender.indexOfSelectedItem].text
+    replacementTextView?.string = candidates[sender.indexOfSelectedItem].text
       .replacingOccurrences(of: "\n", with: " ")
   }
 }
@@ -1875,7 +1875,8 @@ final class SPDFDocument: NSDocument {
     guard let graph = editSession.currentGraph,
       let pageID = currentPageID(in: graph)
     else { return }
-    let candidates = (try? ParagraphReconstruction.candidates(pageID: pageID, in: graph)) ?? []
+    let candidates =
+      (try? ParagraphReconstruction.candidatesForEditing(pageID: pageID, in: graph)) ?? []
     let editable = candidates.filter { $0.kind == .flowing || $0.kind == .heading }
     guard !editable.isEmpty else {
       presentError(PDFError(.malformed, "No reflowable paragraphs were found on this page"))
@@ -1886,10 +1887,28 @@ final class SPDFDocument: NSDocument {
       let snippet = candidate.text.replacingOccurrences(of: "\n", with: " ")
       popup.addItem(withTitle: String(snippet.prefix(48)))
     }
-    let replacementField = NSTextField(
-      string: editable[0].text.replacingOccurrences(of: "\n", with: " "))
+    let replacementScrollView = NSScrollView(
+      frame: NSRect(x: 0, y: 0, width: 360, height: 76))
+    replacementScrollView.hasVerticalScroller = true
+    replacementScrollView.autohidesScrollers = true
+    replacementScrollView.borderType = .bezelBorder
+    let replacementTextView = NSTextView(frame: replacementScrollView.bounds)
+    replacementTextView.isRichText = false
+    replacementTextView.isVerticallyResizable = true
+    replacementTextView.isHorizontallyResizable = false
+    replacementTextView.textContainer?.widthTracksTextView = true
+    replacementTextView.textContainer?.containerSize = NSSize(
+      width: replacementScrollView.contentSize.width,
+      height: .greatestFiniteMagnitude)
+    replacementTextView.textContainerInset = NSSize(width: 5, height: 4)
+    replacementTextView.setAccessibilityLabel("New text")
+    replacementTextView.setAccessibilityIdentifier("paragraph-reflow-replacement")
+    replacementTextView.toolTip =
+      "Enter a line break with Return to keep it in the reflowed paragraph."
+    replacementTextView.string = editable[0].text.replacingOccurrences(of: "\n", with: " ")
+    replacementScrollView.documentView = replacementTextView
     let candidateSelectionTarget = ParagraphReflowCandidateSelectionTarget(
-      candidates: editable, replacementField: replacementField)
+      candidates: editable, replacementTextView: replacementTextView)
     popup.target = candidateSelectionTarget
     popup.action = #selector(ParagraphReflowCandidateSelectionTarget.candidateDidChange(_:))
     let overflowPopup = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 200, height: 24))
@@ -1915,7 +1934,7 @@ final class SPDFDocument: NSDocument {
       "Adds space after this paragraph by moving following same-column text down."
     let grid = NSGridView(views: [
       [NSTextField(labelWithString: "Paragraph:"), popup],
-      [NSTextField(labelWithString: "New text:"), replacementField],
+      [NSTextField(labelWithString: "New text:"), replacementScrollView],
       [NSTextField(labelWithString: "Overflow:"), overflowPopup],
       [NSTextField(labelWithString: "Alignment:"), alignmentPopup],
       [NSTextField(labelWithString: "Line spacing (pt):"), lineSpacingField],
@@ -1924,14 +1943,16 @@ final class SPDFDocument: NSDocument {
       [NSTextField(labelWithString: "Extra space after (pt):"), paragraphSpacingAfterField],
     ])
     grid.column(at: 0).xPlacement = .trailing
-    grid.frame = NSRect(x: 0, y: 0, width: 460, height: 200)
+    grid.frame = NSRect(x: 0, y: 0, width: 520, height: 256)
     guard
       runFormDialog(
         title: "Reflow Paragraph",
         message:
           "The paragraph's own lines are rewritten; other content is checked for collisions. "
           + "Justified alignment expands spaces on nonfinal lines. Leave line spacing blank "
-          + "to keep the selected paragraph's current spacing. Explicit spacing is limited to "
+          + "to keep the selected paragraph's current spacing. Use Return in New text to keep "
+          + "an explicit line break; ordinary wrapping remains automatic. "
+          + "Explicit spacing is limited to "
           + "1.8 times the selected font size so it remains available for reflow after reopening. "
           + "Leave first-line indent blank to keep it; positive values indent and negative "
           + "values create a hanging indent. Leave extra paragraph spacing blank to keep its "
@@ -2030,7 +2051,7 @@ final class SPDFDocument: NSDocument {
         ParagraphReflowOptions.Overflow.allow, .clip, .shrinkToFit,
       ][max(0, min(overflowPopup.indexOfSelectedItem, 2))])
     _ = reflowParagraph(
-      pageID: pageID, candidate: candidate, replacement: replacementField.stringValue,
+      pageID: pageID, candidate: candidate, replacement: replacementTextView.string,
       options: options)
   }
 

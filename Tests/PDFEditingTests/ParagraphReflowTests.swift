@@ -58,12 +58,25 @@ struct ParagraphReflowTests {
   private func paragraph(_ graph: PDFGraph, pageID: PDFObjectID) throws
     -> TextParagraphCandidate
   {
-    let candidates = try ParagraphReconstruction.candidates(pageID: pageID, in: graph)
+    let candidates = try ParagraphReconstruction.candidatesForEditing(pageID: pageID, in: graph)
     return try #require(candidates.first { $0.kind == .flowing })
   }
 
+  private func measurementFonts(_ graph: PDFGraph, pageID: PDFObjectID) throws
+    -> (SimpleFont, IndexedTextFont?)
+  {
+    guard case .dictionary(let page)? = graph.objects[pageID] else {
+      throw PDFError(.malformed, "Fixture page is missing")
+    }
+    let simple = try #require(SimpleFont.resolve(resource: PDFName("F1"), page: page, in: graph))
+    return (simple, IndexedTextFont.resolve(resource: PDFName("F1"), page: page, in: graph))
+  }
+
   private func pageText(_ graph: PDFGraph, pageID: PDFObjectID) throws -> String {
-    try PageTextLayout.build(pageID: pageID, in: graph).clusters.map(\.text).joined()
+    let content = try PageContent.load(pageID: pageID, in: graph)
+    return try TextRunIndexer.runs(
+      in: content, graph: graph, allowStandard14MetricFallback: true)
+      .map(\.text).joined(separator: " ")
   }
 
   @Test func reflowReplacesParagraphAndPreservesOtherContent() throws {
@@ -132,6 +145,7 @@ struct ParagraphReflowTests {
     let graph = fixture()
     let pageID = try PDFPageTree.pageIDs(in: graph)[0]
     let candidate = try paragraph(graph, pageID: pageID)
+    let (font, metrics) = try measurementFonts(graph, pageID: pageID)
     let replacement = "Alignment probe text that wraps into two or three lines."
     let centered = try ParagraphReflow.plan(
       pageID: pageID, candidate: candidate, replacement: replacement, in: graph,
@@ -139,15 +153,7 @@ struct ParagraphReflowTests {
     #expect(centered.lines.count >= 2)
     for line in centered.lines {
       let width = ParagraphReflow.advance(
-        of: line.text,
-        font: SimpleFont.resolve(
-          resource: PDFName("F1"),
-          page: graph.objects[pageID].flatMap { value -> [PDFName: PDFValue]? in
-            if case .dictionary(let page) = value { return page }
-            return nil
-          }!,
-          in: graph)!,
-        size: line.fontSize)
+        of: line.text, font: font, metrics: metrics, size: line.fontSize)
       let center = line.x + width / 2
       let boxCenter = (candidate.bounds[0] + candidate.bounds[2]) / 2
       #expect(abs(center - boxCenter) < 1)
@@ -161,14 +167,10 @@ struct ParagraphReflowTests {
     #expect(abs(indented.lines[0].x - (candidate.bounds[0] + 30)) < 0.01)
     #expect(abs(indented.lines[1].x - candidate.bounds[0]) < 0.01)
 
-    guard case .dictionary(let page)? = graph.objects[pageID] else {
-      Issue.record("Fixture page is missing")
-      return
-    }
-    let font = try #require(SimpleFont.resolve(resource: PDFName("F1"), page: page, in: graph))
     let boxWidth = candidate.bounds[2] - candidate.bounds[0]
     let boundaryWord = (1...100).map { String(repeating: "x", count: $0) }.first { word in
-      let width = ParagraphReflow.advance(of: word, font: font, size: 12)
+      let width = ParagraphReflow.advance(
+        of: word, font: font, metrics: metrics, size: 12)
       return width > boxWidth - 30 && width <= boxWidth
     }
     let word = try #require(boundaryWord)
@@ -196,6 +198,7 @@ struct ParagraphReflowTests {
     let pageID = try #require(PDFPageTree.pageIDs(in: graph).first)
     let candidate = try paragraph(graph, pageID: pageID)
     let replacement = candidate.text.replacingOccurrences(of: "\n", with: " ")
+      + String(repeating: " paragraph expansion", count: 10)
     let baseline = try ParagraphReflow.plan(
       pageID: pageID, candidate: candidate, replacement: replacement, in: graph,
       options: ParagraphReflowOptions(downstreamShift: true, maxDownstreamShift: 500)).plan
@@ -689,6 +692,48 @@ struct ParagraphReflowTests {
     #expect(paragraphs.count == 1)
     let tokens = try #require(paragraphs.first)
     #expect(tokens.map(\.text) == ["ab\u{0301}cd", "ef"])
+  }
+
+  @Test func explicitLineBreaksSurviveRepeatEditAfterReopen() throws {
+    let graph = fixture()
+    let pageID = try PDFPageTree.pageIDs(in: graph)[0]
+    let candidate = try paragraph(graph, pageID: pageID)
+    let replacement = "First authored line\nSecond authored line"
+
+    let plan = try ParagraphReflow.plan(
+      pageID: pageID, candidate: candidate, replacement: replacement, in: graph).plan
+    #expect(plan.lines.map(\.text) == ["First authored line", "Second authored line"])
+    #expect(abs((plan.lines[0].y - plan.lines[1].y) - candidate.lineSpacing) < 0.01)
+
+    let edited = try PDFEditingEngine.commit(
+      PDFTransaction([
+        ReflowParagraphCommand(
+          pageID: pageID, candidate: candidate, replacement: replacement)
+      ]), to: graph)
+    let reparsed = try PDFParser.parse(try PDFWriter.write(edited))
+    let reopenedPageID = try PDFPageTree.pageIDs(in: reparsed.graph)[0]
+    let reopenedText = try pageText(reparsed.graph, pageID: reopenedPageID)
+    #expect(reopenedText.contains("First authored line"))
+    #expect(reopenedText.contains("Second authored line"))
+    let reopenedCandidate = try paragraph(reparsed.graph, pageID: reopenedPageID)
+    #expect(reopenedCandidate.text == replacement)
+
+    let revisedReplacement = "First revised line\nSecond authored line"
+    let repeatedPlan = try ParagraphReflow.plan(
+      pageID: reopenedPageID, candidate: reopenedCandidate,
+      replacement: revisedReplacement, in: reparsed.graph).plan
+    #expect(repeatedPlan.lines.map(\.text) == ["First revised line", "Second authored line"])
+
+    let repeatedEdit = try PDFEditingEngine.commit(
+      PDFTransaction([
+        ReflowParagraphCommand(
+          pageID: reopenedPageID, candidate: reopenedCandidate,
+          replacement: revisedReplacement)
+      ]), to: reparsed.graph)
+    let repeatedReparse = try PDFParser.parse(try PDFWriter.write(repeatedEdit))
+    let repeatedPageID = try PDFPageTree.pageIDs(in: repeatedReparse.graph)[0]
+    let finalCandidate = try paragraph(repeatedReparse.graph, pageID: repeatedPageID)
+    #expect(finalCandidate.text == revisedReplacement)
   }
 
   @Test func sourceMapMapsNewSegmentsToRuns() throws {

@@ -134,6 +134,7 @@ public enum ParagraphReflow {
     let runs: [TextRun]
     let styles: [ParagraphStyle]
     let fonts: [SimpleFont]
+    let metricFonts: [IndexedTextFont?]
   }
 
   /// Resolve the paragraph's runs, per-style fonts, and editable segment.
@@ -173,9 +174,11 @@ public enum ParagraphReflow {
       ]
     }
     var fonts: [SimpleFont] = []
+    var metricFonts: [IndexedTextFont?] = []
     for style in styles {
+      let resource = PDFName(style.fontResource)
       guard let font = SimpleFont.resolve(
-        resource: PDFName(style.fontResource), page: page, in: graph), font.isSupported
+        resource: resource, page: page, in: graph), font.isSupported
       else {
         throw PDFError(
           .unsupported, "The paragraph font \(style.fontResource) is not supported for reflow")
@@ -188,6 +191,7 @@ public enum ParagraphReflow {
           "The paragraph uses a Type 3 font without readable glyph programs; the text is preserved, not rewritten")
       }
       fonts.append(font)
+      metricFonts.append(IndexedTextFont.resolve(resource: resource, page: page, in: graph))
     }
     guard let segmentIndex = content.segmentIndex(for: selected[0].stringSpan) else {
       throw PDFError(.unsupported, "The paragraph is outside the page content streams")
@@ -198,13 +202,25 @@ public enum ParagraphReflow {
     guard content.segments[segmentIndex].isEditable else {
       throw PDFError(.unsupported, "This content stream uses unsupported filters for editing")
     }
-    return Context(content: content, runs: selected, styles: styles, fonts: fonts)
+    return Context(
+      content: content, runs: selected, styles: styles, fonts: fonts,
+      metricFonts: metricFonts)
   }
 
   /// Advance of a string in text space (exact when widths exist, estimated
   /// otherwise).
-  static func advance(of text: String, font: SimpleFont, size: Double) -> Double {
+  static func advance(
+    of text: String, font: SimpleFont, metrics: IndexedTextFont? = nil, size: Double
+  ) -> Double {
     guard let codes = font.encode(text) else { return 0 }
+    if let measured = font.advance(
+      of: codes, fontSize: size, charSpacing: 0, wordSpacing: 0, horizontalScale: 100) {
+      return measured
+    }
+    if let measured = metrics?.standard14Advance(
+      of: codes, fontSize: size, charSpacing: 0, wordSpacing: 0, horizontalScale: 100) {
+      return measured
+    }
     var total = 0.0
     for code in codes {
       if let width = font.width(of: code) {
@@ -449,7 +465,7 @@ public enum ParagraphReflow {
     }
     // P19-015: collisions with other text blocks and annotations.
     var collisions: [ParagraphReflowCollision] = []
-    let others = (try? ParagraphReconstruction.candidates(pageID: pageID, in: graph)) ?? []
+    let others = (try? ParagraphReconstruction.candidatesForEditing(pageID: pageID, in: graph)) ?? []
     // Blocks and annotations that the downstream shift moves are not counted
     // as collisions: they travel with the reflowed paragraph (P19-016).
     let movedRuns = Set(downstreamText.map(\.runIndex))
@@ -638,13 +654,15 @@ public enum ParagraphReflow {
   static func tokenWidth(_ token: Token, context: Context, scale: Double) -> Double {
     let style = context.styles[token.styleIndex]
     return advance(
-      of: token.text, font: context.fonts[token.styleIndex], size: style.fontSize * scale)
+      of: token.text, font: context.fonts[token.styleIndex],
+      metrics: context.metricFonts[token.styleIndex], size: style.fontSize * scale)
   }
 
   static func spaceWidth(of styleIndex: Int, context: Context, scale: Double) -> Double {
     let style = context.styles[styleIndex]
     return advance(
-      of: " ", font: context.fonts[styleIndex], size: style.fontSize * scale)
+      of: " ", font: context.fonts[styleIndex], metrics: context.metricFonts[styleIndex],
+      size: style.fontSize * scale)
   }
 
   static func spacesWidth(_ tokens: [Token], context: Context, scale: Double) -> Double {
@@ -676,6 +694,7 @@ public enum ParagraphReflow {
           text: currentText, styleIndex: currentStyle,
           width: advance(
             of: currentText, font: context.fonts[currentStyle],
+            metrics: context.metricFonts[currentStyle],
             size: context.styles[currentStyle].fontSize * scale)))
       currentText = ""
     }

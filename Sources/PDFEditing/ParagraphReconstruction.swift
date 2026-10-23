@@ -87,6 +87,19 @@ public enum ParagraphReconstruction {
       pageID: pageID, in: graph, layout: layout, limits: limits, roles: roles)
   }
 
+  /// Paragraph-editing candidates use verified Standard-14 advances when a
+  /// canonical simple font omits `/Widths`. General page layout remains
+  /// conservative; paragraph bounds must remain stable after this editor's
+  /// own save/reopen cycle.
+  public static func candidatesForEditing(
+    pageID: PDFObjectID, in graph: PDFGraph, limits: Limits = Limits(),
+    roles: [Int: String]? = nil
+  ) throws -> [TextParagraphCandidate] {
+    let layout = try PageTextLayout.buildForParagraphEditing(pageID: pageID, in: graph)
+    return try candidates(
+      pageID: pageID, in: graph, layout: layout, limits: limits, roles: roles)
+  }
+
   /// Reuse a layout already built by a multi-output consumer such as DOCX
   /// reconstruction. Building the same page layout a second time repeats
   /// content decoding, font resolution, and glyph geometry work.
