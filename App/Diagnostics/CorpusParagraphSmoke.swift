@@ -307,7 +307,19 @@
       let pageLimit = allPages
         ? document.editSession.pageIDs.count
         : min(3, document.editSession.pageIDs.count)
-      for index in 0..<pageLimit {
+      let requestedPageIndex = CommandLine.arguments.firstIndex(of: "--corpus-page-index")
+        .flatMap { CommandLine.arguments.indices.contains($0 + 1)
+          ? Int(CommandLine.arguments[$0 + 1]) : nil }
+      let pageIndices: [Int]
+      if let requestedPageIndex {
+        guard document.editSession.pageIDs.indices.contains(requestedPageIndex) else {
+          throw PDFError(.malformed, "Requested corpus page index is outside the document")
+        }
+        pageIndices = [requestedPageIndex]
+      } else {
+        pageIndices = Array(0..<pageLimit)
+      }
+      for index in pageIndices {
         guard let page = reader.page(at: index) else { continue }
         let pageID = document.editSession.pageIDs[index]
         let blocks = try PageTextEditing.blocks(pageID: pageID, in: graph)
@@ -532,6 +544,183 @@
       guard canvas.textView.string == target.text, !viewer.hasPendingPageTextChanges,
         try document.editSession.bytesForSave() == original else {
         throw PDFError(.malformed, "Paragraph discovery and actual selection disagree or mutate the source")
+      }
+      if CommandLine.arguments.contains("--test-size-only") {
+        guard let paragraph = target.paragraph,
+          let sizeIndex = CommandLine.arguments.firstIndex(of: "--test-size-only"),
+          CommandLine.arguments.indices.contains(sizeIndex + 1),
+          let requestedSize = Double(CommandLine.arguments[sizeIndex + 1]) else {
+          throw PDFError(.malformed, "Size-only check requires a paragraph and numeric size")
+        }
+        let originalSize = viewer.pageTextStyle.fontSize
+        let selectedIndices = Set(paragraph.originalText.keys)
+        let beforeRuns = try PageTextEditing.sourceRuns(pageID: pageID, in: graph)
+        let selectedBefore = beforeRuns.filter { selectedIndices.contains($0.index) }
+        let neighborsBefore = beforeRuns.filter { !selectedIndices.contains($0.index) }
+        guard !selectedBefore.isEmpty else {
+          throw PDFError(.malformed, "The selected paragraph has no editable source runs")
+        }
+
+        func neighborComparison(
+          _ before: [PageTextEditing.SourceRun], _ after: [PageTextEditing.SourceRun]
+        ) -> (unchanged: Bool, maximumPositionDelta: Double?) {
+          guard before.count == after.count else { return (false, nil) }
+          var maximum = 0.0
+          for (old, new) in zip(before, after) {
+            guard old.index == new.index, old.text == new.text,
+              old.format == new.format, abs(old.textScale - new.textScale) < 1e-8
+            else { return (false, nil) }
+            maximum = max(maximum, max(abs(old.x - new.x), abs(old.baseline - new.baseline)))
+          }
+          return (maximum < 0.02, maximum)
+        }
+
+        if let moveIndex = CommandLine.arguments.firstIndex(of: "--test-collision-dy"),
+          CommandLine.arguments.indices.contains(moveIndex + 1),
+          let downwardOffset = Double(CommandLine.arguments[moveIndex + 1]),
+          downwardOffset.isFinite, downwardOffset > 0 {
+          viewer.pageTextPositionApplier?(
+            canvas.sourceRect.minX, canvas.sourceRect.minY - downwardOffset)
+        } else {
+          viewer.pageTextFormattingApplier?(.size(requestedSize))
+        }
+        let lines = canvas.pageLines()
+        let style = viewer.pageTextStyle
+        if CommandLine.arguments.contains("--expect-collision-refusal") {
+          let committed = canvas.commit()
+          let refusal = viewer.pageTextFormattingIssue ?? ""
+          if committed {
+            let edited = try document.editSession.bytesForSave()
+            let undone = document.undoEdit()
+            let restored = try document.editSession.bytesForSave() == original
+            let sourceUnchanged = try Data(contentsOf: source) == sourceBytes
+            let record: [String: Any] = [
+              "status": "failed",
+              "page": pageIndex,
+              "requestedSize": requestedSize,
+              "lineCount": lines.count,
+              "refusal": refusal,
+              "unexpectedlyCommitted": true,
+              "undoRestoredOriginal": undone && restored,
+              "sourceFileUnchanged": sourceUnchanged,
+              "uncommittedOutputBytesChanged": edited != original,
+            ]
+            try JSONSerialization.data(withJSONObject: record, options: [.prettyPrinted, .sortedKeys])
+              .write(to: output.appendingPathComponent("collision-check.json"))
+            guard undone, restored, sourceUnchanged else {
+              throw PDFError(.malformed, "Unexpected collision edit could not be undone exactly")
+            }
+            throw PDFError(.malformed, "The intended neighboring-text collision was accepted")
+          }
+
+          let refusalLeftGraphUnchanged = try document.editSession.bytesForSave() == original
+          let isOverlapRefusal = refusal.localizedCaseInsensitiveContains("overlap another text block")
+          let remainedEditable = viewer.isEditingPageText && viewer.hasPendingPageTextChanges
+          let refusedGraph = document.editSession.currentGraph ?? graph
+          let refusedRuns = try PageTextEditing.sourceRuns(pageID: pageID, in: refusedGraph)
+          let refusedNeighbors = refusedRuns.filter { !selectedIndices.contains($0.index) }
+          let refusedNeighborCheck = neighborComparison(neighborsBefore, refusedNeighbors)
+          canvas.cancel()
+          let cancelLeftGraphUnchanged = try document.editSession.bytesForSave() == original
+          let cleanAfterCancel = !viewer.isEditingPageText && !viewer.hasPendingPageTextChanges
+            && !document.isDocumentEdited
+          let sourceUnchanged = try Data(contentsOf: source) == sourceBytes
+          let passed = isOverlapRefusal && refusalLeftGraphUnchanged
+            && remainedEditable && refusedNeighborCheck.unchanged
+            && cancelLeftGraphUnchanged && cleanAfterCancel && sourceUnchanged
+          let record: [String: Any] = [
+            "status": passed ? "passed" : "failed",
+            "page": pageIndex,
+            "targetRunIndices": paragraph.originalText.keys.sorted(),
+            "originalSize": originalSize, "requestedSize": requestedSize,
+            "lineCount": lines.count,
+            "refusal": refusal,
+            "refusedAsOverlap": isOverlapRefusal,
+            "graphUnchangedOnRefusal": refusalLeftGraphUnchanged,
+            "draftStayedEditableUntilCancel": remainedEditable,
+            "neighborUnchanged": refusedNeighborCheck.unchanged,
+            "neighborMaximumPositionDelta": refusedNeighborCheck.maximumPositionDelta as Any? ?? NSNull(),
+            "cancelLeftGraphUnchanged": cancelLeftGraphUnchanged,
+            "cleanAfterCancel": cleanAfterCancel,
+            "sourceFileUnchanged": sourceUnchanged,
+          ]
+          try JSONSerialization.data(withJSONObject: record, options: [.prettyPrinted, .sortedKeys])
+            .write(to: output.appendingPathComponent("collision-check.json"))
+          guard passed else {
+            throw PDFError(.malformed, "Collision refusal, neighbor, or Cancel check failed")
+          }
+          return
+        }
+        guard abs(style.fontSize - requestedSize) < 0.02, lines.count == 1,
+          canvas.commit(), !viewer.hasPendingPageTextChanges,
+          let editedGraph = document.editSession.currentGraph else {
+          throw PDFError(.unsupported,
+            "In-bounds size correction did not commit: \(viewer.pageTextFormattingIssue ?? "native layout was not one line")")
+        }
+        let afterRuns = try PageTextEditing.sourceRuns(pageID: pageID, in: editedGraph)
+        let selectedAfter = afterRuns.filter { selectedIndices.contains($0.index) }
+        let neighborsAfter = afterRuns.filter { !selectedIndices.contains($0.index) }
+        let liveNeighborCheck = neighborComparison(neighborsBefore, neighborsAfter)
+        let selectedTextPreserved = selectedBefore.map(\.text) == selectedAfter.map(\.text)
+          && selectedBefore.count == selectedAfter.count
+        let selectedSizeApplied = !selectedAfter.isEmpty
+          && selectedAfter.allSatisfy { abs($0.format.size - requestedSize) < 0.02 }
+
+        let saved = output.appendingPathComponent("inbounds-correction.pdf")
+        guard !FileManager.default.fileExists(atPath: saved.path) else {
+          throw PDFError(.malformed, "The in-bounds correction output already exists")
+        }
+        let saveError: Error? = await withCheckedContinuation { continuation in
+          document.save(to: saved, ofType: "com.adobe.pdf", for: .saveAsOperation) {
+            continuation.resume(returning: $0)
+          }
+        }
+        if let saveError { throw saveError }
+        document.close()
+
+        let reopened = try SPDFDocument(contentsOf: saved, ofType: "com.adobe.pdf")
+        NSDocumentController.shared.addDocument(reopened)
+        reopened.makeWindowControllers()
+        defer { reopened.close() }
+        guard reopened.editSession.pageIDs.indices.contains(pageIndex),
+          let reopenedGraph = reopened.editSession.currentGraph else {
+          throw PDFError(.malformed, "The corrected document did not reopen")
+        }
+        let reopenedPageID = reopened.editSession.pageIDs[pageIndex]
+        let reopenedRuns = try PageTextEditing.sourceRuns(pageID: reopenedPageID, in: reopenedGraph)
+        let reopenedSelected = reopenedRuns.filter { selectedIndices.contains($0.index) }
+        let reopenedNeighbors = reopenedRuns.filter { !selectedIndices.contains($0.index) }
+        let reopenedNeighborCheck = neighborComparison(neighborsBefore, reopenedNeighbors)
+        let reopenedSizeApplied = reopenedSelected.count == selectedBefore.count
+          && reopenedSelected.allSatisfy { abs($0.format.size - requestedSize) < 0.02 }
+        let sourceUnchanged = try Data(contentsOf: source) == sourceBytes
+        let passed = selectedTextPreserved && selectedSizeApplied
+          && liveNeighborCheck.unchanged && reopenedSizeApplied
+          && reopenedNeighborCheck.unchanged && sourceUnchanged
+          && reopened.editSession.canEdit && !reopened.isDocumentEdited
+        let record: [String: Any] = [
+          "status": passed ? "passed" : "failed",
+          "page": pageIndex,
+          "targetRunIndices": paragraph.originalText.keys.sorted(),
+          "originalSize": originalSize, "requestedSize": requestedSize,
+          "lineCount": lines.count,
+          "selectedTextPreserved": selectedTextPreserved,
+          "selectedSizeApplied": selectedSizeApplied,
+          "liveNeighborUnchanged": liveNeighborCheck.unchanged,
+          "liveNeighborMaximumPositionDelta": liveNeighborCheck.maximumPositionDelta as Any? ?? NSNull(),
+          "savedSizeApplied": reopenedSizeApplied,
+          "savedNeighborUnchanged": reopenedNeighborCheck.unchanged,
+          "savedNeighborMaximumPositionDelta": reopenedNeighborCheck.maximumPositionDelta as Any? ?? NSNull(),
+          "saveReopenSucceeded": reopened.editSession.canEdit && !reopened.isDocumentEdited,
+          "sourceFileUnchanged": sourceUnchanged,
+          "output": saved.path,
+        ]
+        try JSONSerialization.data(withJSONObject: record, options: [.prettyPrinted, .sortedKeys])
+          .write(to: output.appendingPathComponent("inbounds-correction.json"))
+        guard passed else {
+          throw PDFError(.malformed, "In-bounds correction Save/reopen or neighbor check failed")
+        }
+        return
       }
       let beforeLines = canvas.pageLines()
       let beforeCharacters = characters(canvas, document: document)

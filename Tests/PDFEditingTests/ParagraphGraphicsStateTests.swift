@@ -35,7 +35,8 @@ struct ParagraphGraphicsStateTests {
   }
 
   private func taggedFinalRunFixture(
-    singleScopeWordSpacing: Double? = nil
+    singleScopeWordSpacing: Double? = nil,
+    trailingSpaceNeighbor: Bool = false
   ) throws -> (PDFGraph, PDFObjectID) {
     let parsed = try PDFParser.parse(PDFFixtures.fontEmbeddedPages())
     let pageID = try #require(parsed.pageIDs.first)
@@ -45,7 +46,17 @@ struct ParagraphGraphicsStateTests {
       throw PDFError(.malformed, "Tagged fixture page is missing")
     }
     let font = try #require(IndexedTextFont.resolve(resource: PDFName("F1"), page: page, in: graph))
-    if let singleScopeWordSpacing {
+    if trailingSpaceNeighbor {
+      graph.objects[PDFObjectID(5)] = .stream(PDFStream(bytes: Data("""
+        BT /F1 12 Tf 42 660 Td
+        /P <</MCID 0>> BDC
+        (AB) Tj
+        (C ) Tj
+        EMC
+        (ABC) Tj
+        ET
+        """.utf8)))
+    } else if let singleScopeWordSpacing {
       graph.objects[PDFObjectID(5)] = .stream(PDFStream(bytes: Data("""
         /P <</MCID 0>> BDC
         BT /F1 12 Tf \(singleScopeWordSpacing) Tw 42 660 Td [(ABC ) 20 (ABC)] TJ ET
@@ -85,12 +96,12 @@ struct ParagraphGraphicsStateTests {
       PDFName("S"): .name(PDFName("P")),
       PDFName("P"): .reference(PDFObjectID(90)),
       PDFName("Pg"): .reference(pageID),
-      PDFName("K"): singleScopeWordSpacing == nil
+      PDFName("K"): singleScopeWordSpacing == nil && !trailingSpaceNeighbor
         ? .array([.integer(0), .integer(1)]) : .integer(0),
     ])
     graph.objects[PDFObjectID(92)] = .dictionary([
       PDFName("Nums"): .array([
-        .integer(0), .array(singleScopeWordSpacing == nil
+        .integer(0), .array(singleScopeWordSpacing == nil && !trailingSpaceNeighbor
           ? [.reference(PDFObjectID(91)), .reference(PDFObjectID(91))]
           : [.reference(PDFObjectID(91))]),
       ]),
@@ -365,6 +376,45 @@ struct ParagraphGraphicsStateTests {
       lines: [.init(text: "CBC ABC ABC ABC", x: 42, baseline: 660)],
       fontSize: 12, color: [0, 0, 0])
     #expect(throws: PDFError.self) { try changedPrefix.validate(in: graph) }
+  }
+
+  @Test func taggedPointSizeEditTrimsTerminalSourceSpaceAndPreservesNeighbor() throws {
+    let (graph, pageID) = try taggedFinalRunFixture(trailingSpaceNeighbor: true)
+    let sourceRuns = try TextRunIndexer.runs(
+      in: PageContent.load(pageID: pageID, in: graph), graph: graph)
+    #expect(sourceRuns.map(\.text) == ["AB", "C ", "ABC"])
+    #expect(sourceRuns.map(\.fontSize) == [12, 12, 12])
+    let sourceNeighborX = sourceRuns[2].baselineX
+
+    guard case .dictionary(let page)? = graph.objects[pageID] else {
+      throw PDFError(.malformed, "Tagged fixture page is missing")
+    }
+    let font = try #require(IndexedTextFont.resolve(
+      resource: sourceRuns[0].fontResource, page: page, in: graph))
+    let format = PageTextFormat(size: 10, color: sourceRuns[0].fillColor,
+      sourceFont: PageTextSourceFont(resource: sourceRuns[0].fontResource, name: font.baseFont),
+      characterSpacing: sourceRuns[0].charSpacing, opacity: sourceRuns[0].fillAlpha)
+    let line = PageTextLine(text: "ABC", x: 42, baseline: 660,
+      segments: [PageTextSegment(text: "ABC", x: 42, format: format)])
+    let edit = RewritePageTextCommand(pageID: pageID, originalText: [0: "AB", 1: "C "],
+      lines: [line], fontSize: 10, color: sourceRuns[0].fillColor,
+      box: PageTextBox(x: 42, firstBaseline: 660, width: 100, lineSpacing: 12, wraps: false))
+
+    try edit.validate(in: graph)
+    let written = try PDFEditingEngine.commit(PDFTransaction([edit]), to: graph)
+    let reparsed = try PDFParser.parse(PDFWriter.write(written))
+    let savedRuns = try TextRunIndexer.runs(
+      in: PageContent.load(pageID: pageID, in: reparsed.graph), graph: reparsed.graph)
+
+    #expect(savedRuns.map(\.text) == ["AB", "C ", "ABC"])
+    if savedRuns.count == 3 {
+      #expect(abs(savedRuns[0].fontSize - 10) < 0.02)
+      #expect(abs(savedRuns[1].fontSize - 10) < 0.02)
+      #expect(abs(savedRuns[2].fontSize - 12) < 0.02)
+      #expect(abs(savedRuns[2].baselineX - sourceNeighborX) < 0.02)
+    }
+    let inventory = try PDFStructureInspector.inspect(in: reparsed.graph, pageIDs: reparsed.pageIDs)
+    #expect(inventory.issues.isEmpty)
   }
 
   @Test func taggedFirstInstructionCanShortenByRemovingItsLeadingPrefix() throws {

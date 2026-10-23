@@ -1063,6 +1063,12 @@ public struct RewritePageTextCommand: PDFEditCommand, Equatable, Sendable {
     graph: PDFGraph
   ) throws -> [(range: Range<Int>, replacement: [UInt8])]? {
     if Self.hasTaggedReadingOrder(pageID: pageID, in: graph),
+      let resized = try taggedPointSizeRewriteRanges(
+        content: content, runs: runs, advances: advances, font: font, graph: graph)
+    {
+      return resized
+    }
+    if Self.hasTaggedReadingOrder(pageID: pageID, in: graph),
       let preserved = try taggedRunPreservingRewriteRanges(
         content: content, runs: runs, advances: advances, graph: graph)
     {
@@ -1330,6 +1336,171 @@ public struct RewritePageTextCommand: PDFEditCommand, Equatable, Sendable {
       }
       replacements.append((TextStyleSupport.fullSpan(of: instruction), replacement))
     }
+    return replacements
+  }
+
+  /// Changes the point size of complete tagged text-show instructions in place.
+  /// Local Tf overrides keep unrelated instructions on the original font size,
+  /// and a TJ tail correction preserves each original text endpoint.
+  private func taggedPointSizeRewriteRanges(
+    content: PageContent, runs: [TextRun], advances: [Double], font: IndexedTextFont,
+    graph: PDFGraph
+  ) throws -> [(range: Range<Int>, replacement: [UInt8])]? {
+    guard lines.count == 1, runs.count == originalText.count,
+      runs.count == advances.count, !runs.isEmpty,
+      let first = runs.first, let line = lines.first, !line.segments.isEmpty,
+      line.segments.map(\.text).joined() == line.text
+    else { return nil }
+
+    let indices = originalText.keys.sorted()
+    guard indices.count == runs.count,
+      zip(indices, runs).allSatisfy({ originalText[$0.0] == $0.1.text })
+    else { return nil }
+
+    var sourceText = ""
+    for index in indices {
+      guard let text = originalText[index] else { return nil }
+      let sourceCount = text.unicodeScalars.count
+      let outputCount = sourceRunOutputCounts[index] ?? sourceCount
+      guard outputCount == sourceCount || outputCount == sourceCount + 1 else {
+        return nil
+      }
+      sourceText += text
+      if outputCount == sourceCount + 1 { sourceText += " " }
+    }
+    while sourceText.last?.isWhitespace == true { sourceText.removeLast() }
+    guard line.text == sourceText else { return nil }
+
+    guard runs.allSatisfy({ run in
+      run.fontID == first.fontID && run.fontResource == first.fontResource
+        && abs(run.fontSize - first.fontSize) <= 1e-8
+        && abs(run.charSpacing - first.charSpacing) <= 1e-8
+        && abs(run.wordSpacing - first.wordSpacing) <= 1e-8
+        && abs(run.horizontalScale - first.horizontalScale) <= 1e-8
+        && abs(run.fillAlpha - first.fillAlpha) <= 1e-8
+        && run.fillColor == first.fillColor
+    }), abs(fontSize - first.fontSize) > 0.02,
+      first.rise == 0, first.horizontalScale > 0,
+      abs(first.wordSpacing) <= 1e-8,
+      font.fontID == first.fontID, font.resource == first.fontResource,
+      font.isInlineEditable,
+      line.segments.allSatisfy({ $0.format.customFont == nil })
+    else { return nil }
+
+    let transform = TextCanvasSupport.concatenate(first.ctm, first.matrix)
+    guard transform.count == 6, transform.allSatisfy(\.isFinite),
+      abs(transform[0] - 1) <= 1e-8, abs(transform[1]) <= 1e-8,
+      abs(transform[2]) <= 1e-8, abs(transform[3] - 1) <= 1e-8,
+      abs(line.x - transform[4] - first.textSpaceOffset) <= 0.02,
+      abs(line.baseline - transform[5]) <= 0.02
+    else { return nil }
+    guard runs.allSatisfy({ run in
+      let transform = TextCanvasSupport.concatenate(run.ctm, run.matrix)
+      return transform.count == 6 && transform.allSatisfy(\.isFinite)
+        && abs(transform[0] - 1) <= 1e-8 && abs(transform[1]) <= 1e-8
+        && abs(transform[2]) <= 1e-8 && abs(transform[3] - 1) <= 1e-8
+        && abs(transform[5] - line.baseline) <= 0.02
+    }) else { return nil }
+
+    if let box {
+      guard !box.wraps, abs(box.x - line.x) <= 0.02,
+        abs(box.firstBaseline - line.baseline) <= 0.02 else { return nil }
+    }
+
+    let allRuns = try TextRunIndexer.runs(in: content, graph: graph)
+    guard Self.coversWholeTextInstructions(indices, in: allRuns) else {
+      return nil
+    }
+    let instructionIndices = Array(Set(runs.map(\.instructionIndex))).sorted()
+    guard !instructionIndices.isEmpty else { return nil }
+    var runsByInstruction: [Int: [(run: TextRun, advance: Double)]] = [:]
+    for (runIndex, run) in runs.enumerated() {
+      runsByInstruction[run.instructionIndex, default: []].append((run, advances[runIndex]))
+    }
+    let segmentSourcesMatch = line.segments.allSatisfy {
+      $0.format.sourceFont?.resource == first.fontResource
+    }
+    let segmentSizesMatch = line.segments.allSatisfy {
+      abs($0.format.size - fontSize) <= 0.02
+    }
+    let segmentColorsMatch = line.segments.allSatisfy { $0.format.color == color }
+    let segmentOpacityMatches = line.segments.allSatisfy {
+      abs($0.format.opacity - first.fillAlpha) <= 1e-8
+    }
+    // Imported paragraph layout may express gaps between source spans as
+    // segment-local kern values. This size-only rewrite retains the PDF's
+    // original spacing operators and restores each show endpoint, so those
+    // preview-only spacing values are not an edit to serialize.
+    guard segmentSourcesMatch, segmentSizesMatch, segmentColorsMatch,
+      segmentOpacityMatches else { return nil }
+
+    let markedRanges = StructureTaggingAssistant.markedRanges(in: content)
+    let fontName = try PDFWriter.serializedValue(.name(first.fontResource))
+    var insertionsByOffset: [Int: [UInt8]] = [:]
+    for instructionIndex in instructionIndices {
+      guard let instructionRuns = runsByInstruction[instructionIndex],
+        let instructionRun = instructionRuns.first?.run,
+        let instruction = content.instructions[safe: instructionIndex],
+        instruction.operatorName == "Tj" || instruction.operatorName == "TJ"
+      else { return nil }
+      let textScopes = markedRanges.filter {
+        $0.mcid != nil && $0.instructions.contains(instructionIndex)
+      }
+      guard textScopes.count == 1 else { return nil }
+
+      var oldAdvance = instructionRuns.reduce(0.0) { $0 + $1.advance }
+      var newAdvance = 0.0
+      for member in instructionRuns {
+        guard let advance = font.advance(of: member.run.rawCodes, fontSize: fontSize,
+          charSpacing: member.run.charSpacing, wordSpacing: member.run.wordSpacing,
+          horizontalScale: member.run.horizontalScale), advance.isFinite else {
+          return nil
+        }
+        newAdvance += advance
+      }
+      if case .array(let entries)? = instruction.operands.first?.value {
+        for entry in entries {
+          let adjustment: Double
+          switch entry {
+          case .integer(let value): adjustment = Double(value)
+          case .real(let value): adjustment = value
+          case .string: continue
+          default: return nil
+          }
+          oldAdvance -= adjustment * instructionRun.fontSize / 1_000
+            * instructionRun.horizontalScale / 100
+          newAdvance -= adjustment * fontSize / 1_000
+            * instructionRun.horizontalScale / 100
+        }
+      }
+      guard oldAdvance.isFinite, newAdvance.isFinite, fontSize > 0 else {
+        return nil
+      }
+      let restoreAdjustment = (newAdvance - oldAdvance) * 1_000
+        / (fontSize * instructionRun.horizontalScale / 100)
+      guard restoreAdjustment.isFinite, abs(restoreAdjustment) <= 1_000_000 else {
+        return nil
+      }
+
+      var before = Array("\n".utf8) + fontName
+      before += Array(" \(AnnotationSupport.number(fontSize)) Tf\n".utf8)
+      var after = Array("\n".utf8)
+      if abs(restoreAdjustment) > 1e-9 {
+        after += Array("[\(AnnotationSupport.number(restoreAdjustment))] TJ\n".utf8)
+      }
+      after += fontName
+      after += Array(" \(AnnotationSupport.number(first.fontSize)) Tf\n".utf8)
+
+      let instructionStart = TextStyleSupport.fullSpan(of: instruction).lowerBound
+      insertionsByOffset[instructionStart, default: []].append(contentsOf: before)
+      insertionsByOffset[instruction.span.upperBound, default: []].append(contentsOf: after)
+    }
+
+    let replacements = insertionsByOffset.keys.sorted().map { offset in
+      (range: offset..<offset, replacement: insertionsByOffset[offset]!)
+    }
+    guard !replacements.isEmpty else { return nil }
+    _ = try content.replacing(ranges: replacements, in: graph)
     return replacements
   }
 
