@@ -160,6 +160,94 @@ struct ParagraphReflowTests {
       options: ParagraphReflowOptions(alignment: .left, firstLineIndent: 30)).plan
     #expect(abs(indented.lines[0].x - (candidate.bounds[0] + 30)) < 0.01)
     #expect(abs(indented.lines[1].x - candidate.bounds[0]) < 0.01)
+
+    guard case .dictionary(let page)? = graph.objects[pageID] else {
+      Issue.record("Fixture page is missing")
+      return
+    }
+    let font = try #require(SimpleFont.resolve(resource: PDFName("F1"), page: page, in: graph))
+    let boxWidth = candidate.bounds[2] - candidate.bounds[0]
+    let boundaryWord = (1...100).map { String(repeating: "x", count: $0) }.first { word in
+      let width = ParagraphReflow.advance(of: word, font: font, size: 12)
+      return width > boxWidth - 30 && width <= boxWidth
+    }
+    let word = try #require(boundaryWord)
+    let unchangedPlan = try ParagraphReflow.plan(
+      pageID: pageID, candidate: candidate, replacement: word, in: graph,
+      options: ParagraphReflowOptions(alignment: .left)).plan
+    let indentedPlan = try ParagraphReflow.plan(
+      pageID: pageID, candidate: candidate, replacement: word, in: graph,
+      options: ParagraphReflowOptions(alignment: .left, firstLineIndent: 30)).plan
+    #expect(!unchangedPlan.overflowed)
+    #expect(indentedPlan.overflowed)
+    #expect(throws: PDFError.self) {
+      _ = try PDFEditingEngine.commit(
+        PDFTransaction([
+          ReflowParagraphCommand(
+            pageID: pageID, candidate: candidate, replacement: word,
+            options: ParagraphReflowOptions(
+              alignment: .left, firstLineIndent: 30, overflow: .clip))
+        ]), to: graph)
+    }
+  }
+
+  @Test func paragraphSpacingMovesBlockAndFollowingSameColumnText() throws {
+    let graph = fixture()
+    let pageID = try #require(PDFPageTree.pageIDs(in: graph).first)
+    let candidate = try paragraph(graph, pageID: pageID)
+    let replacement = candidate.text.replacingOccurrences(of: "\n", with: " ")
+    let baseline = try ParagraphReflow.plan(
+      pageID: pageID, candidate: candidate, replacement: replacement, in: graph,
+      options: ParagraphReflowOptions(downstreamShift: true, maxDownstreamShift: 500)).plan
+    let spacingOptions = ParagraphReflowOptions(
+      additionalParagraphSpacingBefore: 12, additionalParagraphSpacingAfter: 8,
+      maxDownstreamShift: 500)
+    let plan = try ParagraphReflow.plan(
+      pageID: pageID, candidate: candidate, replacement: replacement, in: graph,
+      options: spacingOptions).plan
+
+    #expect(plan.lines.count == baseline.lines.count)
+    for (line, original) in zip(plan.lines, baseline.lines) {
+      #expect(abs(line.y - (original.y - 12)) < 0.01)
+    }
+    #expect(baseline.downstreamDelta > 0)
+    #expect(abs(plan.downstreamDelta - (baseline.downstreamDelta + 20)) < 0.01)
+    let sourceRuns = try TextRunIndexer.runs(
+      in: PageContent.load(pageID: pageID, in: graph), graph: graph)
+    let footerIndex = try #require(
+      sourceRuns.firstIndex { $0.text.contains("Footer note at the bottom.") })
+    #expect(
+      plan.downstreamText.contains {
+        $0.runIndex == footerIndex
+          && abs($0.y - (200 - plan.downstreamDelta)) < 0.01
+      })
+
+    let edited = try PDFEditingEngine.commit(
+      PDFTransaction([
+        ReflowParagraphCommand(
+          pageID: pageID, candidate: candidate, replacement: replacement,
+          options: spacingOptions)
+      ]), to: graph)
+    let editedRuns = try TextRunIndexer.runs(
+      in: PageContent.load(pageID: pageID, in: edited), graph: edited)
+    let footer = try #require(editedRuns.first { $0.text.contains("Footer note at the bottom.") })
+    #expect(abs(footer.baselineY - (200 - plan.downstreamDelta)) < 0.01)
+
+    let shiftedPastBox = try ParagraphReflow.plan(
+      pageID: pageID, candidate: candidate, replacement: "A short line", in: graph,
+      options: ParagraphReflowOptions(
+        additionalParagraphSpacingBefore: 100, overflow: .allow)).plan
+    #expect(shiftedPastBox.overflowed)
+    #expect(shiftedPastBox.warnings.contains { $0.contains("past the paragraph box") })
+    #expect(throws: PDFError.self) {
+      _ = try PDFEditingEngine.commit(
+        PDFTransaction([
+          ReflowParagraphCommand(
+            pageID: pageID, candidate: candidate, replacement: "A short line",
+            options: ParagraphReflowOptions(
+              additionalParagraphSpacingBefore: 100, overflow: .clip))
+        ]), to: graph)
+    }
   }
 
   @Test func justifiedAlignmentFillsNonfinalLinesAndKeepsFinalLineNatural() throws {

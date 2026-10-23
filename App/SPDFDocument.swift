@@ -1867,7 +1867,12 @@ final class SPDFDocument: NSDocument {
   /// P19-007: reflow the paragraph at the current page (menu-driven). The
   /// candidate comes from the analysis pass so the plan is reviewable.
   func reflowParagraph() {
-    guard canEditContent, let graph = editSession.currentGraph,
+    guard canEditContent else { return }
+    // Reflow mutates the canonical graph and reloads the viewer. Finish the
+    // selected inline text editor first so its stale source snapshot cannot
+    // overwrite the new paragraph layout when the user presses Done.
+    guard viewer?.pendingEditFinisher?() ?? true else { return }
+    guard let graph = editSession.currentGraph,
       let pageID = currentPageID(in: graph)
     else { return }
     let candidates = (try? ParagraphReconstruction.candidates(pageID: pageID, in: graph)) ?? []
@@ -1896,15 +1901,30 @@ final class SPDFDocument: NSDocument {
     lineSpacingField.placeholderString = "Keep current"
     lineSpacingField.toolTip =
       "Distance between line baselines, in points; limited to 1.8 times the selected font size."
+    let firstLineIndentField = NSTextField(string: "")
+    firstLineIndentField.placeholderString = "Keep current"
+    firstLineIndentField.toolTip =
+      "Positive values indent the first line; negative values create a hanging indent."
+    let paragraphSpacingBeforeField = NSTextField(string: "")
+    paragraphSpacingBeforeField.placeholderString = "Keep current"
+    paragraphSpacingBeforeField.toolTip =
+      "Moves this paragraph down to add space before it; following text shifts as needed."
+    let paragraphSpacingAfterField = NSTextField(string: "")
+    paragraphSpacingAfterField.placeholderString = "Keep current"
+    paragraphSpacingAfterField.toolTip =
+      "Adds space after this paragraph by moving following same-column text down."
     let grid = NSGridView(views: [
       [NSTextField(labelWithString: "Paragraph:"), popup],
       [NSTextField(labelWithString: "New text:"), replacementField],
       [NSTextField(labelWithString: "Overflow:"), overflowPopup],
       [NSTextField(labelWithString: "Alignment:"), alignmentPopup],
       [NSTextField(labelWithString: "Line spacing (pt):"), lineSpacingField],
+      [NSTextField(labelWithString: "First-line indent (pt):"), firstLineIndentField],
+      [NSTextField(labelWithString: "Extra space before (pt):"), paragraphSpacingBeforeField],
+      [NSTextField(labelWithString: "Extra space after (pt):"), paragraphSpacingAfterField],
     ])
     grid.column(at: 0).xPlacement = .trailing
-    grid.frame = NSRect(x: 0, y: 0, width: 460, height: 128)
+    grid.frame = NSRect(x: 0, y: 0, width: 460, height: 200)
     guard
       runFormDialog(
         title: "Reflow Paragraph",
@@ -1912,7 +1932,10 @@ final class SPDFDocument: NSDocument {
           "The paragraph's own lines are rewritten; other content is checked for collisions. "
           + "Justified alignment expands spaces on nonfinal lines. Leave line spacing blank "
           + "to keep the selected paragraph's current spacing. Explicit spacing is limited to "
-          + "1.8 times the selected font size so it remains available for reflow after reopening.",
+          + "1.8 times the selected font size so it remains available for reflow after reopening. "
+          + "Leave first-line indent blank to keep it; positive values indent and negative "
+          + "values create a hanging indent. Leave extra paragraph spacing blank to keep its "
+          + "current placement; enter 0 to 100 points to add space before or after.",
         accessory: grid)
     else { return }
     let index = max(0, min(popup.indexOfSelectedItem, editable.count - 1))
@@ -1950,9 +1973,59 @@ final class SPDFDocument: NSDocument {
     case 4: alignment = .justified
     default: alignment = nil
     }
+    let indentInput = firstLineIndentField.stringValue.trimmingCharacters(
+      in: .whitespacesAndNewlines)
+    let firstLineIndent: Double?
+    if indentInput.isEmpty {
+      firstLineIndent = nil
+    } else {
+      let paragraphWidth = candidate.bounds[2] - candidate.bounds[0]
+      let maximumIndent = min(100, max(0, paragraphWidth - 24))
+      guard let value = Double(indentInput), value.isFinite,
+        abs(value) <= maximumIndent
+      else {
+        let limit = String(format: "%.1f", maximumIndent)
+        presentError(
+          PDFError(
+            .malformed,
+            "First-line indent must be between -\(limit) and \(limit) points for this paragraph."))
+        return
+      }
+      let effectiveAlignment = alignment ?? candidate.alignment
+      guard value == 0 || effectiveAlignment == .left || effectiveAlignment == .justified else {
+        presentError(
+          PDFError(
+            .unsupported, "First-line indentation is supported for left or justified alignment."))
+        return
+      }
+      firstLineIndent = value
+    }
+    func parseAdditionalParagraphSpacing(_ field: NSTextField, label: String) -> Double? {
+      let input = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+      guard !input.isEmpty else { return nil }
+      guard let value = Double(input), value.isFinite, (0...100).contains(value) else {
+        presentError(
+          PDFError(.malformed, "\(label) must be between 0 and 100 points."))
+        return nil
+      }
+      return value
+    }
+    let spacingBeforeInput = paragraphSpacingBeforeField.stringValue.trimmingCharacters(
+      in: .whitespacesAndNewlines)
+    let spacingBefore = parseAdditionalParagraphSpacing(
+      paragraphSpacingBeforeField, label: "Extra space before")
+    guard spacingBeforeInput.isEmpty || spacingBefore != nil else { return }
+    let spacingAfterInput = paragraphSpacingAfterField.stringValue.trimmingCharacters(
+      in: .whitespacesAndNewlines)
+    let spacingAfter = parseAdditionalParagraphSpacing(
+      paragraphSpacingAfterField, label: "Extra space after")
+    guard spacingAfterInput.isEmpty || spacingAfter != nil else { return }
     let options = ParagraphReflowOptions(
       alignment: alignment,
+      firstLineIndent: firstLineIndent,
       lineSpacing: lineSpacing,
+      additionalParagraphSpacingBefore: spacingBefore,
+      additionalParagraphSpacingAfter: spacingAfter,
       overflow: [
         ParagraphReflowOptions.Overflow.allow, .clip, .shrinkToFit,
       ][max(0, min(overflowPopup.indexOfSelectedItem, 2))])

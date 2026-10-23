@@ -32,6 +32,10 @@ public struct ParagraphReflowOptions: Sendable, Equatable {
   /// Positive indents the first line; negative outdents it (hanging indent).
   public var firstLineIndent: Double?
   public var lineSpacing: Double?
+  /// Additional space before the paragraph, moving it down the page.
+  public var additionalParagraphSpacingBefore: Double?
+  /// Additional space after the paragraph, moving following same-column content down.
+  public var additionalParagraphSpacingAfter: Double?
   public var overflow: Overflow
   /// When false (default), a plan that collides with other content is refused.
   public var allowCollisions: Bool
@@ -48,18 +52,24 @@ public struct ParagraphReflowOptions: Sendable, Equatable {
 
   public init(
     alignment: TextParagraphCandidate.Alignment? = nil, firstLineIndent: Double? = nil,
-    lineSpacing: Double? = nil, overflow: Overflow = .allow, allowCollisions: Bool = false,
+    lineSpacing: Double? = nil, additionalParagraphSpacingBefore: Double? = nil,
+    additionalParagraphSpacingAfter: Double? = nil, overflow: Overflow = .allow,
+    allowCollisions: Bool = false,
     spans: [ParagraphSpan]? = nil, allowLowConfidence: Bool = false,
     downstreamShift: Bool = false, maxDownstreamShift: Double = 300
   ) {
     self.alignment = alignment
     self.firstLineIndent = firstLineIndent
     self.lineSpacing = lineSpacing
+    self.additionalParagraphSpacingBefore = additionalParagraphSpacingBefore
+    self.additionalParagraphSpacingAfter = additionalParagraphSpacingAfter
     self.overflow = overflow
     self.allowCollisions = allowCollisions
     self.spans = spans
     self.allowLowConfidence = allowLowConfidence
     self.downstreamShift = downstreamShift
+      || (additionalParagraphSpacingBefore ?? 0) > 0
+      || (additionalParagraphSpacingAfter ?? 0) > 0
     self.maxDownstreamShift = maxDownstreamShift
   }
 }
@@ -243,6 +253,15 @@ public enum ParagraphReflow {
     let boxWidth = max(24, box[2] - box[0])
     let boxHeight = max(candidate.fontSize, box[3] - box[1])
     let alignment = options.alignment ?? candidate.alignment
+    let spacingBefore = options.additionalParagraphSpacingBefore ?? 0
+    let spacingAfter = options.additionalParagraphSpacingAfter ?? 0
+    guard [spacingBefore, spacingAfter].allSatisfy({ $0.isFinite && (0...100).contains($0) })
+    else {
+      throw PDFError(.malformed, "Additional paragraph spacing must be between 0 and 100 points")
+    }
+    let shiftsDownstream = options.downstreamShift || spacingBefore > 0 || spacingAfter > 0
+    let indent = (alignment == .left || alignment == .justified)
+      ? (options.firstLineIndent ?? candidate.firstLineIndent) : 0
     var warnings: [String] = []
     let paragraphs = tokenParagraphs(spans: spans)
     let baseSize = context.styles.map(\.fontSize).max() ?? candidate.fontSize
@@ -257,10 +276,18 @@ public enum ParagraphReflow {
       let spacing = options.lineSpacing ?? max(candidate.lineSpacing, size * 1.05)
       let capacity = max(
         candidate.lineIndices.count, Int(floor((boxHeight - size * 0.2) / spacing)) + 1)
-      let lines = wrap(paragraphs, width: boxWidth, context: context, scale: size / baseSize)
+      let lines = wrap(
+        paragraphs, width: boxWidth, firstLineWidth: max(24, boxWidth - indent),
+        context: context, scale: size / baseSize)
+      let verticalOverflow = !lines.isEmpty
+        && box[3] - size * 0.8 - spacingBefore
+          - Double(lines.count - 1) * spacing - size * 0.2 < box[1] - 0.5
       let overflowed =
-        lines.count > capacity
-        || lines.contains { lineWidth($0, context: context, scale: size / baseSize) > boxWidth + 0.5 }
+        lines.count > capacity || verticalOverflow
+        || lines.enumerated().contains { index, line in
+          let width = lineWidth(line, context: context, scale: size / baseSize)
+          return width + (index == 0 ? indent : 0) > boxWidth + 0.5
+        }
       switch options.overflow {
       case .shrinkToFit:
         chosen = (lines, size, overflowed)
@@ -291,7 +318,6 @@ public enum ParagraphReflow {
     let scale = size / baseSize
     let spacing = options.lineSpacing ?? max(candidate.lineSpacing, size * 1.05)
     let ascent = size * 0.8
-    let indent = options.firstLineIndent ?? candidate.firstLineIndent
     var lines: [ReflowLine] = []
     for (index, tokens) in chosen.lines.enumerated() {
       let segments = groupedSegments(tokens, context: context, scale: scale)
@@ -347,7 +373,7 @@ public enum ParagraphReflow {
       lines.append(
         ReflowLine(
           text: tokens.map(\.text).joined(separator: " "), segments: placed, x: x,
-          y: box[3] - ascent - Double(index) * spacing, fontSize: size))
+          y: box[3] - ascent - spacingBefore - Double(index) * spacing, fontSize: size))
     }
 
     // P19-024: a source map from new lines/segments back to the original runs.
@@ -381,10 +407,10 @@ public enum ParagraphReflow {
     var downstreamDelta = 0.0
     var downstreamText: [ReflowDownstreamTarget] = []
     var downstreamAnnotations: [ReflowAnnotationTarget] = []
-    if options.downstreamShift, let lastLine = lines.last {
+    if shiftsDownstream, let lastLine = lines.last {
       let newBottom = lastLine.y - size * 0.2
       // bounds are [x0, y0, x1, y1]: the paragraph's bottom is box[1].
-      downstreamDelta = max(0, box[1] - newBottom)
+      downstreamDelta = max(0, box[1] - newBottom) + spacingAfter
       if downstreamDelta > 0.01 {
         let allRuns = try TextRunIndexer.runs(in: context.content, graph: graph)
         let paragraphRuns = Set(candidate.runIndices)
@@ -436,7 +462,7 @@ public enum ParagraphReflow {
         // Blocks that share runs with this paragraph (manual merges, split
         // parts) are never collisions.
         if !Set(other.runIndices).isDisjoint(with: candidate.runIndices) { continue }
-        if options.downstreamShift, !movedRuns.isEmpty,
+        if shiftsDownstream, !movedRuns.isEmpty,
           other.runIndices.allSatisfy({ movedRuns.contains($0) })
         {
           continue
@@ -565,9 +591,11 @@ public enum ParagraphReflow {
   /// Greedy word wrap with punctuation rules; long words are never hyphenated
   /// or split silently.
   static func wrap(
-    _ paragraphs: [[Token]], width: Double, context: Context, scale: Double
+    _ paragraphs: [[Token]], width: Double, firstLineWidth: Double? = nil,
+    context: Context, scale: Double
   ) -> [[Token]] {
     var lines: [[Token]] = []
+    var isFirstLine = true
     for paragraph in paragraphs {
       var current: [Token] = []
       for token in paragraph {
@@ -576,7 +604,8 @@ public enum ParagraphReflow {
           continue
         }
         let candidate = current + [token]
-        if lineWidth(candidate, context: context, scale: scale) <= width {
+        let availableWidth = isFirstLine ? (firstLineWidth ?? width) : width
+        if lineWidth(candidate, context: context, scale: scale) <= availableWidth {
           current = candidate
           continue
         }
@@ -587,13 +616,16 @@ public enum ParagraphReflow {
         if let last = current.last?.text.last, "([{«".contains(last) {
           let moved = current.removeLast()
           lines.append(current)
+          isFirstLine = false
           current = [moved, token]
           continue
         }
         lines.append(current)
+        isFirstLine = false
         current = [token]
       }
       lines.append(current)
+      isFirstLine = false
     }
     return lines
   }

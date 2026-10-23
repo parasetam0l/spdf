@@ -39,6 +39,12 @@ public enum CrossPageReflow {
     guard !region.isEmpty else {
       throw PDFError(.malformed, "The region has no pages")
     }
+    guard (options.additionalParagraphSpacingBefore ?? 0) == 0,
+      (options.additionalParagraphSpacingAfter ?? 0) == 0
+    else {
+      throw PDFError(
+        .unsupported, "Cross-page reflow does not support paragraph spacing adjustments yet")
+    }
     guard options.overflow != .shrinkToFit else {
       throw PDFError(.unsupported, "Cross-page regions do not support shrink-to-fit yet")
     }

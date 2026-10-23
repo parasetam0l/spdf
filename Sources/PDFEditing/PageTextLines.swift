@@ -1543,8 +1543,9 @@ public struct RewritePageTextCommand: PDFEditCommand, Equatable, Sendable {
       firstTransform[0] > 0, abs(firstTransform[1]) <= 1e-8
     else { return refuse(at: #line) }
 
-    // Keep this path to actual multi-line or multi-MCID paragraphs. The
-    // established one-line, one-scope writer also supports length changes.
+    // Keep this path for nontrivial tagged layouts. The established one-line,
+    // one-scope writer handles ordinary single-resource text, while mixed
+    // resources need this path to preserve per-run style on later edits.
     let selectedInstructionIndices = Set(runs.map(\.instructionIndex))
     let markedRanges = StructureTaggingAssistant.markedRanges(in: content)
     for instructionIndex in selectedInstructionIndices {
@@ -1559,6 +1560,7 @@ public struct RewritePageTextCommand: PDFEditCommand, Equatable, Sendable {
       }.compactMap(\.mcid)
     })
     let hasExplicitWordSpacing = runs.contains { abs($0.wordSpacing) >= 1e-8 }
+    let hasMixedFontResources = Set(runs.map(\.fontResource)).count > 1
     guard case .dictionary(let page)? = graph.objects[pageID] else { return refuse(at: #line) }
     let selectedFontResources = Set(runs.map(\.fontResource))
     let requiresSameFaceSubsetFallback = lines.contains { line in
@@ -1576,7 +1578,7 @@ public struct RewritePageTextCommand: PDFEditCommand, Equatable, Sendable {
       }
     }
     guard lines.count > 1 || distinctMCIDs.count > 1 || hasExplicitWordSpacing
-      || requiresSameFaceSubsetFallback else {
+      || requiresSameFaceSubsetFallback || hasMixedFontResources else {
       return refuse(at: #line)
     }
 
