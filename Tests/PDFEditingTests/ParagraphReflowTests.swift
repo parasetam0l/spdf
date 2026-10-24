@@ -161,6 +161,42 @@ struct ParagraphReflowTests {
     #expect(layoutText.contains("Second line remains readable."))
   }
 
+  @Test func editedMixedFontReflowUsesCoveredFonts() throws {
+    let graph = mixedFontGraph()
+    let pageID = try PDFPageTree.pageIDs(in: graph)[0]
+    let candidate = try paragraph(graph, pageID: pageID)
+    let replacement = candidate.text.replacingOccurrences(of: "Mixed", with: "Mixer")
+    let plan = try ParagraphReflow.plan(
+      pageID: pageID, candidate: candidate, replacement: replacement,
+      in: graph).plan
+    let resources = Set(
+      plan.lines.flatMap(\.segments).map { plan.styles[$0.styleIndex].fontResource })
+    #expect(resources == ["F1", "F2"])
+    let edited = try PDFEditingEngine.commit(
+      PDFTransaction([
+        ReflowParagraphCommand(
+          pageID: pageID, candidate: candidate, replacement: replacement)
+      ]), to: graph)
+    let layout = try PageTextLayout.build(pageID: pageID, in: edited)
+    let layoutText = layout.clusters.map(\.text).joined()
+      .split(whereSeparator: \.isWhitespace).joined(separator: " ")
+    #expect(layoutText.contains("Mixer words stay together."))
+  }
+
+  @Test func editedMixedFontReflowRefusesUncoveredCharactersWithAReason() throws {
+    let graph = mixedFontGraph()
+    let pageID = try PDFPageTree.pageIDs(in: graph)[0]
+    let candidate = try paragraph(graph, pageID: pageID)
+    do {
+      _ = try ParagraphReflow.plan(
+        pageID: pageID, candidate: candidate, replacement: "漢",
+        in: graph)
+      Issue.record("Mixed-font reflow accepted a character no source font covers")
+    } catch let error as PDFError {
+      #expect(error.message == PageTextFontCapability.uncoveredCharacterMessage("漢"))
+    }
+  }
+
   private func paragraph(_ graph: PDFGraph, pageID: PDFObjectID) throws
     -> TextParagraphCandidate
   {

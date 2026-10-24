@@ -41,10 +41,8 @@ public enum NativeParagraphEditing {
     metricWitnessText: String) -> [SourceGlyphPiece]? {
     let alternatives = profiles.keys.sorted().compactMap { profiles[$0] }.filter { candidate in
       candidate.source.resource != preferredProfile.source.resource
-        && normalizedEmbeddedFace(candidate.source.name)
-          == normalizedEmbeddedFace(preferredProfile.source.name)
-        && hasMatchingSharedGlyphMetrics(source: preferredProfile, candidate: candidate,
-          sourceText: metricWitnessText)
+        && PageTextFontCapability.canUseSubset(
+          source: preferredProfile, candidate: candidate, witnessText: metricWitnessText)
     }
     let orderedProfiles = [preferredProfile] + alternatives
     let candidates = orderedProfiles.enumerated().flatMap { profileIndex, profile in
@@ -73,31 +71,6 @@ public enum NativeParagraphEditing {
       utf16Offset += length
     }
     return pieces
-  }
-
-  private static func normalizedEmbeddedFace(_ name: String) -> String {
-    let bytes = Array(name.utf8)
-    if bytes.count > 7, bytes[6] == 43,
-      bytes[..<6].allSatisfy({ (65...90).contains($0) })
-    {
-      return String(decoding: bytes.dropFirst(7), as: UTF8.self).lowercased()
-    }
-    return name.lowercased()
-  }
-
-  private static func hasMatchingSharedGlyphMetrics(
-    source: PageTextFontProfile, candidate: PageTextFontProfile, sourceText: String
-  ) -> Bool {
-    var sharedGlyphs = Set<String>()
-    for scalar in sourceText.unicodeScalars {
-      let text = String(scalar)
-      guard let sourceGlyph = source.glyphs[text],
-        let candidateGlyph = candidate.glyphs[text] else { continue }
-      guard sourceGlyph.width.isFinite, candidateGlyph.width.isFinite,
-        abs(sourceGlyph.width - candidateGlyph.width) <= 0.001 else { return false }
-      sharedGlyphs.insert(text)
-    }
-    return sharedGlyphs.count >= 2
   }
 
   /// Returns the text-bearing range of a visual line. TextKit includes the

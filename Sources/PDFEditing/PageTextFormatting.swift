@@ -300,13 +300,7 @@ enum PageTextLineWriter {
   }
 
   static func normalizedEmbeddedFace(_ baseFont: String) -> String {
-    let bytes = Array(baseFont.utf8)
-    if bytes.count > 7, bytes[6] == 43,
-      bytes[..<6].allSatisfy({ (65...90).contains($0) })
-    {
-      return String(decoding: bytes.dropFirst(7), as: UTF8.self).lowercased()
-    }
-    return baseFont.lowercased()
+    PageTextFontCapability.normalizedEmbeddedFace(baseFont)
   }
 
   static func hasMatchingSharedGlyphMetrics(
@@ -317,27 +311,9 @@ enum PageTextLineWriter {
     guard (!source.hasEmbeddedProgram || sourceProfile != nil),
       (!candidate.hasEmbeddedProgram || candidateProfile != nil)
     else { return false }
-
-    var sharedGlyphs = Set<String>()
-    for scalar in sourceText.unicodeScalars {
-      let text = String(scalar)
-      guard let sourceCodes = source.encode(text), let sourceGlyphs = source.glyphs(sourceCodes),
-        sourceGlyphs.count == 1, sourceGlyphs[0].text == text,
-        let candidateCodes = candidate.encode(text),
-        let candidateGlyphs = candidate.glyphs(candidateCodes),
-        candidateGlyphs.count == 1, candidateGlyphs[0].text == text
-      else { continue }
-      if let sourceProfile,
-        !source.sourceGlyphsMatchProfile(sourceGlyphs, profile: sourceProfile) { continue }
-      if let candidateProfile,
-        !candidate.sourceGlyphsMatchProfile(candidateGlyphs, profile: candidateProfile) { continue }
-      guard let sourceWidth = sourceGlyphs[0].width, sourceWidth.isFinite,
-        let candidateWidth = candidateGlyphs[0].width, candidateWidth.isFinite
-      else { continue }
-      guard abs(sourceWidth - candidateWidth) <= 0.001 else { return false }
-      sharedGlyphs.insert(text)
-    }
-    return sharedGlyphs.count >= 2
+    guard let sourceProfile, let candidateProfile else { return false }
+    return PageTextFontCapability.canUseSubset(
+      source: sourceProfile, candidate: candidateProfile, witnessText: sourceText)
   }
   static func originalContent(pageID: PDFObjectID, in graph: PDFGraph) throws -> PageContent {
     let content = try PageContent.load(pageID: pageID, in: graph)

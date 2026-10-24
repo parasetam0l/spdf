@@ -381,12 +381,18 @@ public enum ParagraphReflow {
         "The paragraph reconstruction confidence is low "
           + "(\(Int((candidate.confidence * 100).rounded()))%); confirm explicitly to reflow it")
     }
-    let spans = options.spans
-      ?? automaticSourceSpans(
-        candidate: candidate, replacement: replacement, context: context)
-      ?? defaultSpans(
+    let spans: [ParagraphSpan]
+    if let explicit = options.spans {
+      spans = explicit
+    } else if let automatic = try automaticSourceSpans(
+      candidate: candidate, replacement: replacement, context: context)
+    {
+      spans = automatic
+    } else {
+      spans = defaultSpans(
         candidate: candidate, replacement: replacement, context: context,
         preserveLineStyles: candidate.confidence < 0.6)
+    }
     for span in spans {
       guard span.styleIndex >= 0, span.styleIndex < context.styles.count else {
         throw PDFError(.malformed, "A replacement span references a missing style")
@@ -651,18 +657,23 @@ public enum ParagraphReflow {
     return (plan, collisions)
   }
 
-  /// TXT-01: for a source-identical reflow, recover the paragraph's original
-  /// per-character font resources in reading order. This is deliberately
-  /// narrower than arbitrary mixed-font editing: the replacement must match
-  /// the canonical reconstructed text after outer whitespace trimming, and the
-  /// source characters must align exactly. If either check fails, callers keep
-  /// the existing refusal path instead of guessing a font.
+  /// TXT-02: assign replacement characters to the paragraph's source fonts.
+  /// Unchanged characters retain their original subset through an LCS
+  /// alignment; inserted characters prefer the nearest source style and may
+  /// use another embedded subset only when the shared face/metrics policy
+  /// proves compatibility. Source-identical reflow uses the same mapping, so
+  /// inline and reflow expose one font-capability rule.
   static func automaticSourceSpans(
     candidate: TextParagraphCandidate, replacement: String, context: Context
-  ) -> [ParagraphSpan]? {
+  ) throws -> [ParagraphSpan]? {
     let replacementText = replacement.trimmingCharacters(in: .whitespacesAndNewlines)
     let candidateText = candidate.text.trimmingCharacters(in: .whitespacesAndNewlines)
-    guard replacementText == candidateText, !candidateText.isEmpty else { return nil }
+    guard !candidateText.isEmpty, !replacementText.isEmpty else { return nil }
+    let styleKeys = Set(candidate.runStyles.map {
+      "\($0.fontResource)|\(String(format: "%.3f", $0.fontSize))|\($0.fillColor)"
+    })
+    guard styleKeys.count > 1 || replacementText == candidateText else { return nil }
+
     var sourceCharacters: [(character: Character, styleIndex: Int)] = []
     for (offset, _) in candidate.runIndices.enumerated() {
       guard offset < candidate.runStyles.count, offset < context.styles.count,
@@ -672,38 +683,187 @@ public enum ParagraphReflow {
         sourceCharacters.append((character, offset))
       }
     }
-    let targetCharacters = candidateText.filter { !$0.isWhitespace }
-    guard !sourceCharacters.isEmpty, sourceCharacters.count == targetCharacters.count else {
-      return nil
-    }
-    var spans: [ParagraphSpan] = []
-    var sourceIndex = 0
-    var wordHasSpan = false
-    for character in candidateText {
-      if character.isWhitespace {
-        wordHasSpan = false
-        continue
+    guard !sourceCharacters.isEmpty else { return nil }
+    let targetCharacters = Array(replacementText.filter { !$0.isWhitespace })
+    guard !targetCharacters.isEmpty else { return nil }
+
+    var profiles: [String: PageTextFontProfile?] = [:]
+    var capabilities: [StyleCapability] = []
+    var seenStyles = Set<String>()
+    for index in context.styles.indices {
+      guard index < context.fonts.count else { continue }
+      let style = context.styles[index]
+      let key = "\(style.fontResource)|\(String(format: "%.3f", style.fontSize))|\(style.fillColor)"
+      guard seenStyles.insert(key).inserted else { continue }
+      let profile: PageTextFontProfile?
+      if let cached = profiles[style.fontResource] {
+        profile = cached
+      } else {
+        profile = context.fonts[index].profile
+        profiles[style.fontResource] = profile
       }
-      guard sourceIndex < sourceCharacters.count,
-        sourceCharacters[sourceIndex].character == character
-      else { return nil }
-      let styleIndex = sourceCharacters[sourceIndex].styleIndex
-      let joinsPrevious = wordHasSpan
-      if joinsPrevious, let last = spans.last, last.styleIndex == styleIndex {
+      capabilities.append(
+        StyleCapability(
+          styleIndex: index, resource: style.fontResource,
+          font: context.fonts[index], profile: profile,
+          baseFont: context.fonts[index].baseFont,
+          fontSize: style.fontSize, fillColor: style.fillColor))
+    }
+    guard let baseCapability = capabilities.first else { return nil }
+    let mapping = longestCommonSubsequenceMap(
+      sourceCharacters.map(\.character), targetCharacters)
+
+    func nearestMappedStyle(before targetIndex: Int) -> Int {
+      var distance = 1
+      while distance <= max(targetIndex, targetCharacters.count - targetIndex) {
+        if targetIndex - distance >= 0, targetIndex - distance < mapping.count,
+          let sourceIndex = mapping[targetIndex - distance]
+        {
+          return sourceCharacters[sourceIndex].styleIndex
+        }
+        if targetIndex + distance < mapping.count,
+          let sourceIndex = mapping[targetIndex + distance]
+        {
+          return sourceCharacters[sourceIndex].styleIndex
+        }
+        distance += 1
+      }
+      return baseCapability.styleIndex
+    }
+
+    func compatible(_ candidate: StyleCapability, with preferred: StyleCapability) -> Bool {
+      if candidate.styleIndex == preferred.styleIndex { return true }
+      if candidate.resource == preferred.resource { return true }
+      guard let sourceProfile = preferred.profile,
+        let candidateProfile = candidate.profile
+      else { return false }
+      return PageTextFontCapability.canUseSubset(
+        source: sourceProfile, candidate: candidateProfile, witnessText: candidateText)
+    }
+
+    func style(
+      for character: Character, preferredIndex: Int
+    ) throws -> Int {
+      guard preferredIndex >= 0, preferredIndex < context.styles.count else {
+        return baseCapability.styleIndex
+      }
+      let preferred = capabilities.first { $0.styleIndex == preferredIndex }
+        ?? StyleCapability(
+          styleIndex: preferredIndex, resource: context.styles[preferredIndex].fontResource,
+          font: context.fonts[preferredIndex], profile: context.fonts[preferredIndex].profile,
+          baseFont: context.fonts[preferredIndex].baseFont,
+          fontSize: context.styles[preferredIndex].fontSize,
+          fillColor: context.styles[preferredIndex].fillColor)
+      let text = String(character)
+      if context.encode(text, styleIndex: preferredIndex) != nil {
+        return preferredIndex
+      }
+      let compatibleStyles = capabilities.filter {
+        compatible($0, with: preferred)
+          && context.encode(text, styleIndex: $0.styleIndex) != nil
+      }
+      if let sameAppearance = compatibleStyles.first(where: {
+        abs($0.fontSize - preferred.fontSize) < 0.01
+          && zip($0.fillColor, preferred.fillColor).allSatisfy { abs($0 - $1) < 1e-6 }
+      }) {
+        return sameAppearance.styleIndex
+      }
+      if let match = compatibleStyles.first {
+        return match.styleIndex
+      }
+      throw PDFError(
+        .unsupported, PageTextFontCapability.uncoveredCharacterMessage(text))
+    }
+
+    var spans: [ParagraphSpan] = []
+    var targetIndex = 0
+    var wordHasSpan = false
+    var lastStyle = baseCapability.styleIndex
+
+    func append(_ text: String, styleIndex: Int, joinsPrevious: Bool) {
+      if joinsPrevious, let last = spans.last, last.styleIndex == styleIndex,
+        !last.text.hasSuffix("\n")
+      {
         spans[spans.count - 1] = ParagraphSpan(
-          text: last.text + String(character), styleIndex: styleIndex,
+          text: last.text + text, styleIndex: styleIndex,
           joinsPrevious: last.joinsPrevious)
       } else {
         spans.append(
           ParagraphSpan(
-            text: String(character), styleIndex: styleIndex,
-            joinsPrevious: joinsPrevious))
+            text: text, styleIndex: styleIndex, joinsPrevious: joinsPrevious))
       }
-      wordHasSpan = true
-      sourceIndex += 1
+      lastStyle = styleIndex
     }
-    guard sourceIndex == sourceCharacters.count else { return nil }
+
+    for character in replacementText {
+      if character == "\n" {
+        append("\n", styleIndex: lastStyle, joinsPrevious: false)
+        wordHasSpan = false
+        continue
+      }
+      if character.isWhitespace {
+        wordHasSpan = false
+        continue
+      }
+      let preferredIndex = mapping[targetIndex].map {
+        sourceCharacters[$0].styleIndex
+      } ?? nearestMappedStyle(before: targetIndex)
+      let styleIndex = try style(for: character, preferredIndex: preferredIndex)
+      append(
+        String(character), styleIndex: styleIndex,
+        joinsPrevious: wordHasSpan)
+      wordHasSpan = true
+      targetIndex += 1
+    }
+    guard targetIndex == targetCharacters.count else { return nil }
     return spans.isEmpty ? nil : spans
+  }
+
+  private struct StyleCapability {
+    let styleIndex: Int
+    let resource: String
+    let font: IndexedTextFont
+    let profile: PageTextFontProfile?
+    let baseFont: String
+    let fontSize: Double
+    let fillColor: [Double]
+  }
+
+  /// Target-index -> source-index for unchanged characters. A bounded LCS
+  /// keeps style attribution deterministic without changing word grouping;
+  /// inserted text falls back to the nearest mapped style.
+  static func longestCommonSubsequenceMap(
+    _ source: [Character], _ target: [Character]
+  ) -> [Int?] {
+    guard source.count <= 2_000, target.count <= 2_000 else {
+      return Array(repeating: nil, count: target.count)
+    }
+    var table = Array(
+      repeating: Array(repeating: 0, count: target.count + 1),
+      count: source.count + 1)
+    for i in 1...source.count {
+      for j in 1...target.count {
+        table[i][j] =
+          source[i - 1] == target[j - 1]
+          ? table[i - 1][j - 1] + 1
+          : max(table[i - 1][j], table[i][j - 1])
+      }
+    }
+    var mapping = Array<Int?>(repeating: nil, count: target.count)
+    var i = source.count
+    var j = target.count
+    while i > 0, j > 0 {
+      if source[i - 1] == target[j - 1] {
+        mapping[j - 1] = i - 1
+        i -= 1
+        j -= 1
+      } else if table[i - 1][j] >= table[i][j - 1] {
+        i -= 1
+      } else {
+        j -= 1
+      }
+    }
+    return mapping
   }
 
   /// P19-023: default replacement spans. High-confidence paragraphs use one

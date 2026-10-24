@@ -138,7 +138,7 @@ struct TextFormattingInteropTests {
     unrelatedFormatting.render(scale: 1, minimumLineSpacing: 19)
     unrelatedView.setSelectedRange(NSRange(location: 2, length: 0))
     let refused = unrelatedFormatting.insertionPlan("C", replacing: unrelatedView.selectedRange())
-    #expect(refused.issue != nil)
+    #expect(refused.issue == PageTextFontCapability.uncoveredCharacterMessage("C"))
     #expect(!refused.usesSourceFontFallback)
     #expect(refused.attributedText == nil)
   }
@@ -180,6 +180,34 @@ struct TextFormattingInteropTests {
       .init(text: "B", format: original),
       .init(text: "A", format: PageTextFormat(size: 16, sourceFont: second)),
     ])
+  }
+
+  @Test @MainActor func sameFaceTinySubsetWithoutSharedWitnessIsUsableForItsOwnGlyph() throws {
+    let program = try #require(Data(base64Encoded: FontFixtureData.subsetProgramBase64))
+    let inspector = try TrueTypeInspector.inspect(program, requireUnicodeMap: false)
+    let first = PageTextSourceFont(resource: PDFName("TT1"), name: "ABCDEF+DejaVuSans")
+    let tiny = PageTextSourceFont(resource: PDFName("TT3"), name: "GHIJKL+DejaVuSans")
+    let glyphA = PageTextFontProfile.Glyph(
+      id: inspector.unicodeToGlyph[0x41]!, width: 700, codes: [0x41])
+    let glyphB = PageTextFontProfile.Glyph(
+      id: inspector.unicodeToGlyph[0x42]!, width: 700, codes: [0x42])
+    let glyphC = PageTextFontProfile.Glyph(
+      id: inspector.unicodeToGlyph[0x43]!, width: 700, codes: [0x43])
+    let firstProfile = PageTextFontProfile(
+      source: first, program: program, glyphs: ["A": glyphA, "B": glyphB])
+    let tinyProfile = PageTextFontProfile(
+      source: tiny, program: program, glyphs: ["C": glyphC])
+    let base = PageTextFormat(size: 16, sourceFont: first)
+    let view = FormatTestTextView(frame: .zero)
+    let formatting = NativeTextFormatting(
+      view: view, fragments: [.init(text: "AB", format: base)], initial: base,
+      profiles: [first.resource: firstProfile, tiny.resource: tinyProfile])
+    formatting.render(scale: 1, minimumLineSpacing: 19)
+    view.setSelectedRange(NSRange(location: 2, length: 0))
+    let plan = formatting.insertionPlan("C", replacing: view.selectedRange())
+    #expect(plan.issue == nil)
+    #expect(plan.usesSourceFontFallback)
+    #expect(plan.fragments.map { $0.format.sourceFont?.resource } == [tiny.resource])
   }
 
   @Test @MainActor func acceptedLicensedFontPreviewsFormatsAndPersistsParagraphText() throws {

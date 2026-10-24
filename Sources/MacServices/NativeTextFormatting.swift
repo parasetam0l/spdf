@@ -178,7 +178,7 @@ public final class NativeTextFormatting {
           appendFragment(String(scalar), format: alternative)
         } else {
           return .init(usesSourceFontFallback: false, fragments: fragments, attributedText: nil,
-            issue: "No font already used by this paragraph can represent “\(String(scalar))”. Choose another font or remove that character.")
+            issue: PageTextFontCapability.uncoveredCharacterMessage(String(scalar)))
         }
       }
     }
@@ -241,10 +241,8 @@ public final class NativeTextFormatting {
         PageTextSourceFont.canWriteInline(value) else { return nil }
       if let baseSource = base.sourceFont {
         guard let sourceProfile = profiles[baseSource.resource],
-          Self.normalizedEmbeddedFace(profile.source.name)
-            == Self.normalizedEmbeddedFace(baseSource.name),
-          Self.hasMatchingSharedGlyphMetrics(
-            source: sourceProfile, candidate: profile, sourceText: sourceText) else { return nil }
+          PageTextFontCapability.canUseSubset(
+            source: sourceProfile, candidate: profile, witnessText: sourceText) else { return nil }
       }
       let nearest = current.compactMap { entry -> Int? in
         guard entry.format.sourceFont?.resource == resource else { return nil }
@@ -270,30 +268,6 @@ public final class NativeTextFormatting {
     var result = base
     result.sourceFont = sorted[0].source
     return result
-  }
-
-  private static func normalizedEmbeddedFace(_ name: String) -> String {
-    let bytes = Array(name.utf8)
-    if bytes.count > 7, bytes[6] == 43,
-      bytes[..<6].allSatisfy({ (65...90).contains($0) })
-    {
-      return String(decoding: bytes.dropFirst(7), as: UTF8.self).lowercased()
-    }
-    return name.lowercased()
-  }
-
-  private static func hasMatchingSharedGlyphMetrics(
-    source: PageTextFontProfile, candidate: PageTextFontProfile, sourceText: String
-  ) -> Bool {
-    var sharedGlyphs = Set<String>()
-    for scalar in sourceText.unicodeScalars {
-      let text = String(scalar)
-      guard let sourceGlyph = source.glyphs[text], let candidateGlyph = candidate.glyphs[text],
-        sourceGlyph.width.isFinite, candidateGlyph.width.isFinite else { continue }
-      guard abs(sourceGlyph.width - candidateGlyph.width) <= 0.001 else { return false }
-      sharedGlyphs.insert(text)
-    }
-    return sharedGlyphs.count >= 2
   }
 
   private static func coalesced(_ fragments: [PageTextFragment]) -> [PageTextFragment] {
