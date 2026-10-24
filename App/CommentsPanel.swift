@@ -1,3 +1,4 @@
+import AppKit
 import MacServices
 import PDFCore
 import PDFEditing
@@ -14,6 +15,9 @@ struct CommentsPanel: View {
   var onDelete: (Comment) -> Void
   var onReply: (Comment) -> Void
   var onSetStateComments: ([Comment], PDFName?) -> Void
+  var onPreviewStyle: ((Comment, [Double], Double) -> Bool)?
+  var onApplyStyle: ((Comment, [Double], Double) -> Bool)?
+  var onCancelStyle: (() -> Void)?
 
   @State private var pageIndex: Int?
   @State private var subtype: PDFName?
@@ -22,6 +26,22 @@ struct CommentsPanel: View {
   @State private var query = ""
   @State private var dateFilter = DateFilter.any
   @State private var selection = Set<String>()
+  @State private var styleTarget: StyleTarget?
+
+  private struct StyleTarget: Identifiable {
+    let comment: Comment
+    var id: String {
+      if let objectID = comment.annotation.objectID {
+        return "\(objectID.number)-\(objectID.generation)"
+      }
+      return "\(comment.pageIndex)-\(comment.annotation.index)"
+    }
+  }
+
+  private static let styleableSubtypes: Set<PDFName> = [
+    PDFName("Highlight"), PDFName("Underline"), PDFName("StrikeOut"), PDFName("Square"),
+    PDFName("Circle"), PDFName("Line"),
+  ]
 
   private static let subtypes: [PDFName] = [
     PDFName("Highlight"), PDFName("Underline"), PDFName("StrikeOut"), PDFName("Squiggly"),
@@ -248,6 +268,16 @@ struct CommentsPanel: View {
                   Button("Clear Status") { onSetStateComments(targets, nil) }
                 }
                 .disabled(!canEditContent)
+                if let subtype = row.comment.subtype,
+                  Self.styleableSubtypes.contains(subtype)
+                {
+                  Divider()
+                  Button("Appearance…") {
+                    styleTarget = StyleTarget(comment: row.comment)
+                  }
+                  .disabled(!canEditContent)
+                  .help(editingRestrictionNotice ?? "Edit annotation color and opacity")
+                }
                 Divider()
                 Button("Delete Comment", role: .destructive) { onDelete(row.comment) }
                   .disabled(!canEditContent)
@@ -266,6 +296,17 @@ struct CommentsPanel: View {
     .accessibilityElement(children: .contain)
     .accessibilityLabel("Comments")
     .frame(minWidth: 200, idealWidth: 240, maxWidth: 360)
+    .sheet(item: $styleTarget, onDismiss: { onCancelStyle?() }) { target in
+      AnnotationStyleSheet(
+        comment: target.comment,
+        onPreview: { color, opacity in
+          onPreviewStyle?(target.comment, color, opacity) ?? false
+        },
+        onApply: { color, opacity in
+          onApplyStyle?(target.comment, color, opacity) ?? false
+        },
+        onCancel: { onCancelStyle?() })
+    }
   }
 
   private func filterMenu<Content: View>(
@@ -330,6 +371,143 @@ struct CommentsPanel: View {
     case PDFName("Stamp"): return "seal"
     default: return "text.bubble"
     }
+  }
+}
+
+private struct AnnotationStyleSheet: View {
+  let comment: Comment
+  let onPreview: ([Double], Double) -> Bool
+  let onApply: ([Double], Double) -> Bool
+  let onCancel: () -> Void
+
+  @Environment(\.dismiss) private var dismiss
+  @State private var color: Color
+  @State private var opacity: Double
+  @State private var previewAvailable = true
+  @State private var finished = false
+
+  private static let presets: [(name: String, color: Color)] = [
+    ("Yellow", Color(red: 1, green: 0.84, blue: 0)),
+    ("Red", Color(red: 0.9, green: 0.1, blue: 0.1)),
+    ("Green", Color(red: 0.15, green: 0.7, blue: 0.25)),
+    ("Blue", Color(red: 0.15, green: 0.35, blue: 0.9)),
+    ("Black", Color(red: 0, green: 0, blue: 0)),
+  ]
+
+  init(
+    comment: Comment,
+    onPreview: @escaping ([Double], Double) -> Bool,
+    onApply: @escaping ([Double], Double) -> Bool,
+    onCancel: @escaping () -> Void
+  ) {
+    self.comment = comment
+    self.onPreview = onPreview
+    self.onApply = onApply
+    self.onCancel = onCancel
+    let components = comment.annotation.color ?? [1, 0.84, 0]
+    let rgb: [Double]
+    if components.count == 1 {
+      rgb = [components[0], components[0], components[0]]
+    } else {
+      rgb = Array(components.prefix(3))
+    }
+    _color = State(
+      initialValue: Color(
+        .sRGB, red: rgb[0], green: rgb[1], blue: rgb[2], opacity: 1))
+    _opacity = State(
+      initialValue: comment.annotation.opacity
+        ?? (comment.subtype == PDFName("Highlight") ? 0.5 : 1))
+  }
+
+  private var components: [Double] {
+    guard let converted = NSColor(color).usingColorSpace(.sRGB) else { return [0, 0, 0] }
+    return [
+      Double(converted.redComponent), Double(converted.greenComponent),
+      Double(converted.blueComponent),
+    ]
+  }
+
+  private var subtypeLabel: String {
+    comment.subtype.map { CommentsPanel.label(for: $0) } ?? "Annotation"
+  }
+
+  private var opacityText: String {
+    "\(Int((opacity * 100).rounded()))%"
+  }
+
+  private func preview() {
+    guard !finished else { return }
+    previewAvailable = onPreview(components, opacity)
+  }
+
+  var body: some View {
+    VStack(alignment: .leading, spacing: 14) {
+      HStack(alignment: .firstTextBaseline) {
+        Text("Appearance").font(.headline)
+        Spacer()
+        Text(subtypeLabel)
+          .font(.caption)
+          .foregroundStyle(.secondary)
+      }
+      ColorPicker("Color", selection: $color, supportsOpacity: false)
+        .accessibilityLabel("Annotation color")
+      HStack(spacing: 8) {
+        Text("Presets").font(.caption).foregroundStyle(.secondary)
+        ForEach(Array(Self.presets.enumerated()), id: \.offset) { _, preset in
+          Button {
+            color = preset.color
+          } label: {
+            Circle()
+              .fill(preset.color)
+              .overlay(Circle().stroke(.quaternary, lineWidth: 1))
+              .frame(width: 20, height: 20)
+          }
+          .buttonStyle(.plain)
+          .accessibilityLabel("\(preset.name) preset")
+        }
+      }
+      LabeledContent("Opacity") {
+        HStack {
+          Slider(value: $opacity, in: 0.1...1, step: 0.05)
+            .accessibilityLabel("Annotation opacity")
+          Text(opacityText)
+            .monospacedDigit()
+            .foregroundStyle(.secondary)
+            .frame(width: 42, alignment: .trailing)
+        }
+      }
+      if !previewAvailable {
+        Text("Live preview is unavailable for this annotation; Apply may still work.")
+          .font(.caption)
+          .foregroundStyle(.orange)
+      }
+      HStack {
+        Button("Cancel") {
+          finished = true
+          onCancel()
+          dismiss()
+        }
+        .keyboardShortcut(.cancelAction)
+        Spacer()
+        Button("Apply") {
+          if onApply(components, opacity) {
+            finished = true
+            dismiss()
+          }
+        }
+        .keyboardShortcut(.defaultAction)
+      }
+    }
+    .padding(18)
+    .frame(width: 400)
+    .onAppear { preview() }
+    .onChange(of: color) { _, _ in preview() }
+    .onChange(of: opacity) { _, _ in preview() }
+    .onDisappear {
+      if !finished { onCancel() }
+    }
+    .accessibilityElement(children: .contain)
+    .accessibilityLabel("Annotation appearance")
   }
 }
 

@@ -556,6 +556,15 @@ final class SPDFDocument: NSDocument {
         onSetStateComments: { [weak self] comments, state in
           self?.setState(state, on: comments)
         },
+        onPreviewCommentStyle: { [weak self] comment, color, opacity in
+          self?.previewAnnotationStyle(comment, color: color, opacity: opacity) ?? false
+        },
+        onApplyCommentStyle: { [weak self] comment, color, opacity in
+          self?.applyAnnotationStyle(comment, color: color, opacity: opacity) ?? false
+        },
+        onCancelCommentStyle: { [weak self] in
+          self?.endAnnotationStylePreview()
+        },
         onSubmitFormText: { [weak self] name, text in
           self?.fillFormText(fieldName: name, text: text)
         },
@@ -5130,6 +5139,54 @@ final class SPDFDocument: NSDocument {
     setState(state, on: [comment])
   }
 
+  /// REV-02: style edits preview through a display-only document, then commit
+  /// one canonical transaction. Unsupported annotation dictionaries are never
+  /// rewritten.
+  func previewAnnotationStyle(_ comment: Comment, color: [Double], opacity: Double) -> Bool {
+    guard canEditContent, let graph = editSession.currentGraph else { return false }
+    do {
+      let styled = try PDFEditingEngine.commit(
+        PDFTransaction([
+          SetAnnotationStyleCommand(
+            pageID: comment.pageID, annotationIndex: comment.annotation.index,
+            color: color, opacity: opacity)
+        ]), to: graph)
+      let data = try PDFWriter.write(styled)
+      viewer?.previewAnnotationStyle(data)
+      return viewer?.isPreviewingAnnotationStyle == true
+    } catch {
+      return false
+    }
+  }
+
+  func endAnnotationStylePreview() {
+    viewer?.endAnnotationStylePreview()
+  }
+
+  var isPreviewingAnnotationStyle: Bool {
+    viewer?.isPreviewingAnnotationStyle == true
+  }
+
+  @discardableResult
+  func applyAnnotationStyle(_ comment: Comment, color: [Double], opacity: Double) -> Bool {
+    guard canEditContent else { return false }
+    endAnnotationStylePreview()
+    do {
+      try editSession.apply(
+        PDFTransaction([
+          SetAnnotationStyleCommand(
+            pageID: comment.pageID, annotationIndex: comment.annotation.index,
+            color: color, opacity: opacity)
+        ]))
+    } catch {
+      presentError(error)
+      return false
+    }
+    noteUserEdit()
+    refreshViewer(preservingPage: viewer?.pageNumber ?? 0)
+    return true
+  }
+
   /// REV-03: apply one review status to every selected comment atomically.
   func setState(_ state: PDFName?, on comments: [Comment]) {
     guard canEditContent, !comments.isEmpty else { return }
@@ -6586,6 +6643,7 @@ final class SPDFDocument: NSDocument {
     tableReviewModel = nil
     for job in jobCenter.jobs { jobCenter.requestCancel(id: job.id) }
     if let viewer { saveViewState(viewer: viewer) }
+    viewer?.endAnnotationStylePreview()
     // An explicit close means the user decided; stale recovery state is not
     // offered again (P10-021).
     discardRecoveryRecords()

@@ -1468,6 +1468,20 @@
           let highlightRect = highlightComment.annotation.rect
         else { throw PDFError(.malformed, "Expected comments are missing") }
 
+        // REV-02: style edits preview through a display-only document without
+        // changing canonical bytes, and cancellation restores the viewer.
+        let styleBaseline = try first.data(ofType: "com.adobe.pdf")
+        guard
+          first.previewAnnotationStyle(
+            highlightComment, color: [0.1, 0.2, 0.9], opacity: 0.4),
+          first.isPreviewingAnnotationStyle,
+          try first.data(ofType: "com.adobe.pdf") == styleBaseline
+        else { throw PDFError(.malformed, "Annotation style preview failed") }
+        first.endAnnotationStylePreview()
+        guard !first.isPreviewingAnnotationStyle,
+          try first.data(ofType: "com.adobe.pdf") == styleBaseline
+        else { throw PDFError(.malformed, "Annotation style preview did not cancel") }
+
         // Replies and review status (P22-014/P22-015).
         try session.apply(
           PDFTransaction([

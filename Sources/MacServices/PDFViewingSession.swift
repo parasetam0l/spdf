@@ -381,6 +381,8 @@ public final class PDFViewingSession: NSObject, ObservableObject, PDFViewDelegat
   private var observations: Set<AnyCancellable> = []
   private var graphicPreviewState:
     (document: PDFDocument, scale: CGFloat, autoScales: Bool, page: Int, scroll: NSPoint?)?
+  private var annotationPreviewState:
+    (document: PDFDocument, scale: CGFloat, autoScales: Bool, page: Int, scroll: NSPoint?)?
 
   public override init() {
     super.init()
@@ -450,6 +452,7 @@ public final class PDFViewingSession: NSObject, ObservableObject, PDFViewDelegat
 
   public func open(_ source: PDFSource) throws {
     graphicPreviewState = nil
+    annotationPreviewState = nil
     editingRestrictionNotice = nil
     graphicEditRefusal = nil
     textEditRefusal = nil
@@ -487,6 +490,7 @@ public final class PDFViewingSession: NSObject, ObservableObject, PDFViewDelegat
   /// P12-022: close the viewed document without destroying the session.
   public func closeDocument() {
     graphicPreviewState = nil
+    annotationPreviewState = nil
     onPendingPageTextChange?(false)
     isEditingPageText = false
     isTypingPageText = false
@@ -1173,6 +1177,48 @@ public final class PDFViewingSession: NSObject, ObservableObject, PDFViewDelegat
   }
 
   public var isPreviewingGraphic: Bool { graphicPreviewState != nil }
+
+  /// REV-02: display a styled preview document without adopting it. Repeated
+  /// previews keep the original document/scale/page for one cancellation.
+  public func previewAnnotationStyle(_ data: Data) {
+    guard graphicPreviewState == nil, let original = view.document,
+      let preview = PDFDocument(data: data)
+    else { return }
+    if annotationPreviewState == nil {
+      annotationPreviewState = (
+        document: original, scale: view.scaleFactor, autoScales: view.autoScales,
+        page: currentPageIndex, scroll: documentScrollOrigin)
+    }
+    guard let state = annotationPreviewState else { return }
+    view.document = preview
+    view.autoScales = false
+    view.scaleFactor = state.scale
+    view.layoutDocumentView()
+    restoreDocumentScroll(state.scroll)
+    if state.page >= 0, state.page < preview.pageCount,
+      let page = preview.page(at: state.page)
+    {
+      view.go(to: page)
+    }
+  }
+
+  public func endAnnotationStylePreview() {
+    guard let state = annotationPreviewState else { return }
+    annotationPreviewState = nil
+    view.document = state.document
+    view.autoScales = false
+    view.scaleFactor = state.scale
+    view.layoutDocumentView()
+    restoreDocumentScroll(state.scroll)
+    if state.page >= 0, state.page < state.document.pageCount,
+      let page = state.document.page(at: state.page)
+    {
+      view.go(to: page)
+    }
+    view.autoScales = state.autoScales
+  }
+
+  public var isPreviewingAnnotationStyle: Bool { annotationPreviewState != nil }
 
   private var currentPageIndex: Int {
     guard let page = view.currentPage, let document = view.document else { return -1 }

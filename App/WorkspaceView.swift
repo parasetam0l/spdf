@@ -19,6 +19,9 @@ struct WorkspaceView: View {
   var onDeleteComment: (Comment) -> Void
   var onReplyComment: (Comment) -> Void
   var onSetStateComments: ([Comment], PDFName?) -> Void
+  var onPreviewCommentStyle: ((Comment, [Double], Double) -> Bool)?
+  var onApplyCommentStyle: ((Comment, [Double], Double) -> Bool)?
+  var onCancelCommentStyle: (() -> Void)?
   var onSubmitFormText: (String, String) -> Void
   var onDraftFormText: (String, String) -> Void
   var onToggleForm: (String, Bool) -> Void
@@ -476,7 +479,10 @@ struct WorkspaceView: View {
           comments: comments.comments, pageCount: viewer.pageCount,
           canEditContent: canEdit, editingRestrictionNotice: viewer.editingRestrictionNotice,
           onSelect: onSelectComment, onDelete: onDeleteComment,
-          onReply: onReplyComment, onSetStateComments: onSetStateComments)
+          onReply: onReplyComment, onSetStateComments: onSetStateComments,
+          onPreviewStyle: onPreviewCommentStyle,
+          onApplyStyle: onApplyCommentStyle,
+          onCancelStyle: onCancelCommentStyle)
       case .forms:
         FormsPanel(
           fields: forms.fields, orphanedWidgetCount: forms.orphanedWidgetCount,
