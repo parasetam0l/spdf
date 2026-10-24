@@ -522,6 +522,149 @@ public struct SetFormChoiceCommand: PDFEditCommand, Equatable, Sendable {
 
 /// P24-021: reset supported fields to their documented default values (/DV)
 /// by reusing the same fill commands, so appearances stay consistent.
+/// FRM-05: apply whole-field rich-text styling. The plain value stays in /V,
+/// /RV gains matching RTF, and the widget appearance is regenerated with the
+/// selected standard Helvetica variant.
+public struct SetFormRichTextStyleCommand: PDFEditCommand, Equatable, Sendable {
+  public let fieldName: String
+  public let bold: Bool
+  public let italic: Bool
+  public let fontSize: Double
+  public let color: [Double]
+
+  public init(
+    fieldName: String, bold: Bool, italic: Bool, fontSize: Double,
+    color: [Double] = [0, 0, 0]
+  ) {
+    self.fieldName = fieldName
+    self.bold = bold
+    self.italic = italic
+    self.fontSize = fontSize
+    self.color = color
+  }
+
+  public var name: String { "Format Form Text" }
+
+  public func validate(in graph: PDFGraph) throws {
+    let field = try Self.field(named: fieldName, in: graph)
+    guard field.kind == .text, !field.isReadOnly, field.fieldID != nil else {
+      throw PDFError(.unsupported, "Only writable text fields can be styled")
+    }
+    guard fontSize.isFinite, fontSize >= 6, fontSize <= 72 else {
+      throw PDFError(.malformed, "Rich-text size must be in 6...72")
+    }
+    guard color.count == 3, color.allSatisfy({ $0.isFinite && $0 >= 0 && $0 <= 1 }) else {
+      throw PDFError(.malformed, "Rich-text color must be three components in 0...1")
+    }
+    guard AnnotationSupport.escapedLiteral(field.stringValue ?? "") != nil else {
+      throw PDFError(.unsupported, "This field contains characters outside the standard font profile")
+    }
+  }
+
+  public func apply(to graph: PDFGraph) throws -> PDFGraph {
+    var graph = graph
+    let field = try Self.field(named: fieldName, in: graph)
+    guard let fieldID = field.fieldID,
+      case .dictionary(var fieldDictionary)? = graph.objects[fieldID]
+    else {
+      throw PDFError(.malformed, "The form field is missing")
+    }
+    let text = field.stringValue ?? ""
+    let fontName = Self.fontName(bold: bold, italic: italic)
+    var nextNumber = (graph.objects.keys.map(\.number).max() ?? 0) + 1
+    let fontID = Self.standardFontID(
+      named: fontName, in: &graph, nextNumber: &nextNumber)
+    fieldDictionary[PDFName("V")] = .string(AnnotationText.encode(text))
+    fieldDictionary[PDFName("RV")] = .string(
+      Data(
+        RichTextValue.styledText(
+          text, fontName: fontName, fontSize: fontSize, color: color,
+          bold: bold, italic: italic
+        ).utf8))
+    fieldDictionary[PDFName("Ff")] = .integer(
+      (Self.integer(fieldDictionary[PDFName("Ff")]) ?? 0) | 33_554_432)
+    let da = "/\(fontName) \(AnnotationSupport.number(fontSize)) Tf "
+      + "\(AnnotationSupport.number(color[0])) \(AnnotationSupport.number(color[1])) "
+      + "\(AnnotationSupport.number(color[2])) rg"
+    fieldDictionary[PDFName("DA")] = .string(Data(da.utf8))
+    var resources: [PDFName: PDFValue]
+    if case .dictionary(let existing)? = fieldDictionary[PDFName("DR")] {
+      resources = existing
+    } else {
+      resources = [:]
+    }
+    var fonts: [PDFName: PDFValue]
+    if case .dictionary(let existing)? = resources[PDFName("Font")] {
+      fonts = existing
+    } else {
+      fonts = [:]
+    }
+    fonts[PDFName(fontName)] = .reference(fontID)
+    resources[PDFName("Font")] = .dictionary(fonts)
+    fieldDictionary[PDFName("DR")] = .dictionary(resources)
+    graph.objects[fieldID] = .dictionary(fieldDictionary)
+
+    for widget in field.widgets {
+      guard let widgetID = widget.objectID, let rect = widget.rect else { continue }
+      let appearance = SetFormTextCommand.textAppearance(
+        text: text, rect: rect, multiline: field.isMultiline,
+        da: (size: fontSize, color: color), fontID: fontID,
+        comb: field.isComb, maxLength: field.maxLength)
+      nextNumber = try SetFormTextCommand.installAppearance(
+        appearance, widgetID: widgetID, in: &graph, nextNumber: nextNumber)
+    }
+    graph.trailer[PDFName("Size")] = .integer(Int64(nextNumber))
+    return graph
+  }
+
+  static func field(named name: String, in graph: PDFGraph) throws -> FormField {
+    let pageIDs = try PageTreeView(graph: graph).pages
+    let fields = try FormInventory.fields(in: graph, pageIDs: pageIDs)
+    guard let field = fields.first(where: { $0.name == name }) else {
+      throw PDFError(.malformed, "Form field is missing")
+    }
+    return field
+  }
+
+  static func fontName(bold: Bool, italic: Bool) -> String {
+    switch (bold, italic) {
+    case (true, true): return "Helvetica-BoldOblique"
+    case (true, false): return "Helvetica-Bold"
+    case (false, true): return "Helvetica-Oblique"
+    default: return "Helvetica"
+    }
+  }
+
+  static func standardFontID(
+    named name: String, in graph: inout PDFGraph, nextNumber: inout Int
+  ) -> PDFObjectID {
+    for id in graph.objects.keys.sorted() {
+      guard case .dictionary(let dictionary)? = graph.objects[id],
+        dictionary[PDFName("Type")] == .name(PDFName("Font")),
+        dictionary[PDFName("Subtype")] == .name(PDFName("Type1")),
+        dictionary[PDFName("BaseFont")] == .name(PDFName(name)),
+        dictionary[PDFName("Encoding")] == nil
+          || dictionary[PDFName("Encoding")] == .name(PDFName("WinAnsiEncoding"))
+      else { continue }
+      return id
+    }
+    let id = PDFObjectID(nextNumber)
+    nextNumber += 1
+    graph.objects[id] = .dictionary([
+      PDFName("Type"): .name(PDFName("Font")),
+      PDFName("Subtype"): .name(PDFName("Type1")),
+      PDFName("BaseFont"): .name(PDFName(name)),
+      PDFName("Encoding"): .name(PDFName("WinAnsiEncoding")),
+    ])
+    return id
+  }
+
+  static func integer(_ value: PDFValue?) -> Int64? {
+    if case .integer(let raw)? = value { return raw }
+    return nil
+  }
+}
+
 public struct ResetFormCommand: PDFEditCommand, Equatable, Sendable {
   public init() {}
 
@@ -582,6 +725,15 @@ public struct ResetFormCommand: PDFEditCommand, Equatable, Sendable {
 /// of leaving an older rich value next to a newer /V.
 enum RichTextValue {
   static func plainText(_ text: String, fontSize: Double, color: [Double]) -> String {
+    styledText(
+      text, fontName: "Helvetica", fontSize: fontSize, color: color,
+      bold: false, italic: false)
+  }
+
+  static func styledText(
+    _ text: String, fontName: String, fontSize: Double, color: [Double],
+    bold: Bool, italic: Bool
+  ) -> String {
     let size = Int((fontSize * 2).rounded())
     let halfPoints = min(max(size, 2), 32_767)
     let rgb: [Int]
@@ -595,9 +747,18 @@ enum RichTextValue {
       rgb = [0, 0, 0]
     }
     let body = escape(text.replacingOccurrences(of: "\r\n", with: "\n"))
-    return "{\\rtf1\\ansi\\deff0{\\fonttbl{\\f0 Helvetica;}}"
+    let style = (bold ? "\\b" : "") + (italic ? "\\i" : "")
+    let reset = (bold ? "\\b0" : "") + (italic ? "\\i0" : "")
+    return "{\\rtf1\\ansi\\deff0{\\fonttbl{\\f0 \(escapeFontName(fontName));}}"
       + "{\\colortbl;\\red\(rgb[0])\\green\(rgb[1])\\blue\(rgb[2]);}"
-      + "\\f0\\fs\(halfPoints)\\cf1 \(body)}"
+      + "\\f0\\fs\(halfPoints)\\cf1\(style) \(body)\(reset)}"
+  }
+
+  private static func escapeFontName(_ name: String) -> String {
+    name.replacingOccurrences(of: "\\", with: "")
+      .replacingOccurrences(of: "{", with: "")
+      .replacingOccurrences(of: "}", with: "")
+      .replacingOccurrences(of: ";", with: "")
   }
 
   static func escape(_ text: String) -> String {

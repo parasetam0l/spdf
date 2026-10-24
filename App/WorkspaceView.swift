@@ -27,6 +27,7 @@ struct WorkspaceView: View {
   var onToggleForm: (String, Bool) -> Void
   var onSelectFormChoice: (String, String) -> Void
   var onSelectFormField: (FormField) -> Void
+  var onFormatFormText: ((FormField) -> Void)?
   var onSelectSignature: (Int) -> Void
   var onSelectStructurePage: (Int) -> Void
   var onEditStructureRole: (PDFObjectID, String) -> Void
@@ -489,7 +490,8 @@ struct WorkspaceView: View {
           canEditContent: canEdit, editingRestrictionNotice: viewer.editingRestrictionNotice,
           onSubmitText: onSubmitFormText,
           onDraftText: onDraftFormText, onToggle: onToggleForm,
-          onSelectChoice: onSelectFormChoice, onSelect: onSelectFormField)
+          onSelectChoice: onSelectFormChoice, onSelect: onSelectFormField,
+          onRichTextStyle: onFormatFormText)
       case .signatures:
         SignaturesPanel(entries: signatures.entries, onSelect: onSelectSignature)
       case .fonts:

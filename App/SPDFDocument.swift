@@ -577,6 +577,7 @@ final class SPDFDocument: NSDocument {
           self?.setFormChoice(fieldName: name, exportValue: exportValue)
         },
         onSelectFormField: { [weak self] field in self?.navigate(to: field) },
+        onFormatFormText: { [weak self] field in self?.presentFormTextStyle(field) },
         onSelectSignature: { [weak self] pageIndex in
           self?.navigate(toSignatureAt: pageIndex)
         },
@@ -1716,6 +1717,66 @@ final class SPDFDocument: NSDocument {
     noteUserEdit()
     refreshViewer(preservingPage: viewer?.pageNumber ?? 1)
     return true
+  }
+
+  /// FRM-05: whole-field rich-text styling. Commits any pending sidebar text
+  /// in the same transaction before writing /RV and the styled appearance.
+  func presentFormTextStyle(_ field: FormField) {
+    guard canEditContent, field.kind == .text, !field.isReadOnly else { return }
+    let bold = NSButton(checkboxWithTitle: "Bold", target: nil, action: nil)
+    let italic = NSButton(checkboxWithTitle: "Italic", target: nil, action: nil)
+    let sizeField = NSTextField(string: "12")
+    sizeField.frame = NSRect(x: 0, y: 0, width: 70, height: 22)
+    let colorWell = NSColorWell(frame: NSRect(x: 0, y: 0, width: 50, height: 24))
+    colorWell.color = .black
+    let grid = NSGridView(views: [
+      [NSTextField(labelWithString: "Style:"), bold, italic],
+      [NSTextField(labelWithString: "Size (pt):"), sizeField],
+      [NSTextField(labelWithString: "Color:"), colorWell],
+    ])
+    grid.column(at: 0).xPlacement = .trailing
+    grid.frame = NSRect(x: 0, y: 0, width: 360, height: 82)
+    let alert = NSAlert()
+    alert.messageText = "Rich Text Style"
+    alert.informativeText =
+      "Applies to the whole field. Pending text is committed first; existing rich-text runs are replaced."
+    alert.accessoryView = grid
+    alert.addButton(withTitle: "Apply")
+    alert.addButton(withTitle: "Cancel")
+    guard alert.runModal() == .alertFirstButtonReturn else { return }
+    guard let size = Double(sizeField.stringValue), size.isFinite, size >= 6, size <= 72
+    else {
+      presentError(PDFError(.malformed, "Rich-text size must be in 6...72"))
+      return
+    }
+    let converted = colorWell.color.usingColorSpace(.sRGB)
+    let color: [Double]
+    if let converted {
+      color = [
+        Double(converted.redComponent), Double(converted.greenComponent),
+        Double(converted.blueComponent),
+      ]
+    } else {
+      color = [0, 0, 0]
+    }
+    var commands: [any PDFEditCommand] = []
+    if let pending = formsModel.pendingText[field.name], pending != field.stringValue {
+      commands.append(SetFormTextCommand(fieldName: field.name, text: pending))
+    }
+    commands.append(
+      SetFormRichTextStyleCommand(
+        fieldName: field.name, bold: bold.state == .on, italic: italic.state == .on,
+        fontSize: size, color: color))
+    do {
+      try editSession.apply(PDFTransaction(commands))
+    } catch {
+      presentError(error)
+      return
+    }
+    formsModel.pendingText[field.name] = nil
+    pendingFormText.setPending(false, for: field.name)
+    noteUserEdit()
+    refreshViewer(preservingPage: viewer?.pageNumber ?? 1)
   }
 
   /// Keep a sidebar text-field draft visible to NSDocument's save, title-bar,

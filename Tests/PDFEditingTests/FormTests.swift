@@ -202,6 +202,85 @@ struct FormTests {
     #expect(plainField[PDFName("RV")] == nil)
   }
 
+  @Test func richTextStyleWritesValueAppearanceAndFont() throws {
+    let (graph, pageIDs) = try formFixture()
+    let filled = try PDFEditingEngine.commit(
+      PDFTransaction([SetFormTextCommand(fieldName: "name", text: "Styled value")]),
+      to: graph)
+    let styled = try PDFEditingEngine.commit(
+      PDFTransaction([
+        SetFormRichTextStyleCommand(
+          fieldName: "name", bold: true, italic: true, fontSize: 16,
+          color: [0.8, 0.1, 0.2])
+      ]), to: filled)
+    guard case .dictionary(let field)? = styled.objects[PDFObjectID(110)],
+      case .string(let value)? = field[PDFName("V")],
+      case .string(let richValue)? = field[PDFName("RV")],
+      case .string(let da)? = field[PDFName("DA")],
+      case .integer(let flags)? = field[PDFName("Ff")]
+    else {
+      Issue.record("Styled field is missing values")
+      return
+    }
+    #expect(AnnotationText.decode(value) == "Styled value")
+    #expect(flags & 33_554_432 != 0)
+    let rtf = String(decoding: richValue, as: UTF8.self)
+    #expect(rtf.contains("\\b"))
+    #expect(rtf.contains("\\i"))
+    #expect(rtf.contains("\\fs32"))
+    #expect(rtf.contains("\\red204\\green26\\blue51"))
+    #expect(rtf.contains("Helvetica-BoldOblique"))
+    let appearanceString = String(decoding: da, as: UTF8.self)
+    #expect(appearanceString.contains("/Helvetica-BoldOblique 16 Tf"))
+
+    guard case .stream(let appearance)? = styled.objects[PDFObjectID(111)],
+      case .dictionary(let resources)? = appearance.dictionary[PDFName("Resources")],
+      case .dictionary(let fonts)? = resources[PDFName("Font")],
+      case .reference(let fontID)? = fonts[PDFName("F1")],
+      case .dictionary(let fontObject)? = styled.objects[fontID]
+    else {
+      Issue.record("Styled widget appearance or font is missing")
+      return
+    }
+    #expect(fontObject[PDFName("BaseFont")] == .name(PDFName("Helvetica-BoldOblique")))
+    let content = String(decoding: appearance.bytes, as: UTF8.self)
+    #expect(content.contains("(Styled value) Tj"))
+    #expect(content.contains("0.8 0.1 0.2 rg"))
+
+    let reopened = try PDFParser.parse(try PDFWriter.write(styled))
+    let reopenedField = try #require(
+      try FormInventory.fields(in: reopened.graph, pageIDs: pageIDs).first {
+        $0.name == "name"
+      })
+    #expect(reopenedField.isRichText)
+    #expect(reopenedField.stringValue == "Styled value")
+    guard case .dictionary(let reopenedDictionary)? = reopened.graph.objects[PDFObjectID(110)],
+      case .string(let reopenedRV)? = reopenedDictionary[PDFName("RV")]
+    else {
+      Issue.record("Rich style did not survive reopening")
+      return
+    }
+    #expect(String(decoding: reopenedRV, as: UTF8.self).contains("Helvetica-BoldOblique"))
+
+    func refuse(_ command: any PDFEditCommand) {
+      #expect(throws: PDFError.self) {
+        _ = try PDFEditingEngine.commit(PDFTransaction([command]), to: styled)
+      }
+    }
+    refuse(
+      SetFormRichTextStyleCommand(
+        fieldName: "locked", bold: true, italic: false, fontSize: 12))
+    refuse(
+      SetFormRichTextStyleCommand(
+        fieldName: "agree", bold: true, italic: false, fontSize: 12))
+    refuse(
+      SetFormRichTextStyleCommand(
+        fieldName: "name", bold: false, italic: false, fontSize: 200))
+    refuse(
+      SetFormRichTextStyleCommand(
+        fieldName: "missing", bold: false, italic: false, fontSize: 12))
+  }
+
   @Test func buttonStateUpdatesValueAndAppearance() throws {
     let (graph, pageIDs) = try formFixture()
     let checked = try PDFEditingEngine.commit(

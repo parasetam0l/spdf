@@ -16,6 +16,7 @@ struct FormsPanel: View {
   var onToggle: (String, Bool) -> Void
   var onSelectChoice: (String, String) -> Void
   var onSelect: (FormField) -> Void
+  var onRichTextStyle: ((FormField) -> Void)?
 
   var body: some View {
     if fields.isEmpty && orphanedWidgetCount == 0 {
@@ -64,6 +65,16 @@ struct FormsPanel: View {
           Image(systemName: "lock").font(.caption2).foregroundStyle(.secondary)
         }
         Spacer(minLength: 0)
+        if field.kind == .text, canEditContent, !field.isReadOnly {
+          Button {
+            onRichTextStyle?(field)
+          } label: {
+            Image(systemName: "textformat")
+          }
+          .buttonStyle(.borderless)
+          .help("Format field text")
+          .accessibilityLabel("Format \(field.name)")
+        }
         Button {
           onSelect(field)
         } label: {
