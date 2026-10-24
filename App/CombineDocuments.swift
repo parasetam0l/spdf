@@ -42,16 +42,19 @@ struct CombineDocumentsPanel: View {
   @ObservedObject var model: CombineDocumentsModel
   @State private var selection: CombineDocumentsModel.File.ID?
 
+  private var summary: String {
+    let fileWord = model.files.count == 1 ? "file" : "files"
+    let pageWord = model.totalPages == 1 ? "page" : "pages"
+    return "Files are combined top to bottom. "
+      + "\(model.files.count) \(fileWord), \(model.totalPages) \(pageWord)."
+  }
+
   var body: some View {
     VStack(alignment: .leading, spacing: 10) {
       Text("Combine Documents").font(.headline)
-      Text(
-        "Files are combined top to bottom. \(model.files.count) file"
-          + (model.files.count == 1 ? "" : "s") + ", \(model.totalPages) page"
-          + (model.totalPages == 1 ? "" : "s") + "."
-      )
-      .font(.caption)
-      .foregroundStyle(.secondary)
+      Text(summary)
+        .font(.caption)
+        .foregroundStyle(.secondary)
       List(selection: $selection) {
         ForEach(Array(model.files.enumerated()), id: \.element.id) { index, file in
           HStack {
@@ -60,7 +63,7 @@ struct CombineDocumentsPanel: View {
               .foregroundStyle(.secondary)
             Text(file.name).lineLimit(1).truncationMode(.middle)
             Spacer()
-            Text("\(file.pageCount) page" + (file.pageCount == 1 ? "" : "s"))
+            Text(file.pageCount == 1 ? "1 page" : "\(file.pageCount) pages")
               .font(.caption)
               .foregroundStyle(.secondary)
           }
