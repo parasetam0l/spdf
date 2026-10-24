@@ -886,6 +886,17 @@
             contentsOf: attachmentDirectory.appendingPathComponent("notes.txt"), encoding: .utf8)
             == "Attachment payload one.\n"
         else { throw PDFError(.malformed, "Attachment extraction did not preserve bytes safely") }
+        attachmentDocument.manageAttachments()
+        try await Task.sleep(for: .milliseconds(80))
+        guard
+          let attachmentManager = NSApp.windows.first(where: {
+            $0.title == "Attachments" && $0.isVisible
+          }),
+          !attachmentManager.isReleasedWhenClosed,
+          NSApp.mainMenu?.item(withTitle: "Tools")?.submenu?
+            .item(withTitle: "Manage Attachments…") != nil
+        else { throw PDFError(.malformed, "Attachment manager window or menu is missing") }
+        attachmentManager.close()
 
         // P34-021–P34-024: print-to-PDF derivative through the native print
         // pipeline, reopened with an independent reader.

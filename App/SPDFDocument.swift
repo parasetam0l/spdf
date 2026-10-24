@@ -62,6 +62,8 @@ final class SPDFDocument: NSDocument {
   private var pageOrganizerWindow: NSWindow?
   private var combineModel: CombineDocumentsModel?
   private var combineWindow: NSWindow?
+  private var attachmentsModel: AttachmentsModel?
+  private var attachmentsWindow: NSWindow?
   private var signatureWindow: NSWindow?
   private var warnedXFA = false
   /// Test hook: where provisioned fonts are installed (defaults to
@@ -3032,6 +3034,175 @@ final class SPDFDocument: NSDocument {
   @discardableResult
   func deleteAuthoredFormField(name: String) -> Bool {
     applyFormAuthoring(RemoveFormFieldCommand(fieldName: name))
+  }
+
+  /// PAG-09: a single attachment manager for adding, describing, removing and
+  /// exporting embedded files. Every mutation is one canonical undo step.
+  var canManageAttachments: Bool { editSession.currentGraph != nil }
+
+  func manageAttachments() {
+    if let window = attachmentsWindow {
+      refreshAttachments()
+      window.makeKeyAndOrderFront(nil)
+      return
+    }
+    guard canManageAttachments else { return }
+    let model = AttachmentsModel()
+    let window = NSWindow(
+      contentRect: NSRect(x: 0, y: 0, width: 680, height: 440),
+      styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered,
+      defer: false)
+    window.title = "Attachments"
+    window.isReleasedWhenClosed = false
+    window.setFrameAutosaveName("spdf-attachments")
+    window.contentView = NSHostingView(
+      rootView: AttachmentsManagerPanel(
+        model: model, canEditContent: canEditContent,
+        editingRestrictionNotice: contentEditingRestrictionNotice,
+        onAdd: { [weak self] in self?.addAttachmentFromManager() },
+        onEditDescription: { [weak self] attachment in
+          self?.editAttachmentDescription(attachment)
+        },
+        onRemove: { [weak self] attachment in self?.removeAttachment(attachment) },
+        onExportAll: { [weak self] in self?.exportAttachments() },
+        onClose: { [weak self, weak window] in
+          window?.close()
+          self?.attachmentsModel = nil
+          self?.attachmentsWindow = nil
+        }))
+    attachmentsModel = model
+    attachmentsWindow = window
+    refreshAttachments()
+    window.center()
+    window.makeKeyAndOrderFront(nil)
+  }
+
+  private func refreshAttachments() {
+    guard let model = attachmentsModel else { return }
+    guard let graph = editSession.currentGraph else {
+      model.attachments = []
+      return
+    }
+    model.attachments = PDFAttachmentInventory.attachments(in: graph)
+  }
+
+  private func addAttachmentFromManager() {
+    guard canEditContent else { return }
+    let open = NSOpenPanel()
+    open.allowsMultipleSelection = false
+    open.canChooseFiles = true
+    open.canChooseDirectories = false
+    open.message = "Choose a file to embed in this PDF."
+    guard open.runModal() == .OK, let url = open.url else { return }
+    let size = (try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize
+    guard (size ?? 0) <= AddAttachmentCommand.maximumBytes else {
+      let alert = NSAlert()
+      alert.messageText = "Attachment Too Large"
+      alert.informativeText = "The attachment exceeds the 64 MiB embedding limit."
+      alert.addButton(withTitle: "OK")
+      alert.runModal()
+      return
+    }
+    let data: Data
+    do {
+      data = try Data(contentsOf: url, options: .mappedIfSafe)
+    } catch {
+      presentError(error)
+      return
+    }
+    guard data.count <= AddAttachmentCommand.maximumBytes else {
+      let alert = NSAlert()
+      alert.messageText = "Attachment Too Large"
+      alert.informativeText = "The attachment exceeds the 64 MiB embedding limit."
+      alert.addButton(withTitle: "OK")
+      alert.runModal()
+      return
+    }
+    let nameField = NSTextField(frame: NSRect(x: 0, y: 0, width: 340, height: 22))
+    nameField.stringValue = url.lastPathComponent
+    let descriptionField = NSTextField(frame: NSRect(x: 0, y: 0, width: 340, height: 22))
+    descriptionField.placeholderString = "Optional description"
+    let grid = NSGridView(views: [
+      [NSTextField(labelWithString: "Name:"), nameField],
+      [NSTextField(labelWithString: "Description:"), descriptionField],
+    ])
+    grid.column(at: 0).xPlacement = .trailing
+    grid.frame = NSRect(x: 0, y: 0, width: 440, height: 54)
+    let alert = NSAlert()
+    alert.messageText = "Add Attachment"
+    alert.informativeText = "Embeds \(url.lastPathComponent) in this PDF."
+    alert.accessoryView = grid
+    alert.addButton(withTitle: "Add")
+    alert.addButton(withTitle: "Cancel")
+    guard alert.runModal() == .alertFirstButtonReturn else { return }
+    let name = nameField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !name.isEmpty else {
+      NSSound.beep()
+      return
+    }
+    let description = descriptionField.stringValue.trimmingCharacters(
+      in: .whitespacesAndNewlines)
+    let mime = UTType(filenameExtension: url.pathExtension)?.preferredMIMEType
+    do {
+      try editSession.apply(
+        PDFTransaction([
+          AddAttachmentCommand(
+            name: name, fileName: url.lastPathComponent, mimeType: mime,
+            description: description.isEmpty ? nil : description, data: data)
+        ]))
+    } catch {
+      presentError(error)
+      return
+    }
+    noteUserEdit()
+    refreshAttachments()
+  }
+
+  private func editAttachmentDescription(_ attachment: PDFAttachment) {
+    guard canEditContent else { return }
+    let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 380, height: 22))
+    field.stringValue = attachment.description ?? ""
+    field.placeholderString = "Leave empty to remove the description"
+    let alert = NSAlert()
+    alert.messageText = "Attachment Description"
+    alert.informativeText = "Description for \(attachment.name)."
+    alert.accessoryView = field
+    alert.addButton(withTitle: "Save")
+    alert.addButton(withTitle: "Cancel")
+    guard alert.runModal() == .alertFirstButtonReturn else { return }
+    do {
+      try editSession.apply(
+        PDFTransaction([
+          SetAttachmentDescriptionCommand(
+            name: attachment.name, description: field.stringValue)
+        ]))
+    } catch {
+      presentError(error)
+      return
+    }
+    noteUserEdit()
+    refreshAttachments()
+  }
+
+  private func removeAttachment(_ attachment: PDFAttachment) {
+    guard canEditContent else { return }
+    let alert = NSAlert()
+    alert.messageText = "Remove attachment?"
+    alert.informativeText =
+      "\(attachment.name) will be removed from this PDF. The bytes remain in older saved "
+      + "revisions until the document is saved; Undo is available in this editing session."
+    alert.addButton(withTitle: "Remove")
+    alert.addButton(withTitle: "Cancel")
+    guard alert.runModal() == .alertFirstButtonReturn else { return }
+    do {
+      try editSession.apply(
+        PDFTransaction([RemoveAttachmentCommand(name: attachment.name)]))
+    } catch {
+      presentError(error)
+      return
+    }
+    noteUserEdit()
+    refreshAttachments()
   }
 
   /// P34-018: extract attachments only to a folder the user chooses; nothing
@@ -6121,6 +6292,7 @@ final class SPDFDocument: NSDocument {
     refreshComments()
     refreshForms()
     refreshFonts()
+    refreshAttachments()
     refreshDocumentInfo()
     snapshotRecoveryIfNeeded()
   }

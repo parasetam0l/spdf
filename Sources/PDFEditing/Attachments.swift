@@ -320,6 +320,55 @@ public struct AddAttachmentCommand: PDFEditCommand, Equatable, Sendable {
   }
 }
 
+/// PAG-09: edit an attachment's /Desc without replacing its bytes or identity.
+public struct SetAttachmentDescriptionCommand: PDFEditCommand, Equatable, Sendable {
+  public let attachmentName: String
+  public let description: String
+
+  public init(name: String, description: String) {
+    self.attachmentName = name
+    self.description = description
+  }
+
+  public var name: String { "Set Attachment Description" }
+
+  public func validate(in graph: PDFGraph) throws {
+    guard
+      let value = PDFAttachmentInventory.pairs(in: graph).first(where: {
+        $0.0 == attachmentName
+      })?.1,
+      case .reference(let filespecID) = value,
+      case .dictionary = graph.objects[filespecID]
+    else {
+      throw PDFError(.malformed, "No attachment with that name exists")
+    }
+    guard description.count <= 10_000 else {
+      throw PDFError(.limitExceeded, "The attachment description is too long")
+    }
+  }
+
+  public func apply(to graph: PDFGraph) throws -> PDFGraph {
+    var graph = graph
+    guard
+      let value = PDFAttachmentInventory.pairs(in: graph).first(where: {
+        $0.0 == attachmentName
+      })?.1,
+      case .reference(let filespecID) = value,
+      case .dictionary(var filespec)? = graph.objects[filespecID]
+    else {
+      throw PDFError(.malformed, "No attachment with that name exists")
+    }
+    let text = description.trimmingCharacters(in: .whitespacesAndNewlines)
+    if text.isEmpty {
+      filespec[PDFName("Desc")] = nil
+    } else {
+      filespec[PDFName("Desc")] = .string(AnnotationText.encode(description))
+    }
+    graph.objects[filespecID] = .dictionary(filespec)
+    return graph
+  }
+}
+
 /// P34-019: remove an attachment and its unreferenced filespec/stream objects.
 public struct RemoveAttachmentCommand: PDFEditCommand, Equatable, Sendable {
   public let attachmentName: String

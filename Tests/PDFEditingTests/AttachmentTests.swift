@@ -116,6 +116,47 @@ struct AttachmentTests {
     #expect(removed.objects.count == reparsed.graph.objects.count - 2)
   }
 
+  @Test func descriptionChangesPreserveAttachmentBytes() throws {
+    let parsed = try PDFParser.parse(PDFFixtures.onePage())
+    let payload = Data("description payload\n".utf8)
+    let added = try PDFEditingEngine.commit(
+      PDFTransaction([
+        AddAttachmentCommand(
+          name: "notes.txt", fileName: "notes.txt", mimeType: "text/plain",
+          description: "Initial", data: payload)
+      ]), to: parsed.graph)
+    let revised = try PDFEditingEngine.commit(
+      PDFTransaction([
+        SetAttachmentDescriptionCommand(name: "notes.txt", description: "Revised description")
+      ]), to: added)
+    var attachment = try #require(
+      PDFAttachmentInventory.attachments(in: revised).first)
+    #expect(attachment.description == "Revised description")
+    #expect(attachment.mimeType == "text/plain")
+    #expect(try PDFAttachmentInventory.data(of: attachment, in: revised) == payload)
+
+    let reopened = try PDFParser.parse(try PDFWriter.write(revised))
+    attachment = try #require(PDFAttachmentInventory.attachments(in: reopened.graph).first)
+    #expect(attachment.description == "Revised description")
+    #expect(try PDFAttachmentInventory.data(of: attachment, in: reopened.graph) == payload)
+
+    let cleared = try PDFEditingEngine.commit(
+      PDFTransaction([
+        SetAttachmentDescriptionCommand(name: "notes.txt", description: "   ")
+      ]), to: reopened.graph)
+    #expect(PDFAttachmentInventory.attachments(in: cleared).first?.description == nil)
+    #expect(
+      try PDFAttachmentInventory.data(
+        of: try #require(PDFAttachmentInventory.attachments(in: cleared).first), in: cleared)
+        == payload)
+    #expect(throws: PDFError.self) {
+      _ = try PDFEditingEngine.commit(
+        PDFTransaction([
+          SetAttachmentDescriptionCommand(name: "missing.txt", description: "x")
+        ]), to: cleared)
+    }
+  }
+
   @Test func addRefusalsAreExplicit() throws {
     let graph = try PDFParser.parse(PDFFixtures.onePage()).graph
     #expect(throws: PDFError.self) {

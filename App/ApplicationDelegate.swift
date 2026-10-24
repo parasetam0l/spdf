@@ -543,6 +543,9 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
   @objc private func exportAttachments(_ sender: Any?) {
     currentDocument?.exportAttachments()
   }
+  @objc private func manageAttachments(_ sender: Any?) {
+    currentDocument?.manageAttachments()
+  }
   @objc private func printDocument(_ sender: Any?) {
     currentDocument?.printDocument()
   }
@@ -814,6 +817,8 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
       return document.canExportOutline
     case #selector(exportAttachments):
       return document.canExportAttachments
+    case #selector(manageAttachments):
+      return document.canManageAttachments
     case #selector(printDocument), #selector(exportPrintPDF):
       return document.canPrint
     case #selector(exportImages):
@@ -1180,6 +1185,7 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
     add("Recognize Text in All Pages…", #selector(runOCRAllPages), target: self, to: annotate)
 
     let tools = submenu("Tools", in: bar)
+    add("Manage Attachments…", #selector(manageAttachments), target: self, to: tools)
     add("Compare With…", #selector(compareWithDocument), target: self, to: tools)
     add("Optimize Document…", #selector(optimizeDocument), target: self, to: tools)
     add("Repair Document…", #selector(repairDocument), target: self, to: tools)

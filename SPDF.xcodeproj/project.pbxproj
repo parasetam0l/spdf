@@ -31,6 +31,7 @@
 		68D01E3A362B8CC0AC282B2A /* FontsPanel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A47BE52ECA0F0EF59D065A11 /* FontsPanel.swift */; };
 		73CAAFA4B2309D979E39F4F6 /* ApplicationDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 07489EF96ED38AC775027645 /* ApplicationDelegate.swift */; };
 		810ADA511501A068F5032BCE /* TerminationCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = EFC7C84694AA9DECF51EF198 /* TerminationCoordinator.swift */; };
+		847D75FC3D196ADA1F89864E /* AttachmentsWindow.swift in Sources */ = {isa = PBXBuildFile; fileRef = B3CC53A357D85652A4EE5C92 /* AttachmentsWindow.swift */; };
 		8688559D76B81B374C8CB5F5 /* WorkspacePreferences.swift in Sources */ = {isa = PBXBuildFile; fileRef = 861EA8B50EF918A38F86E7CE /* WorkspacePreferences.swift */; };
 		8767D9ABC02F99629065E1B2 /* WorkspacePerformance.swift in Sources */ = {isa = PBXBuildFile; fileRef = D65800C5E45DCA901B0CC22D /* WorkspacePerformance.swift */; };
 		89C657CE2CBD250F48A1B98E /* UpdateSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0705225D1C69ADFF420119E /* UpdateSettingsView.swift */; };
@@ -91,6 +92,7 @@
 		A47BE52ECA0F0EF59D065A11 /* FontsPanel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FontsPanel.swift; sourceTree = "<group>"; };
 		A984AC6A2AC818FAEAA157BA /* WorkspaceSmoke.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceSmoke.swift; sourceTree = "<group>"; };
 		AC3F2000EB9699A06E69C102 /* UpdateRelaunchCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UpdateRelaunchCoordinator.swift; sourceTree = "<group>"; };
+		B3CC53A357D85652A4EE5C92 /* AttachmentsWindow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AttachmentsWindow.swift; sourceTree = "<group>"; };
 		B3DA39FC05B81DDCFC670B89 /* WorkspaceView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceView.swift; sourceTree = "<group>"; };
 		B6E473AA51FAAA64191E1052 /* WorkspaceChrome.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceChrome.swift; sourceTree = "<group>"; };
 		B9390A4E48951B844369EC28 /* spdf */ = {isa = PBXFileReference; lastKnownFileType = folder; name = spdf; path = .; sourceTree = SOURCE_ROOT; };
@@ -130,6 +132,7 @@
 				07489EF96ED38AC775027645 /* ApplicationDelegate.swift */,
 				4B5DD137683723B1199261BD /* AppUpdater.swift */,
 				0CF10BA4A83CEEEA549975AF /* Assets.xcassets */,
+				B3CC53A357D85652A4EE5C92 /* AttachmentsWindow.swift */,
 				C168F8ADE4C1C2B2357AB45D /* CombineDocuments.swift */,
 				50BAA98BFBFE2B0F82566CFA /* CommentsModel.swift */,
 				A10BEC367F4A982BF380EEF7 /* CommentsPanel.swift */,
@@ -317,6 +320,7 @@
 				3FD6850EB221398A65AB2A22 /* ActualUpdaterProbe.swift in Sources */,
 				BA02870B845C4579EF78B9F5 /* AppUpdater.swift in Sources */,
 				73CAAFA4B2309D979E39F4F6 /* ApplicationDelegate.swift in Sources */,
+				847D75FC3D196ADA1F89864E /* AttachmentsWindow.swift in Sources */,
 				BA49026DF218DBD9C2A3416A /* CombineDocuments.swift in Sources */,
 				9BDD7D0E0E17C86FCEEAADF2 /* CommentsModel.swift in Sources */,
 				D476B0FEEFA9A0A50D0C12C7 /* CommentsPanel.swift in Sources */,
