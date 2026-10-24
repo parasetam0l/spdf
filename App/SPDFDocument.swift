@@ -68,6 +68,9 @@ final class SPDFDocument: NSDocument {
   private var bookmarksWindow: NSWindow?
   private var signatureWindow: NSWindow?
   private var warnedXFA = false
+  /// SAF-05: the last refusal observed by the native diagnostic or the user.
+  private(set) var lastEditingRestriction: DocumentEditingRestriction?
+  private(set) var lastEditingRestrictionAction: String?
   /// Test hook: where provisioned fonts are installed (defaults to
   /// ~/Library/Fonts, the Font Book-compatible location).
   static var fontsInstallDirectoryOverride: URL?
@@ -79,6 +82,10 @@ final class SPDFDocument: NSDocument {
     static var diagnosticSavePanelObserver: ((NSSavePanel) -> Void)?
     /// The native capability smoke observes and cancels the real Print panel.
     static var printOperationObserver: ((NSPrintOperation) -> Void)?
+    /// SAF-05: the native smoke records pre-commit refusals without leaving a
+    /// modal alert open. Returning true suppresses presentation.
+    static var editingRestrictionHandler:
+      ((DocumentEditingRestriction, String, NSAlert) -> Bool)?
     override func prepareSavePanel(_ savePanel: NSSavePanel) -> Bool {
       let prepared = super.prepareSavePanel(savePanel)
       Self.diagnosticSavePanelObserver?(savePanel)
@@ -241,7 +248,7 @@ final class SPDFDocument: NSDocument {
     updateChangeCount(.changeReadOtherContents)
     if windowControllers.isEmpty {
       makeWindowControllers()
-    } else if let viewer {
+    } else if self.viewer != nil {
       refreshViewer(preservingPage: 1)
     }
   }
@@ -489,7 +496,9 @@ final class SPDFDocument: NSDocument {
       self?.commitTextBlock(target, text: text, style: style, dx: dx, dy: dy, lines: lines, box: box) ?? false
     }
     viewer.onNewTextBlockCommit = { [weak self] pageIndex, rect, text, style, lines, box in
-      guard let self, self.canEditContent, self.editSession.pageIDs.indices.contains(pageIndex) else { return false }
+      guard let self, self.requireContentEditing(for: "Add Text"),
+        self.editSession.pageIDs.indices.contains(pageIndex)
+      else { return false }
       do {
         try self.editSession.apply(PDFTransaction([
           AddPageTextLinesCommand(pageID: self.editSession.pageIDs[pageIndex], lines: lines, box: box)
@@ -1323,6 +1332,7 @@ final class SPDFDocument: NSDocument {
   /// P31-019/P31-021: show before/after sizes and the transformations before
   /// any destination is written; metadata removal is an explicit checkbox.
   func presentOptimizeDocument() {
+    guard requireContentEditing(for: "Optimize Document") else { return }
     guard finishPendingEdits() else { return }
     guard let graph = editSession.currentGraph else { return }
     let sourceBytes = (try? editSession.bytesForSave().count) ?? 0
@@ -1553,7 +1563,7 @@ final class SPDFDocument: NSDocument {
   /// object unreachable from the trailer) to the session.
   @discardableResult
   func applySanitize() -> Bool {
-    guard canEditContent else { return false }
+    guard requireContentEditing(for: "Sanitize Document") else { return false }
     do {
       try editSession.apply(PDFTransaction([SanitizeDocumentCommand()]))
     } catch {
@@ -1584,7 +1594,8 @@ final class SPDFDocument: NSDocument {
   }
 
   func saveSanitizedCopy() {
-    guard canEditContent, finishPendingEdits() else { return }
+    guard requireContentEditing(for: "Save Sanitized Copy") else { return }
+    guard finishPendingEdits() else { return }
     let policy = SanitizerPolicy.sanitizedCopy
     let confirmation = NSAlert()
     confirmation.messageText = "Save Sanitized Copy"
@@ -1674,7 +1685,8 @@ final class SPDFDocument: NSDocument {
   }
 
   func exportEncryptedCopy() {
-    guard canEditContent, finishPendingEdits() else { return }
+    guard requireContentEditing(for: "Export Encrypted Copy") else { return }
+    guard finishPendingEdits() else { return }
     let userField = NSSecureTextField(frame: NSRect(x: 0, y: 0, width: 220, height: 24))
     userField.placeholderString = "Required"
     let ownerField = NSSecureTextField(frame: NSRect(x: 0, y: 0, width: 220, height: 24))
@@ -1746,7 +1758,7 @@ final class SPDFDocument: NSDocument {
   /// P24-017: fill a text field from the forms panel.
   @discardableResult
   func fillFormText(fieldName: String, text: String) -> Bool {
-    guard canEditContent else { return false }
+    guard requireContentEditing(for: "Change Form Value") else { return false }
     do {
       try WorkspacePerformance.profile("form-edit") {
         try editSession.fillFormText(fieldName: fieldName, text: text)
@@ -1765,7 +1777,8 @@ final class SPDFDocument: NSDocument {
   /// FRM-05: whole-field rich-text styling. Commits any pending sidebar text
   /// in the same transaction before writing /RV and the styled appearance.
   func presentFormTextStyle(_ field: FormField) {
-    guard canEditContent, field.kind == .text, !field.isReadOnly else { return }
+    guard requireContentEditing(for: "Style Form Field") else { return }
+    guard field.kind == .text, !field.isReadOnly else { return }
     let bold = NSButton(checkboxWithTitle: "Bold", target: nil, action: nil)
     let italic = NSButton(checkboxWithTitle: "Italic", target: nil, action: nil)
     let sizeField = NSTextField(string: "12")
@@ -1884,7 +1897,9 @@ final class SPDFDocument: NSDocument {
     guard pagePoint.count >= 2, pagePoint.allSatisfy(\.isFinite),
       pageIndex >= 0, pageIndex < editSession.pageIDs.count
     else { return nil }
-    guard canEditContent else { return nil }
+    if let restriction = contentEditingRestriction {
+      return restriction.message
+    }
     guard let graph = editSession.currentGraph else { return nil }
     if textBlockCacheRevision != editSession.documentRevision {
       textBlockCache.removeAll()
@@ -1917,7 +1932,7 @@ final class SPDFDocument: NSDocument {
 
   /// P24-014: toggle a checkbox using its actual on-state name.
   func setFormButton(fieldName: String, isOn: Bool) {
-    guard canEditContent else { return }
+    guard requireContentEditing(for: "Change Form Value") else { return }
     let field = editSession.formFields().first { $0.name == fieldName }
     let onState =
       field?.widgets.flatMap(\.appearanceStates).first { $0 != PDFName("Off") }
@@ -1934,7 +1949,7 @@ final class SPDFDocument: NSDocument {
 
   /// P24-015: select a supported combo or list option.
   func setFormChoice(fieldName: String, exportValue: String) {
-    guard canEditContent else { return }
+    guard requireContentEditing(for: "Change Form Value") else { return }
     do {
       try editSession.apply(
         PDFTransaction([
@@ -1950,7 +1965,7 @@ final class SPDFDocument: NSDocument {
 
   /// P24-021: reset supported fields to their documented default values.
   func resetForm() {
-    guard canEditContent else { return }
+    guard requireContentEditing(for: "Reset Form") else { return }
     do {
       try editSession.apply(PDFTransaction([ResetFormCommand()]))
     } catch {
@@ -2357,7 +2372,7 @@ final class SPDFDocument: NSDocument {
   /// P19-007: reflow the paragraph at the current page (menu-driven). The
   /// candidate comes from the analysis pass so the plan is reviewable.
   func reflowParagraph() {
-    guard canEditContent else { return }
+    guard requireContentEditing(for: "Reflow Paragraph") else { return }
     // Reflow mutates the canonical graph and reloads the viewer. Finish the
     // selected inline text editor first so its stale source snapshot cannot
     // overwrite the new paragraph layout when the user presses Done.
@@ -2551,7 +2566,7 @@ final class SPDFDocument: NSDocument {
     pageID: PDFObjectID, candidate: TextParagraphCandidate, replacement: String,
     options: ParagraphReflowOptions = .init()
   ) -> Bool {
-    guard canEditContent else { return false }
+    guard requireContentEditing(for: "Reflow Paragraph") else { return false }
     do {
       try editSession.apply(
         PDFTransaction([
@@ -2609,7 +2624,8 @@ final class SPDFDocument: NSDocument {
 
   @discardableResult
   private func applyFormAuthoring(_ command: any PDFEditCommand) -> Bool {
-    guard canEditContent, confirmXFAIfNeeded() else { return false }
+    guard requireContentEditing(for: "Change Form Fields") else { return false }
+    guard confirmXFAIfNeeded() else { return false }
     do {
       try editSession.apply(PDFTransaction([command]))
     } catch {
@@ -2623,6 +2639,7 @@ final class SPDFDocument: NSDocument {
   }
 
   func addTextField() {
+    guard requireContentEditing(for: "Add Text Field") else { return }
     guard let pageID = editSession.currentGraph.flatMap(currentPageID(in:)),
       let rect = defaultRect()
     else { return }
@@ -2655,6 +2672,7 @@ final class SPDFDocument: NSDocument {
   }
 
   func addCheckbox() {
+    guard requireContentEditing(for: "Add Checkbox") else { return }
     guard let pageID = editSession.currentGraph.flatMap(currentPageID(in:)),
       let rect = defaultRect(width: 18, height: 18)
     else { return }
@@ -2681,6 +2699,7 @@ final class SPDFDocument: NSDocument {
   }
 
   func addRadioGroup() {
+    guard requireContentEditing(for: "Add Radio Group") else { return }
     guard let pageID = editSession.currentGraph.flatMap(currentPageID(in:)),
       let rect = defaultRect(width: 120, height: 18)
     else { return }
@@ -2714,6 +2733,7 @@ final class SPDFDocument: NSDocument {
   }
 
   func addChoiceField() {
+    guard requireContentEditing(for: "Add Choice Field") else { return }
     guard let pageID = editSession.currentGraph.flatMap(currentPageID(in:)),
       let rect = defaultRect()
     else { return }
@@ -2748,6 +2768,7 @@ final class SPDFDocument: NSDocument {
   }
 
   func addPushButton() {
+    guard requireContentEditing(for: "Add Push Button") else { return }
     guard let pageID = editSession.currentGraph.flatMap(currentPageID(in:)),
       let rect = defaultRect(width: 140, height: 28)
     else { return }
@@ -2777,6 +2798,7 @@ final class SPDFDocument: NSDocument {
   }
 
   func addSignatureField() {
+    guard requireContentEditing(for: "Add Signature Field") else { return }
     guard let pageID = editSession.currentGraph.flatMap(currentPageID(in:)),
       let rect = defaultRect(width: 200, height: 36)
     else { return }
@@ -2795,6 +2817,7 @@ final class SPDFDocument: NSDocument {
   }
 
   func renameFormField() {
+    guard requireContentEditing(for: "Rename Form Field") else { return }
     let names = formFieldNames()
     guard !names.isEmpty else { return }
     let popup = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 240, height: 24))
@@ -2817,6 +2840,7 @@ final class SPDFDocument: NSDocument {
   }
 
   func deleteFormField() {
+    guard requireContentEditing(for: "Delete Form Field") else { return }
     let names = formFieldNames()
     guard !names.isEmpty else { return }
     let popup = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 240, height: 24))
@@ -2837,7 +2861,7 @@ final class SPDFDocument: NSDocument {
   /// P25-007: the field-properties inspector. Step one chooses a field; step
   /// two edits flags, style, validation, format, and calculation rules.
   func editFormFieldProperties() {
-    guard canEditContent else { return }
+    guard requireContentEditing(for: "Field Properties") else { return }
     let names = formFieldNames()
     guard !names.isEmpty else { return }
     let popup = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 240, height: 24))
@@ -2961,7 +2985,7 @@ final class SPDFDocument: NSDocument {
 
   /// P25-015: evaluate declarative calculation rules.
   func recalculateForm() {
-    guard canEditContent else { return }
+    guard requireContentEditing(for: "Recalculate Form") else { return }
     do {
       try editSession.apply(PDFTransaction([RecalculateFormCommand()]))
     } catch {
@@ -2991,6 +3015,7 @@ final class SPDFDocument: NSDocument {
 
   /// P25-010: duplicate a field with an explicit value-sharing policy.
   func duplicateFormField() {
+    guard requireContentEditing(for: "Duplicate Form Field") else { return }
     let names = formFieldNames()
     guard !names.isEmpty, confirmXFAIfNeeded() else { return }
     let popup = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 240, height: 24))
@@ -3024,6 +3049,7 @@ final class SPDFDocument: NSDocument {
 
   /// P25-019: align or distribute selected widgets.
   func alignFormFields() {
+    guard requireContentEditing(for: "Align Form Fields") else { return }
     let names = formFieldNames()
     guard names.count >= 2, confirmXFAIfNeeded() else { return }
     let namesField = NSTextField(string: names.joined(separator: ", "))
@@ -3051,6 +3077,7 @@ final class SPDFDocument: NSDocument {
   }
 
   func distributeFormFields() {
+    guard requireContentEditing(for: "Distribute Form Fields") else { return }
     let names = formFieldNames()
     guard names.count >= 3, confirmXFAIfNeeded() else { return }
     let namesField = NSTextField(string: names.joined(separator: ", "))
@@ -3078,6 +3105,7 @@ final class SPDFDocument: NSDocument {
 
   /// P25-018: edit the field and keyboard tab order.
   func editFormTabOrder() {
+    guard requireContentEditing(for: "Edit Form Tab Order") else { return }
     let names = formFieldNames()
     guard names.count >= 2, confirmXFAIfNeeded() else { return }
     let namesField = NSTextField(string: names.joined(separator: ", "))
@@ -3184,7 +3212,7 @@ final class SPDFDocument: NSDocument {
   /// Testable metadata service entry point used by File → Document Metadata.
   @discardableResult
   func setDocumentMetadata(_ metadata: DocumentMetadata) -> Bool {
-    guard canEditContent else { return false }
+    guard requireContentEditing(for: "Document Metadata") else { return false }
     do {
       try editSession.apply(
         PDFTransaction([SetDocumentMetadataCommand(metadata: metadata)]))
@@ -3237,7 +3265,7 @@ final class SPDFDocument: NSDocument {
 
   @discardableResult
   func recalculateAuthoredForm() -> Bool {
-    guard canEditContent else { return false }
+    guard requireContentEditing(for: "Recalculate Form") else { return false }
     do {
       try editSession.apply(PDFTransaction([RecalculateFormCommand()]))
     } catch {
@@ -3789,6 +3817,7 @@ final class SPDFDocument: NSDocument {
   /// transformations only), then validate it with an independent validator
   /// when one is available. No PDF/A identifier is ever written.
   func createArchivalCopy() {
+    guard requireContentEditing(for: "Create Archival Copy") else { return }
     guard finishPendingEdits() else { return }
     guard let graph = editSession.currentGraph, !editSession.pageIDs.isEmpty else { return }
     let plan = ArchivalDerivative.plan(graph, pageIDs: editSession.pageIDs)
@@ -3853,6 +3882,7 @@ final class SPDFDocument: NSDocument {
   /// P37-024: explicit color conversion with before/after previews. Only
   /// supported 8-bit device images are converted; nothing else is guessed.
   func convertColors() {
+    guard requireContentEditing(for: "Convert Colors") else { return }
     guard finishPendingEdits() else { return }
     guard let graph = editSession.currentGraph, !editSession.pageIDs.isEmpty else { return }
     let choice = NSAlert()
@@ -4995,7 +5025,7 @@ final class SPDFDocument: NSDocument {
   /// P24-022/FRM-03: import values from JSON, XFDF or FDF and report skipped
   /// or ambiguous fields.
   func importFormValues() {
-    guard canEditContent else { return }
+    guard requireContentEditing(for: "Import Form Values") else { return }
     let panel = NSOpenPanel()
     panel.allowedContentTypes = [
       .json,
@@ -5043,7 +5073,7 @@ final class SPDFDocument: NSDocument {
 
   /// P24-024: explicit form flattening with a confirmation.
   func flattenForm() {
-    guard canEditContent else { return }
+    guard requireContentEditing(for: "Flatten Form") else { return }
     let alert = NSAlert()
     alert.messageText = "Flatten form fields?"
     alert.informativeText =
@@ -5057,7 +5087,7 @@ final class SPDFDocument: NSDocument {
 
   @discardableResult
   func applyFlattenForm() -> Bool {
-    guard canEditContent else { return false }
+    guard requireContentEditing(for: "Flatten Form") else { return false }
     do {
       try editSession.apply(PDFTransaction([FlattenFormCommand()]))
     } catch {
@@ -5117,7 +5147,8 @@ final class SPDFDocument: NSDocument {
 
   /// Use the same on-page caret for the menu and pointer editing paths.
   func editSelectedText() {
-    guard canEditContent, let viewer, let selection = viewer.view.currentSelection,
+    guard requireContentEditing(for: "Edit Text") else { return }
+    guard let viewer, let selection = viewer.view.currentSelection,
       let page = selection.pages.first, let document = viewer.view.document
     else { return }
     let bounds = selection.bounds(for: page)
@@ -5201,7 +5232,8 @@ final class SPDFDocument: NSDocument {
   func addPageText(pageIndex: Int, rect: [Double], text: String, style: PageTextStyle = .init())
     -> Bool
   {
-    guard canEditContent, pageIndex >= 0, pageIndex < editSession.pageIDs.count else {
+    guard requireContentEditing(for: "Add Text") else { return false }
+    guard pageIndex >= 0, pageIndex < editSession.pageIDs.count else {
       return false
     }
     do {
@@ -5225,7 +5257,8 @@ final class SPDFDocument: NSDocument {
     _ target: PageTextTarget, text: String, style: PageTextStyle,
     dx: Double, dy: Double, lines: [PageTextLine]? = nil, box: PageTextBox? = nil
   ) -> Bool {
-    guard canEditContent, editSession.pageIDs.indices.contains(target.pageIndex)
+    guard requireContentEditing(for: "Edit Text") else { return false }
+    guard editSession.pageIDs.indices.contains(target.pageIndex)
     else { return false }
     let page = editSession.pageIDs[target.pageIndex]
     if let paragraph = target.paragraph {
@@ -5292,7 +5325,8 @@ final class SPDFDocument: NSDocument {
 
   @discardableResult
   func replaceText(pageIndex: Int, runIndex: Int, with replacement: String) -> Bool {
-    guard canEditContent, !replacement.isEmpty else { return false }
+    guard requireContentEditing(for: "Edit Text") else { return false }
+    guard !replacement.isEmpty else { return false }
     // P43-003: warn about missing fonts before the edit is committed.
     if let graph = editSession.currentGraph,
       pageIndex >= 0, pageIndex < editSession.pageIDs.count,
@@ -5721,6 +5755,7 @@ final class SPDFDocument: NSDocument {
   /// generated searchable text layer first (P26-023).
   @discardableResult
   func replaceImage(pageIndex: Int, placementIndex: Int, with data: Data, shared: Bool) -> Bool {
+    guard requireContentEditing(for: "Replace Image") else { return false }
     guard let pageID = pageID(at: pageIndex) else { return false }
     guard let raster = ImageImport.decode(data) else {
       presentError(PDFError(.unsupported, "This image could not be imported"))
@@ -5747,7 +5782,8 @@ final class SPDFDocument: NSDocument {
   // MARK: - Added-graphics selection (P12-017)
 
   private func promptInsertImage() {
-    guard canEditContent, let window = windowControllers.first?.window,
+    guard requireContentEditing(for: "Insert Image") else { return }
+    guard let window = windowControllers.first?.window,
       let pageIndex = viewer?.pageNumber.advanced(by: -1) else { return }
     let panel = NSOpenPanel()
     panel.allowedContentTypes = [.image]
@@ -5765,7 +5801,8 @@ final class SPDFDocument: NSDocument {
 
   @discardableResult
   func insertImage(_ data: Data, pageIndex: Int) -> Bool {
-    guard canEditContent, let pageID = pageID(at: pageIndex), let viewer,
+    guard requireContentEditing(for: "Insert Image") else { return false }
+    guard let pageID = pageID(at: pageIndex), let viewer,
       let page = viewer.view.document?.page(at: pageIndex) else { return false }
     guard let raster = ImageImport.decode(data) else {
       presentError(PDFError(.unsupported, "This image could not be imported")); return false
@@ -5873,6 +5910,9 @@ final class SPDFDocument: NSDocument {
     guard pageIndex >= 0, pageIndex < editSession.pageIDs.count,
       let graph = editSession.currentGraph, pagePoint.count == 2
     else { return nil }
+    if let restriction = contentEditingRestriction {
+      return restriction.message
+    }
     let pageID = editSession.pageIDs[pageIndex]
     guard let placements = try? ImageInventory.placements(in: graph, pageID: pageID) else {
       return nil
@@ -6211,7 +6251,7 @@ final class SPDFDocument: NSDocument {
   }
 
   private func promptCropImage(pageIndex: Int, placementIndex: Int) {
-    guard canEditContent else { return }
+    guard requireContentEditing(for: "Crop Image") else { return }
     let labels = ["Left", "Bottom", "Right", "Top"]
     let fields = labels.enumerated().map { index, _ -> NSTextField in
       let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 70, height: 22))
@@ -6249,7 +6289,8 @@ final class SPDFDocument: NSDocument {
   }
 
   private func promptImageGeometry(pageIndex: Int, placementIndex: Int) {
-    guard canEditContent, let graph = editSession.currentGraph,
+    guard requireContentEditing(for: "Size and Position Image") else { return }
+    guard let graph = editSession.currentGraph,
       let pageID = pageID(at: pageIndex),
       let placements = try? ImageInventory.placements(in: graph, pageID: pageID),
       placementIndex >= 0, placementIndex < placements.count
@@ -6289,6 +6330,7 @@ final class SPDFDocument: NSDocument {
   }
 
   private func promptReplaceImage(pageIndex: Int, placementIndex: Int, shared: Bool) {
+    guard requireContentEditing(for: "Replace Image") else { return }
     let panel = NSOpenPanel()
     panel.allowedContentTypes = [.png, .jpeg]
     panel.allowsMultipleSelection = false
@@ -6303,7 +6345,7 @@ final class SPDFDocument: NSDocument {
   }
 
   private func applyImageTransaction(_ commands: [any PDFEditCommand]) -> Bool {
-    guard canEditContent else { return false }
+    guard requireContentEditing(for: "Image Editing") else { return false }
     do {
       try editSession.apply(PDFTransaction(commands))
     } catch {
@@ -6466,25 +6508,61 @@ final class SPDFDocument: NSDocument {
   /// Whole-document restrictions that prevent safe content rewrites. A
   /// digitally signed PDF stays viewable, but PDFWriter cannot preserve its
   /// signed byte ranges through the normal edit/save path.
-  var canEditContent: Bool { editSession.canEdit && !hasSignatures }
+  ///
+  /// SAF-05: every editing surface reads this single value instead of
+  /// maintaining a separate reason or silently returning from its guard.
+  var contentEditingRestriction: DocumentEditingRestriction? {
+    if viewer?.isLocked == true { return .passwordLocked }
+    if editSession.repairedEditGated { return .repairedCopy }
+    if editSession.isProtected && !editSession.protectionAllowsEditing {
+      return .permissionDenied
+    }
+    if hasSignatures { return .digitalSignature }
+    if !editSession.canEdit { return .unsupportedStructure }
+    return nil
+  }
+
+  var canEditContent: Bool { contentEditingRestriction == nil }
 
   var contentEditingRestrictionNotice: String? {
-    if viewer?.isLocked == true {
-      return "This PDF is password-protected. Choose Tools → Security → Unlock Document to continue."
+    contentEditingRestriction?.message
+  }
+
+  /// SAF-05: present the actionable restriction reason before an edit dialog
+  /// or commit can do work. Returning false means the caller must make no
+  /// mutation; open editors and form drafts are deliberately left intact.
+  @discardableResult
+  func requireContentEditing(for action: String) -> Bool {
+    guard let restriction = contentEditingRestriction else { return true }
+    lastEditingRestriction = restriction
+    lastEditingRestrictionAction = action
+    let alert = NSAlert()
+    alert.alertStyle = .warning
+    alert.messageText = "\(action) Unavailable"
+    alert.informativeText =
+      restriction.message
+      + "\n\nNothing was changed. Any open editor or draft has been left intact."
+    if restriction.recoveryAction == .unlockDocument {
+      alert.addButton(withTitle: "Unlock Document…")
+      alert.addButton(withTitle: "Cancel")
+    } else {
+      alert.addButton(withTitle: "OK")
     }
-    if editSession.repairedEditGated {
-      return "This repaired copy did not pass validation, so editing is paused to protect its contents. Open a clean original or review the repair report and create a validated copy."
+    #if DEBUG
+      if let handler = Self.editingRestrictionHandler,
+        handler(restriction, action, alert)
+      {
+        return false
+      }
+    #endif
+    let response = alert.runModal()
+    if response == .alertFirstButtonReturn,
+      restriction.recoveryAction == .unlockDocument
+    {
+      NSApp.sendAction(
+        NSSelectorFromString("unlockDocument:"), to: NSApp.delegate, from: nil)
     }
-    if editSession.isProtected && !editSession.protectionAllowsEditing {
-      return "This password allows reading but not modification. Ask the document owner for an editable copy; Save As does not remove the PDF's permission restrictions."
-    }
-    if hasSignatures {
-      return "This PDF contains a digital signature. Editing would invalidate the signed document, so sPDF keeps it view-only. Open an unsigned copy if you need to make changes."
-    }
-    if !editSession.canEdit {
-      return "sPDF can display this PDF, but its document structure is outside the safe editing profile. The source remains unchanged; open a copy in an editor that supports this structure."
-    }
-    return nil
+    return false
   }
 
   /// P43-002/P43-004: refresh the font inspector with current statuses.
@@ -6864,13 +6942,13 @@ final class SPDFDocument: NSDocument {
     to url: URL, requiresEditable: Bool = true, allowSigned: Bool = false,
     allowProtected: Bool = false
   ) throws -> PDFGraph {
+    if requiresEditable, let restriction = contentEditingRestriction {
+      throw PDFError(.unsupported, restriction.message)
+    }
     guard finishPendingEdits() else {
       throw PDFError(.unsupported, "Finish the current edit before creating a derivative")
     }
     if requiresEditable {
-      guard canEditContent else {
-        throw PDFError(.unsupported, "This document is read-only for editing")
-      }
       if !allowProtected {
         guard !editSession.isProtected else {
           throw PDFError(
@@ -6882,7 +6960,8 @@ final class SPDFDocument: NSDocument {
     if !allowSigned, hasSignatures {
       throw PDFError(
         .unsupported,
-        "This derivative would invalidate existing signatures; remove them first")
+        DocumentEditingRestriction.digitalSignature.message
+          + " This derivative cannot preserve the signed state.")
     }
     try DerivativeOutputPolicy.validateDestination(url, source: fileURL)
     guard let graph = editSession.currentGraph else {

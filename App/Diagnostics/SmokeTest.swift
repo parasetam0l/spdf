@@ -145,6 +145,25 @@
           !signatureEntry.validation.unsignedChanges,
           !signatureEntry.validation.revocationChecked
         else { throw PDFError(.malformed, "Signature validation smoke checks failed") }
+        let signedBaseline = try signedDocument.editSession.bytesForSave()
+        var signedRefusalAction: String?
+        SPDFDocument.editingRestrictionHandler = { restriction, action, _ in
+          signedRefusalAction = restriction == .digitalSignature ? action : nil
+          return true
+        }
+        let signedEditingAllowed = signedDocument.requireContentEditing(
+          for: "Edit Signed Document")
+        SPDFDocument.editingRestrictionHandler = nil
+        guard !signedEditingAllowed,
+          signedDocument.contentEditingRestriction == .digitalSignature,
+          signedDocument.contentEditingRestrictionNotice?.contains("digital signature") == true,
+          signedRefusalAction == "Edit Signed Document",
+          try signedDocument.editSession.bytesForSave() == signedBaseline
+        else {
+          throw PDFError(
+            .malformed,
+            "Signed-document editing refusal did not use the shared restriction reason")
+        }
         signedViewer.showSignatures()
         guard signedViewer.sidebarMode == .signatures,
           let signedWindow = signedDocument.windowControllers.first?.window,
@@ -1775,8 +1794,18 @@
         // selection in the select tool), and editing begins on click
         // (mouse-up over the same target).
         window.makeKeyAndOrderFront(nil)
+        let textToolRestriction = first.contentEditingRestriction
+        let textToolCanEdit = first.canEditContent
+        let textToolLocked = viewer.isLocked
+        let textToolCoreCanEdit = first.editSession.canEdit
+        let textToolSigned = first.hasSignatures
         guard KeyboardAudit.invoke("Text Edit Tool"), viewer.activeTool == .textEdit else {
-          throw PDFError(.malformed, "Could not arm the text tool for in-place editing")
+          throw PDFError(
+            .malformed,
+            "Could not arm the text tool for in-place editing "
+              + "(restriction=\(String(describing: textToolRestriction)), canEdit=\(textToolCanEdit), "
+              + "locked=\(textToolLocked), coreCanEdit=\(textToolCoreCanEdit), "
+              + "signed=\(textToolSigned), active=\(viewer.activeTool))")
         }
         if let textPage = viewer.view.document?.page(at: 0) {
           func findPageOverlay(in view: NSView) -> NSView? {

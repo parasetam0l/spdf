@@ -1,5 +1,6 @@
 #if DEBUG
   import AppKit
+  import DocumentSession
   import Foundation
   import MacServices
   import PDFCore
@@ -1058,14 +1059,144 @@
       document.unlockCoreSession(with: "user")
       try await Task.sleep(for: .milliseconds(100))
       let original = try document.editSession.bytesForSave()
-      guard !document.canEditContent, !viewer.allowsContentEditing,
-        viewer.editingRestrictionNotice?.contains("password allows reading but not modification") == true,
-        !viewer.canSelectAdjacentPageObject,
-        AccessibilityAudit.keyWindowElement(labeled: "Editing unavailable") != nil,
-        !document.addPageText(pageIndex: 0, rect: [72, 120, 280, 150], text: "Blocked edit"),
-        try document.editSession.bytesForSave() == original else {
+      var refusals: [(restriction: DocumentEditingRestriction, action: String)] = []
+      var lastAlertTitle = ""
+      var lastAlertMessage = ""
+      SPDFDocument.editingRestrictionHandler = { restriction, action, alert in
+        refusals.append((restriction, action))
+        lastAlertTitle = alert.messageText
+        lastAlertMessage = alert.informativeText
+        return true
+      }
+      defer { SPDFDocument.editingRestrictionHandler = nil }
+
+      document.formsModel.pendingText["draft-field"] = "Keep this draft"
+      document.editSelectedText()
+      document.reflowParagraph()
+      _ = document.rotateImage(pageIndex: 0, placementIndex: 0, degrees: 90)
+      _ = document.fillFormText(fieldName: "draft-field", text: "Blocked fill")
+      let preservedDraft = document.formsModel.pendingText["draft-field"]
+      document.formsModel.pendingText["draft-field"] = nil
+      _ = document.applyFlattenForm()
+      _ = document.setDocumentMetadata(
+        DocumentMetadata(
+          title: "Blocked", author: nil, subject: nil, keywords: nil,
+          creator: nil, producer: nil))
+      let derivativeRefusal: String? = {
+        do {
+          try document.writeArchivalCopy(
+            to: output.appendingPathComponent("blocked-archival.pdf"))
+          return nil
+        } catch {
+          return error.localizedDescription
+        }
+      }()
+
+      let blockedAdd = document.addPageText(
+        pageIndex: 0, rect: [72, 120, 280, 150], text: "Blocked edit")
+      let refusalActions = refusals.map(\.action)
+      let refusalRestrictions = Set(refusals.map(\.restriction))
+      let expectedActions: [String] = [
+        "Edit Text", "Reflow Paragraph", "Image Editing", "Change Form Value",
+        "Flatten Form", "Document Metadata", "Add Text",
+      ]
+      let sourceUnchanged = try document.editSession.bytesForSave() == original
+      window.makeKeyAndOrderFront(nil)
+      try await Task.sleep(for: .milliseconds(100))
+      let restrictionMatches = document.contentEditingRestriction == .permissionDenied
+      let noticeMatches =
+        viewer.editingRestrictionNotice == DocumentEditingRestriction.permissionDenied.message
+      let readOnlyFlags = !document.canEditContent && !viewer.allowsContentEditing
+      let noticeContains =
+        viewer.editingRestrictionNotice?.contains("password allows reading but not modification")
+        == true
+      let noTraversal = !viewer.canSelectAdjacentPageObject
+      let inlineRefusal = viewer.textEditRefusalProvider?(0, [72, 120])
+      let imageRefusal = viewer.graphicRefusalProvider?(0, [72, 120])
+      let bannerVisible =
+        AccessibilityAudit.keyWindowElement(labeled: "Editing unavailable") != nil
+      let actionsMatch = refusalActions == expectedActions
+      let restrictionsMatch = refusalRestrictions == [.permissionDenied]
+      let alertTitleMatches = lastAlertTitle == "Add Text Unavailable"
+      let alertMessageMatches = lastAlertMessage.contains(
+        "Nothing was changed. Any open editor or draft has been left intact.")
+      let derivativeMatches =
+        derivativeRefusal?.contains("password allows reading but not modification") == true
+      guard restrictionMatches,
+        noticeMatches,
+        readOnlyFlags,
+        noticeContains,
+        noTraversal,
+        inlineRefusal == DocumentEditingRestriction.permissionDenied.message,
+        imageRefusal == DocumentEditingRestriction.permissionDenied.message,
+        bannerVisible,
+        !blockedAdd,
+        preservedDraft == "Keep this draft",
+        actionsMatch,
+        restrictionsMatch,
+        alertTitleMatches,
+        alertMessageMatches,
+        derivativeMatches,
+        sourceUnchanged
+      else {
         throw PDFError(.malformed,
-          "Password permissions were not explained at the point of use or the source changed")
+          "Password permissions were not explained at the point of use or the source changed "
+            + "(restriction=\(restrictionMatches), notice=\(noticeMatches), flags=\(readOnlyFlags), "
+            + "contains=\(noticeContains), traversal=\(noTraversal), banner=\(bannerVisible), "
+            + "inline=\(inlineRefusal ?? "nil"), image=\(imageRefusal ?? "nil"), "
+            + "add=\(blockedAdd), draft=\(preservedDraft ?? "nil"), actions=\(actionsMatch), "
+            + "restrictions=\(restrictionsMatch), alertTitle=\(alertTitleMatches), "
+            + "alertMessage=\(alertMessageMatches), derivative=\(derivativeMatches), "
+            + "bytes=\(sourceUnchanged), actualTitle=\(lastAlertTitle), "
+            + "actualActions=\(refusalActions), actualDerivative=\(derivativeRefusal ?? "nil"))")
+      }
+
+      // A real protected form must keep its sidebar draft when the fill is
+      // refused. This uses the form fixture rather than a synthetic field.
+      let formFixture = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+        .appendingPathComponent("Tests/Fixtures/form-pages.pdf")
+      let formGraph = try PDFParser.parse(Data(contentsOf: formFixture)).graph
+      let protectedFormBytes = try PDFWriter.write(
+        formGraph,
+        encryption: PDFEncryptionOptions(
+          userPassword: "user", ownerPassword: "owner", permissions: 4 | 16))
+      let protectedFormURL = output.appendingPathComponent("permission-form.pdf")
+      try protectedFormBytes.write(to: protectedFormURL, options: .atomic)
+      let formDocument = try SPDFDocument(
+        contentsOf: protectedFormURL, ofType: "com.adobe.pdf")
+      controller.addDocument(formDocument)
+      formDocument.makeWindowControllers()
+      defer { formDocument.close() }
+      guard let formViewer = formDocument.viewer,
+        formViewer.unlock(password: "user")
+      else { throw PDFError(.malformed, "Protected form did not unlock") }
+      formDocument.unlockCoreSession(with: "user")
+      try await Task.sleep(for: .milliseconds(100))
+      guard let field = formDocument.editSession.formFields().first(where: { $0.kind == .text }),
+        let formWindow = formDocument.windowControllers.first?.window
+      else { throw PDFError(.malformed, "Protected form has no editable text field") }
+      formWindow.makeKeyAndOrderFront(nil)
+      let formRevision = formDocument.editSession.documentRevision
+      let formWasDirty = formDocument.editSession.isDirty
+      formDocument.formsModel.pendingText[field.name] = "Keep form draft"
+      let formFillAccepted = formDocument.fillFormText(
+        fieldName: field.name, text: "Blocked fill")
+      let formSourceUnchanged =
+        try Data(contentsOf: protectedFormURL) == protectedFormBytes
+      guard !formFillAccepted,
+        formDocument.formsModel.pendingText[field.name] == "Keep form draft",
+        formDocument.editSession.documentRevision == formRevision,
+        formDocument.editSession.isDirty == formWasDirty,
+        formSourceUnchanged
+      else {
+        throw PDFError(
+          .malformed,
+          "A refused form fill lost its draft or changed the source "
+            + "(accepted=\(formFillAccepted), restriction=\(String(describing: formDocument.contentEditingRestriction)), "
+            + "draft=\(formDocument.formsModel.pendingText[field.name] ?? "nil"), "
+            + "revision=\(formDocument.editSession.documentRevision == formRevision), "
+            + "dirty=\(formDocument.editSession.isDirty == formWasDirty), "
+            + "source=\(formSourceUnchanged))")
       }
       checkpoint("password-limited read-only explanation passed")
     }
