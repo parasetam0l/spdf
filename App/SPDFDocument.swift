@@ -3680,6 +3680,62 @@ final class SPDFDocument: NSDocument {
     }
   }
 
+  /// PAG-02: merge external PDFs in the chosen order into one verified file.
+  /// The assembly layer refuses encrypted/signed sources and reports renamed
+  /// fields or dropped destinations.
+  @discardableResult
+  func combineDocuments(from urls: [URL], to url: URL) throws -> DocumentAssemblyReport {
+    guard !urls.isEmpty else {
+      throw PDFError(.malformed, "Choose at least one PDF to combine")
+    }
+    var sources: [(graph: PDFGraph, pageIDs: [PDFObjectID])] = []
+    for file in urls {
+      try DerivativeOutputPolicy.validateDestination(url, source: file)
+      let data = try Data(contentsOf: file)
+      let parsed = try PDFParser.parse(
+        data, limits: SPDFDocumentResourcePolicy.parsingLimits)
+      sources.append((graph: parsed.graph, pageIDs: parsed.pageIDs))
+    }
+    let merged = try DocumentAssembly.merge(
+      sources, labels: .preserve, catalogData: .firstDocument)
+    let data = try PDFWriter.write(
+      merged.graph, limits: SPDFDocumentResourcePolicy.parsingLimits)
+    try VerifiedFileWriter.write(
+      data, to: url, expectedGraph: merged.graph,
+      limits: SPDFDocumentResourcePolicy.parsingLimits)
+    return merged.report
+  }
+
+  /// PAG-02: choose source PDFs in order, then write one combined file.
+  func presentCombineDocuments() {
+    let open = NSOpenPanel()
+    open.allowedContentTypes = [.pdf]
+    open.allowsMultipleSelection = true
+    open.message = "Choose PDFs in the order they should appear."
+    open.prompt = "Choose"
+    open.begin { [weak self] response in
+      guard response == .OK, !open.urls.isEmpty, let self else { return }
+      let save = NSSavePanel()
+      save.allowedContentTypes = [.pdf]
+      let base = self.editSession.pageIDs.isEmpty
+        ? "Combined" : (self.fileURL?.deletingPathExtension().lastPathComponent ?? "Combined")
+      save.nameFieldStringValue = "\(base)-combined.pdf"
+      save.begin { [weak self] saveResponse in
+        guard saveResponse == .OK, let url = save.url, let self else { return }
+        do {
+          let report = try self.combineDocuments(from: open.urls, to: url)
+          let alert = NSAlert()
+          alert.messageText = "Documents Combined"
+          alert.informativeText = report.report()
+          alert.addButton(withTitle: "OK")
+          alert.runModal()
+        } catch {
+          self.presentError(error)
+        }
+      }
+    }
+  }
+
   func organizePages() {
     guard canEditContent, editSession.currentGraph != nil else { return }
     let model = PageOrganizerModel()

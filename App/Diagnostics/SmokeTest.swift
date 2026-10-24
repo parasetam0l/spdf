@@ -1198,6 +1198,16 @@
           guard partPages == [1, 2],
             try first.data(ofType: "com.adobe.pdf") == original
           else { throw PDFError(.malformed, "Split parts or source state are wrong") }
+          // PAG-02: combine external PDFs in order through the verified writer.
+          let combineURL = output.appendingPathComponent("combined.pdf")
+          let firstSource = try Data(contentsOf: firstURL)
+          let secondSource = try Data(contentsOf: secondURL)
+          _ = try first.combineDocuments(from: [firstURL, secondURL], to: combineURL)
+          let combined = try PDFParser.parse(Data(contentsOf: combineURL))
+          guard combined.pageCount == 4,
+            try Data(contentsOf: firstURL) == firstSource,
+            try Data(contentsOf: secondURL) == secondSource
+          else { throw PDFError(.malformed, "Combined output or source bytes are wrong") }
         }
 
         // Owned-core edit pipeline: rotate page 1, verify the edited bytes,
