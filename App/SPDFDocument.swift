@@ -735,6 +735,144 @@ final class SPDFDocument: NSDocument {
     refreshViewer(preservingPage: viewer.pageNumber)
   }
 
+  /// PAG-06: add a watermark, header, footer, page number or Bates mark to
+  /// explicit pages in one undoable transaction. Returns the preview plan that
+  /// was committed.
+  @discardableResult
+  func addPageMark(
+    _ mark: RepeatedMark, pageIDs: [PDFObjectID], margin: Double = 36
+  ) -> RepeatedMarkPlan? {
+    guard canEditContent, !pageIDs.isEmpty, let graph = editSession.currentGraph
+    else { return nil }
+    let command = AddRepeatedMarkCommand(
+      pageIDs: pageIDs, mark: mark, margin: margin)
+    do {
+      let plan = try command.plan(in: graph)
+      try editSession.apply(PDFTransaction([command]))
+      noteUserEdit()
+      refreshViewer(preservingPage: viewer?.pageNumber ?? 1)
+      return plan
+    } catch {
+      presentError(error)
+      return nil
+    }
+  }
+
+  /// PAG-06: dialog for the repeated-mark presets. The plan is shown before
+  /// the command is committed.
+  func presentAddPageMark() {
+    guard canEditContent, let viewer, viewer.pageCount > 0 else { return }
+    let types = ["Watermark", "Header", "Footer", "Page number", "Bates number"]
+    let typePopup = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 160, height: 24))
+    typePopup.addItems(withTitles: types)
+    let textField = NSTextField(frame: NSRect(x: 0, y: 0, width: 240, height: 22))
+    textField.stringValue = "CONFIDENTIAL"
+    let familyPopup = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 120, height: 24))
+    familyPopup.addItems(withTitles: ["Helvetica", "Times", "Courier"])
+    let sizeField = NSTextField(frame: NSRect(x: 0, y: 0, width: 60, height: 22))
+    sizeField.stringValue = "48"
+    let opacityField = NSTextField(frame: NSRect(x: 0, y: 0, width: 60, height: 22))
+    opacityField.stringValue = "0.2"
+    let angleField = NSTextField(frame: NSRect(x: 0, y: 0, width: 60, height: 22))
+    angleField.stringValue = "45"
+    let colorPopup = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 120, height: 24))
+    colorPopup.addItems(withTitles: ["Gray", "Black", "Red", "Blue"])
+    let boldCheckbox = NSButton(checkboxWithTitle: "Bold", target: nil, action: nil)
+    let pageField = NSTextField(frame: NSRect(x: 0, y: 0, width: 160, height: 22))
+    pageField.stringValue = "1-\(viewer.pageCount)"
+    let marginField = NSTextField(frame: NSRect(x: 0, y: 0, width: 60, height: 22))
+    marginField.stringValue = "36"
+    let startField = NSTextField(frame: NSRect(x: 0, y: 0, width: 60, height: 22))
+    startField.stringValue = "1"
+    let digitsField = NSTextField(frame: NSRect(x: 0, y: 0, width: 60, height: 22))
+    digitsField.stringValue = "6"
+    let rows: [[NSView]] = [
+      [NSTextField(labelWithString: "Type:"), typePopup],
+      [NSTextField(labelWithString: "Text / prefix:"), textField],
+      [NSTextField(labelWithString: "Font:"), familyPopup],
+      [NSTextField(labelWithString: "Size:"), sizeField],
+      [NSTextField(labelWithString: "Opacity:"), opacityField],
+      [NSTextField(labelWithString: "Angle:") , angleField],
+      [NSTextField(labelWithString: "Color:"), colorPopup],
+      [NSGridCell.emptyContentView, boldCheckbox],
+      [NSTextField(labelWithString: "Pages:"), pageField],
+      [NSTextField(labelWithString: "Margin:"), marginField],
+      [NSTextField(labelWithString: "Bates start:"), startField],
+      [NSTextField(labelWithString: "Bates digits:"), digitsField],
+    ]
+    let grid = NSGridView(views: rows)
+    grid.column(at: 0).xPlacement = .trailing
+    grid.frame = NSRect(x: 0, y: 0, width: 360, height: 330)
+    let dialog = NSAlert()
+    dialog.messageText = "Add Page Mark"
+    dialog.informativeText =
+      "Header, footer and page-number marks use the margin; watermarks are centered. "
+      + "Page numbers support {page} and {pages}. One undo step covers every selected page."
+    dialog.accessoryView = grid
+    dialog.addButton(withTitle: "Preview")
+    dialog.addButton(withTitle: "Cancel")
+    guard dialog.runModal() == .alertFirstButtonReturn else { return }
+
+    let size = Double(sizeField.stringValue) ?? 48
+    let opacity = Double(opacityField.stringValue) ?? 0.2
+    let angle = Double(angleField.stringValue) ?? 45
+    let margin = Double(marginField.stringValue) ?? 36
+    let start = Int(startField.stringValue) ?? 1
+    let digits = Int(digitsField.stringValue) ?? 6
+    let colors: [[Double]] = [
+      [0.35, 0.35, 0.35], [0, 0, 0], [0.7, 0, 0], [0, 0.2, 0.7],
+    ]
+    let family: AddedTextStyle.Family = [
+      AddedTextStyle.Family.helvetica, .times, .courier,
+    ][max(0, familyPopup.indexOfSelectedItem)]
+    let alignment: TextParagraphCandidate.Alignment =
+      typePopup.indexOfSelectedItem <= 2
+      ? .center
+      : (typePopup.indexOfSelectedItem == 3 ? .center : .left)
+    let style = AddedTextStyle(
+      family: family, bold: boldCheckbox.state == .on, size: size,
+      color: colors[max(0, colorPopup.indexOfSelectedItem)], alignment: alignment,
+      opacity: min(1, max(0, opacity)))
+    let rawText = textField.stringValue
+    let text = rawText.isEmpty ? "CONFIDENTIAL" : rawText
+    let mark: RepeatedMark
+    switch typePopup.indexOfSelectedItem {
+    case 1: mark = .header(text: text, style: style)
+    case 2: mark = .footer(text: text, style: style)
+    case 3: mark = .pageNumber(text: text.contains("{page}") ? text : "Page {page} of {pages}", style: style, offset: 0)
+    case 4: mark = .bates(prefix: text, start: start, digits: digits, style: style)
+    default: mark = .watermark(text: text, style: style, angle: angle)
+    }
+    let indices = pageIndices(from: pageField.stringValue, count: editSession.pageIDs.count)
+    guard !indices.isEmpty else {
+      NSSound.beep()
+      return
+    }
+    let pageIDs = indices.map { editSession.pageIDs[$0] }
+    guard let graph = editSession.currentGraph else { return }
+    let command = AddRepeatedMarkCommand(
+      pageIDs: pageIDs, mark: mark, margin: max(0, margin))
+    let plan: RepeatedMarkPlan
+    do {
+      plan = try command.plan(in: graph)
+    } catch {
+      presentError(error)
+      return
+    }
+    let preview = NSAlert()
+    preview.messageText = "Preview: \(types[max(0, typePopup.indexOfSelectedItem)])"
+    var detail = plan.summary
+    for page in plan.pages.prefix(6) {
+      detail += "\nPage \(page.pageIndex + 1): \(page.text)"
+    }
+    if plan.pages.count > 6 { detail += "\n…" }
+    preview.informativeText = detail
+    preview.addButton(withTitle: "Apply")
+    preview.addButton(withTitle: "Cancel")
+    guard preview.runModal() == .alertFirstButtonReturn else { return }
+    _ = addPageMark(mark, pageIDs: pageIDs, margin: max(0, margin))
+  }
+
   /// Parse a 1-based page list such as `1, 3-5` into zero-based indices.
   private func pageIndices(from spec: String, count: Int) -> [Int] {
     var result = Set<Int>()

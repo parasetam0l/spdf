@@ -277,6 +277,9 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
   @objc private func cropPages(_ sender: Any?) {
     currentDocument?.presentCropPages()
   }
+  @objc private func addPageMark(_ sender: Any?) {
+    currentDocument?.presentAddPageMark()
+  }
   @objc private func movePageUp(_ sender: Any?) { currentDocument?.moveCurrentPage(by: -1) }
   @objc private func movePageDown(_ sender: Any?) { currentDocument?.moveCurrentPage(by: 1) }
   @objc private func insertBlankPage(_ sender: Any?) {
@@ -719,7 +722,7 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
         && ((NSApp.keyWindow?.firstResponder as? InlinePageTextView)?.typingUndo.canRedo == true
           || document.editSession.canRedo)
     case #selector(rotateLeft), #selector(rotateRight), #selector(insertBlankPage),
-      #selector(cropPages):
+      #selector(cropPages), #selector(addPageMark):
       return document.canEditContent && (document.viewer?.pageCount ?? 0) > 0
     case #selector(movePageUp):
       return document.canEditContent && (document.viewer?.pageNumber ?? 1) > 1
@@ -935,6 +938,7 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
       "Rotate Right", #selector(rotateRight), key: "r", modifiers: [.command, .shift], target: self,
       to: page)
     add("Crop Pages…", #selector(cropPages), target: self, to: page)
+    add("Add Page Mark…", #selector(addPageMark), target: self, to: page)
     page.addItem(.separator())
     add("Move Page Up", #selector(movePageUp), target: self, to: page)
     add("Move Page Down", #selector(movePageDown), target: self, to: page)

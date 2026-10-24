@@ -1158,6 +1158,28 @@
           guard first.undoEdit(), try first.data(ofType: "com.adobe.pdf") == original else {
             throw PDFError(.malformed, "Trim box undo did not restore the original bytes")
           }
+          // PAG-06: a header mark lands on exactly the selected pages and
+          // undoes as one transaction.
+          let headerPlan = first.addPageMark(
+            .header(text: "Smoke Header", style: AddedTextStyle(size: 10)),
+            pageIDs: Array(first.editSession.pageIDs.prefix(2)))
+          guard headerPlan?.pages.count == 2 else {
+            throw PDFError(.malformed, "Page-mark plan did not cover the selected pages")
+          }
+          let markedPDF = try PDFParser.parse(try first.data(ofType: "com.adobe.pdf"))
+          let markedGraph = markedPDF.graph
+          let firstLayout = try PageTextLayout.build(
+            pageID: markedPDF.pageIDs[0], in: markedGraph)
+          let thirdLayout = try PageTextLayout.build(
+            pageID: markedPDF.pageIDs[2], in: markedGraph)
+          guard firstLayout.lines.contains(where: {
+            firstLayout.text(in: $0).contains("Smoke Header")
+          }), !thirdLayout.lines.contains(where: {
+            thirdLayout.text(in: $0).contains("Smoke Header")
+          }) else { throw PDFError(.malformed, "Page mark landed on the wrong pages") }
+          guard first.undoEdit(), try first.data(ofType: "com.adobe.pdf") == original else {
+            throw PDFError(.malformed, "Page mark undo did not restore the original bytes")
+          }
         }
 
         // Owned-core edit pipeline: rotate page 1, verify the edited bytes,
