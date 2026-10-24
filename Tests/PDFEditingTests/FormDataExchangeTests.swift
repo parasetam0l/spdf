@@ -112,6 +112,21 @@ struct FormDataExchangeTests {
     #expect(fields.first { $0.name == "agree" }?.buttonState == PDFName("Yes"))
   }
 
+  @Test func nestedXFDFUsesFullyQualifiedNames() throws {
+    let xml = """
+      <?xml version="1.0" encoding="UTF-8"?>
+      <xfdf xmlns="http://ns.adobe.com/xfdf/">
+      <fields>
+      <field name="parent">
+      <field name="child"><value>Nested</value></field>
+      </field>
+      </fields>
+      </xfdf>
+      """
+    let raw = try FormDataExchange.parse(Data(xml.utf8), format: .xfdf)
+    #expect(raw.contains { $0.name == "parent.child" && $0.value == "Nested" })
+  }
+
   @Test func unknownFieldsAreReportedNotGuessed() throws {
     let (filled, pageIDs) = try filledForm()
     let (commands, skipped, _) = try FormDataExchange.commands(

@@ -90,6 +90,7 @@ public enum FormDataExchange {
   private static func parseXFDF(_ data: Data) throws -> [(name: String, value: String?)] {
     final class Delegate: NSObject, XMLParserDelegate {
       var fields: [(String, String?)] = []
+      var fieldStack: [String] = []
       var currentName: String?
       var value = ""
       var insideValue = false
@@ -102,7 +103,9 @@ public enum FormDataExchange {
       ) {
         if elementName == "xfdf" { sawRoot = true }
         if elementName == "field" {
-          currentName = attributes["name"]
+          let name = attributes["name"] ?? ""
+          fieldStack.append(name)
+          currentName = fieldStack.filter { !$0.isEmpty }.joined(separator: ".")
           value = ""
         }
         if elementName == "value" {
@@ -120,10 +123,13 @@ public enum FormDataExchange {
         qualifiedName: String?
       ) {
         if elementName == "value" {
-          if let name = currentName { fields.append((name, value)) }
+          if let name = currentName, !name.isEmpty { fields.append((name, value)) }
           insideValue = false
         }
-        if elementName == "field" { currentName = nil }
+        if elementName == "field" {
+          if !fieldStack.isEmpty { fieldStack.removeLast() }
+          currentName = fieldStack.filter { !$0.isEmpty }.joined(separator: ".")
+        }
       }
 
       func parser(_ parser: XMLParser, parseErrorOccurred error: Error) {
