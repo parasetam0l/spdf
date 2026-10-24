@@ -895,11 +895,10 @@ public enum ParagraphReflow {
       }
       if !spans.isEmpty { return spans }
     }
-    // A fragmented subset may need several font resources to cover one
-    // paragraph. Automatic mixed-font segmentation is gated until the
-    // emitted advances agree with every source font's glyph metrics; a silent
-    // garble is worse than a refusal. Explicit `options.spans` can still use
-    // the multi-segment token model.
+    // Source-identical and edited mixed-font replacements are mapped by
+    // `automaticSourceSpans` above using the paragraph's existing fonts. This
+    // fallback remains for single-style paragraphs and explicit compatibility
+    // boundaries; it never substitutes an unrelated font.
     return [ParagraphSpan(text: replacement, styleIndex: 0)]
   }
 
