@@ -90,6 +90,16 @@ enum AnnotationSupport {
   /// Keep the declared object count consistent with the added objects:
   /// /Size is the highest object number plus one.
   static func finish(_ graph: inout PDFGraph, allocation: Allocation) {
+    // REV-01: give every generated annotation a stable /NM identity so XFDF
+    // export/import can merge comments instead of duplicating them. Imported
+    // identities are already present and are left untouched.
+    if case .dictionary(var dictionary)? = graph.objects[allocation.annotation],
+      dictionary[PDFName("NM")] == nil
+    {
+      dictionary[PDFName("NM")] = .string(
+        AnnotationText.encode("spdf-\(allocation.annotation.number)"))
+      graph.objects[allocation.annotation] = .dictionary(dictionary)
+    }
     graph.trailer[PDFName("Size")] = .integer(Int64(allocation.next))
   }
 

@@ -5666,6 +5666,82 @@ final class SPDFDocument: NSDocument {
     }
   }
 
+  /// REV-01: exchange review comments with another Acrobat-compatible tool.
+  var canExportComments: Bool { !editSession.comments().isEmpty }
+  var canImportComments: Bool { canEditContent }
+
+  func exportComments() {
+    let comments = editSession.comments()
+    guard !comments.isEmpty else { return }
+    let result: CommentExportResult
+    do {
+      result = try CommentExchange.export(comments: comments)
+    } catch {
+      presentError(error)
+      return
+    }
+    let panel = NSSavePanel()
+    panel.nameFieldStringValue = "comments.xfdf"
+    panel.allowedContentTypes = [UTType(filenameExtension: "xfdf") ?? .xml]
+    panel.begin { [weak self] response in
+      guard response == .OK, let url = panel.url, let self else { return }
+      do {
+        try result.data.write(to: url, options: .atomic)
+      } catch {
+        self.presentError(error)
+        return
+      }
+      guard !result.skipped.isEmpty else { return }
+      let alert = NSAlert()
+      alert.messageText = "Some Comments Were Not Exported"
+      alert.informativeText = result.skipped.prefix(12).joined(separator: "\n")
+      alert.addButton(withTitle: "OK")
+      alert.runModal()
+    }
+  }
+
+  func importComments() {
+    guard canEditContent else { return }
+    let panel = NSOpenPanel()
+    panel.allowedContentTypes = [
+      UTType(filenameExtension: "xfdf") ?? .xml, .xml,
+    ]
+    panel.allowsMultipleSelection = false
+    panel.message = "Choose an XFDF comment file to merge into this document."
+    panel.begin { [weak self] response in
+      guard response == .OK, let url = panel.url, let self, self.canEditContent,
+        let graph = self.editSession.currentGraph
+      else { return }
+      do {
+        let data = try Data(contentsOf: url)
+        let parsed = try CommentExchange.parse(data)
+        let plan = try CommentExchange.plan(
+          entries: parsed.entries, issues: parsed.issues, into: graph,
+          pageIDs: self.editSession.pageIDs)
+        if !plan.commands.isEmpty {
+          try self.editSession.apply(PDFTransaction(plan.commands))
+          self.noteUserEdit()
+          self.refreshViewer(preservingPage: self.viewer?.pageNumber ?? 1)
+        }
+        var lines = [
+          "Imported \(plan.added) new comment\(plan.added == 1 ? "" : "s"), updated \(plan.updated), unchanged \(plan.unchanged)."
+        ]
+        if !plan.skipped.isEmpty {
+          lines.append("")
+          lines.append("Skipped:")
+          lines.append(contentsOf: plan.skipped.prefix(12))
+        }
+        let alert = NSAlert()
+        alert.messageText = plan.commands.isEmpty ? "No Comment Changes" : "Comments Imported"
+        alert.informativeText = lines.joined(separator: "\n")
+        alert.addButton(withTitle: "OK")
+        alert.runModal()
+      } catch {
+        self.presentError(error)
+      }
+    }
+  }
+
   /// P30-015: re-inventory signatures and validate each one. Cryptographic
   /// validity, certificate trust, and revision changes are separate statuses;
   /// validation is offline and never claims revocation was checked.

@@ -1481,6 +1481,36 @@
         }
         viewer.showPages()
 
+        // REV-01: XFDF exchange merges into an earlier copy without
+        // duplicating existing comments, adds the reply, and is idempotent.
+        let commentExport = try CommentExchange.export(comments: threadedComments)
+        try commentExport.data.write(
+          to: output.appendingPathComponent("comments.xfdf"), options: .atomic)
+        let portableComments = try CommentExchange.parse(commentExport.data)
+        let mergePlan = try CommentExchange.plan(
+          entries: portableComments.entries, issues: portableComments.issues,
+          into: annotatedParsed.graph, pageIDs: annotatedParsed.pageIDs)
+        guard mergePlan.added == 1, mergePlan.updated == 1, mergePlan.unchanged == 4,
+          mergePlan.skipped.isEmpty, mergePlan.commands.count == 2
+        else { throw PDFError(.malformed, "XFDF merge planning failed") }
+        let merged = try PDFEditingEngine.commit(
+          PDFTransaction(mergePlan.commands), to: annotatedParsed.graph)
+        let mergedComments = CommentList.comments(
+          in: merged, pageIDs: annotatedParsed.pageIDs)
+        guard mergedComments.count == 6,
+          CommentList.threads(mergedComments, by: CommentFilter()).contains(where: {
+            $0.root.subtype == PDFName("Highlight") && $0.replies.count == 1
+          }),
+          mergedComments.first(where: { $0.subtype == PDFName("Highlight") })?.reviewState
+            == PDFName("Accepted")
+        else { throw PDFError(.malformed, "XFDF merge did not preserve threads or state") }
+        let repeatPlan = try CommentExchange.plan(
+          entries: portableComments.entries, issues: portableComments.issues,
+          into: merged, pageIDs: annotatedParsed.pageIDs)
+        guard repeatPlan.added == 0, repeatPlan.updated == 0,
+          repeatPlan.unchanged == 6, repeatPlan.commands.isEmpty
+        else { throw PDFError(.malformed, "XFDF merge was not idempotent") }
+
         try session.apply(
           PDFTransaction([
             MoveAnnotationCommand(

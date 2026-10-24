@@ -592,6 +592,12 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
   @objc private func exportReviewSummary(_ sender: Any?) {
     currentDocument?.exportReviewSummary()
   }
+  @objc private func exportComments(_ sender: Any?) {
+    currentDocument?.exportComments()
+  }
+  @objc private func importComments(_ sender: Any?) {
+    currentDocument?.importComments()
+  }
   @objc private func redactSelection(_ sender: Any?) {
     currentDocument?.redactSelection()
   }
@@ -829,6 +835,10 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
       return document.canEditContent && !document.editSession.formFields().isEmpty
     case #selector(exportReviewSummary):
       return document.canExportReviewSummary
+    case #selector(exportComments):
+      return document.canExportComments
+    case #selector(importComments):
+      return document.canImportComments
     case #selector(editSelectedText):
       return document.canEditContent && document.selectedTextTarget() != nil
     case #selector(selectNextPageObject(_:)), #selector(selectPreviousPageObject(_:)):
@@ -1127,6 +1137,9 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
     add("Field Tab Order…", #selector(editFormTabOrder), target: self, to: form)
 
     let annotate = submenu("Annotate", in: bar)
+    add("Export Comments (XFDF)…", #selector(exportComments), target: self, to: annotate)
+    add("Import Comments (XFDF)…", #selector(importComments), target: self, to: annotate)
+    annotate.addItem(.separator())
     add(
       "Highlight Selection", #selector(highlightSelection), key: "h",
       modifiers: [.command, .shift], target: self, to: annotate)
