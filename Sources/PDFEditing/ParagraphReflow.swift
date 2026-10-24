@@ -382,6 +382,8 @@ public enum ParagraphReflow {
           + "(\(Int((candidate.confidence * 100).rounded()))%); confirm explicitly to reflow it")
     }
     let spans = options.spans
+      ?? automaticSourceSpans(
+        candidate: candidate, replacement: replacement, context: context)
       ?? defaultSpans(
         candidate: candidate, replacement: replacement, context: context,
         preserveLineStyles: candidate.confidence < 0.6)
@@ -427,15 +429,17 @@ public enum ParagraphReflow {
         candidate.lineIndices.count, Int(floor((boxHeight - size * 0.2) / spacing)) + 1)
       let lines = wrap(
         paragraphs, width: boxWidth, firstLineWidth: max(24, boxWidth - indent),
-        context: context, scale: size / baseSize)
+        context: context, scale: size / baseSize,
+        tolerance: max(0.5, size * 0.1))
       let verticalOverflow = !lines.isEmpty
         && box[3] - size * 0.8 - spacingBefore
           - Double(lines.count - 1) * spacing - size * 0.2 < box[1] - 0.5
+      let tolerance = max(0.5, size * 0.1)
       let overflowed =
         lines.count > capacity || verticalOverflow
         || lines.enumerated().contains { index, line in
           let width = lineWidth(line, context: context, scale: size / baseSize)
-          return width + (index == 0 ? indent : 0) > boxWidth + 0.5
+          return width + (index == 0 ? indent : 0) > boxWidth + tolerance
         }
       switch options.overflow {
       case .shrinkToFit:
@@ -647,6 +651,61 @@ public enum ParagraphReflow {
     return (plan, collisions)
   }
 
+  /// TXT-01: for a source-identical reflow, recover the paragraph's original
+  /// per-character font resources in reading order. This is deliberately
+  /// narrower than arbitrary mixed-font editing: the replacement must match
+  /// the canonical reconstructed text after outer whitespace trimming, and the
+  /// source characters must align exactly. If either check fails, callers keep
+  /// the existing refusal path instead of guessing a font.
+  static func automaticSourceSpans(
+    candidate: TextParagraphCandidate, replacement: String, context: Context
+  ) -> [ParagraphSpan]? {
+    let replacementText = replacement.trimmingCharacters(in: .whitespacesAndNewlines)
+    let candidateText = candidate.text.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard replacementText == candidateText, !candidateText.isEmpty else { return nil }
+    var sourceCharacters: [(character: Character, styleIndex: Int)] = []
+    for (offset, _) in candidate.runIndices.enumerated() {
+      guard offset < candidate.runStyles.count, offset < context.styles.count,
+        offset < context.runs.count
+      else { return nil }
+      for character in context.runs[offset].text where !character.isWhitespace {
+        sourceCharacters.append((character, offset))
+      }
+    }
+    let targetCharacters = candidateText.filter { !$0.isWhitespace }
+    guard !sourceCharacters.isEmpty, sourceCharacters.count == targetCharacters.count else {
+      return nil
+    }
+    var spans: [ParagraphSpan] = []
+    var sourceIndex = 0
+    var wordHasSpan = false
+    for character in candidateText {
+      if character.isWhitespace {
+        wordHasSpan = false
+        continue
+      }
+      guard sourceIndex < sourceCharacters.count,
+        sourceCharacters[sourceIndex].character == character
+      else { return nil }
+      let styleIndex = sourceCharacters[sourceIndex].styleIndex
+      let joinsPrevious = wordHasSpan
+      if joinsPrevious, let last = spans.last, last.styleIndex == styleIndex {
+        spans[spans.count - 1] = ParagraphSpan(
+          text: last.text + String(character), styleIndex: styleIndex,
+          joinsPrevious: last.joinsPrevious)
+      } else {
+        spans.append(
+          ParagraphSpan(
+            text: String(character), styleIndex: styleIndex,
+            joinsPrevious: joinsPrevious))
+      }
+      wordHasSpan = true
+      sourceIndex += 1
+    }
+    guard sourceIndex == sourceCharacters.count else { return nil }
+    return spans.isEmpty ? nil : spans
+  }
+
   /// P19-023: default replacement spans. High-confidence paragraphs use one
   /// span with the dominant style; low-confidence paragraphs keep each
   /// original line's style by distributing the replacement proportionally.
@@ -786,7 +845,7 @@ public enum ParagraphReflow {
   /// or split silently.
   static func wrap(
     _ paragraphs: [[Token]], width: Double, firstLineWidth: Double? = nil,
-    context: Context, scale: Double
+    context: Context, scale: Double, tolerance: Double = 0
   ) -> [[Token]] {
     var lines: [[Token]] = []
     var isFirstLine = true
@@ -799,7 +858,7 @@ public enum ParagraphReflow {
         }
         let candidate = current + [token]
         let availableWidth = isFirstLine ? (firstLineWidth ?? width) : width
-        if lineWidth(candidate, context: context, scale: scale) <= availableWidth {
+        if lineWidth(candidate, context: context, scale: scale) <= availableWidth + tolerance {
           current = candidate
           continue
         }
@@ -1098,6 +1157,28 @@ public struct ReflowParagraphCommand: PDFEditCommand, Equatable, Sendable {
           + "\(AnnotationSupport.number(line.y)) Tm "
         bytes.append(contentsOf: Array(matrixLine.utf8))
         let codes = context.encode(segment.text, styleIndex: segment.styleIndex) ?? []
+        bytes.append(contentsOf: ReplaceTextCommand.literalStringBytes(codes))
+        bytes.append(contentsOf: Array(" Tj\n".utf8))
+      }
+      // Preserve the source's inter-line word separator without changing the
+      // wrapped plan. PDF extractors that concatenate same-line glyph runs do
+      // not invent a space at a BT/ET boundary; the source pages carry one.
+      if let last = line.segments.last, !last.text.hasSuffix(" "),
+        let codes = context.encode(" ", styleIndex: last.styleIndex)
+      {
+        let style = plan.styles[last.styleIndex]
+        bytes.append(
+          contentsOf: Array(
+            "/\(style.fontResource) \(AnnotationSupport.number(style.fontSize)) Tf\n".utf8))
+        let color = style.fillColor.count == 3 ? style.fillColor : [0, 0, 0]
+        bytes.append(
+          contentsOf: Array(
+            ("\(AnnotationSupport.number(color[0])) \(AnnotationSupport.number(color[1])) "
+              + "\(AnnotationSupport.number(color[2])) rg\n").utf8))
+        bytes.append(
+          contentsOf: Array(
+            ("1 0 0 1 \(AnnotationSupport.number(last.x + last.width)) "
+              + "\(AnnotationSupport.number(line.y)) Tm ").utf8))
         bytes.append(contentsOf: ReplaceTextCommand.literalStringBytes(codes))
         bytes.append(contentsOf: Array(" Tj\n".utf8))
       }

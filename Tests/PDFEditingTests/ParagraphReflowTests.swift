@@ -113,6 +113,54 @@ struct ParagraphReflowTests {
       trailer: [PDFName("Root"): .reference(PDFObjectID(1))])
   }
 
+  private func mixedFontGraph() -> PDFGraph {
+    let content = Data(
+      """
+      BT /F1 12 Tf 42 700 Td (Mix) Tj /F2 12 Tf (ed) Tj /F1 12 Tf ( words stay together.) Tj ET
+      BT /F1 12 Tf 42 680 Td (Second line remains readable.) Tj ET
+      """.utf8)
+    var graph = self.graph(content: content)
+    graph.objects[PDFObjectID(6)] = .dictionary([
+      PDFName("Type"): .name(PDFName("Font")),
+      PDFName("Subtype"): .name(PDFName("Type1")),
+      PDFName("BaseFont"): .name(PDFName("Times-Roman")),
+      PDFName("Encoding"): .name(PDFName("WinAnsiEncoding")),
+    ])
+    guard case .dictionary(var page)? = graph.objects[PDFObjectID(4)],
+      case .dictionary(var resources)? = page[PDFName("Resources")],
+      case .dictionary(var fonts)? = resources[PDFName("Font")]
+    else { return graph }
+    fonts[PDFName("F2")] = .reference(PDFObjectID(6))
+    resources[PDFName("Font")] = .dictionary(fonts)
+    page[PDFName("Resources")] = .dictionary(resources)
+    graph.objects[PDFObjectID(4)] = .dictionary(page)
+    return graph
+  }
+
+  @Test func sourceIdenticalMixedFontReflowSegmentsBySourceRuns() throws {
+    let graph = mixedFontGraph()
+    let pageID = try PDFPageTree.pageIDs(in: graph)[0]
+    let candidate = try paragraph(graph, pageID: pageID)
+    let plan = try ParagraphReflow.plan(
+      pageID: pageID, candidate: candidate, replacement: candidate.text,
+      in: graph).plan
+    let styles = Set(plan.lines.flatMap(\.segments).map {
+      plan.styles[$0.styleIndex].fontResource
+    })
+    #expect(styles == ["F1", "F2"])
+    #expect(plan.lines.flatMap(\.segments).map(\.text).joined().contains("Mixed"))
+    let edited = try PDFEditingEngine.commit(
+      PDFTransaction([
+        ReflowParagraphCommand(
+          pageID: pageID, candidate: candidate, replacement: candidate.text)
+      ]), to: graph)
+    let layout = try PageTextLayout.build(pageID: pageID, in: edited)
+    let layoutText = layout.clusters.map(\.text).joined()
+      .split(whereSeparator: \.isWhitespace).joined(separator: " ")
+    #expect(layoutText.contains("Mixed words stay together."))
+    #expect(layoutText.contains("Second line remains readable."))
+  }
+
   private func paragraph(_ graph: PDFGraph, pageID: PDFObjectID) throws
     -> TextParagraphCandidate
   {
@@ -132,9 +180,10 @@ struct ParagraphReflowTests {
 
   private func pageText(_ graph: PDFGraph, pageID: PDFObjectID) throws -> String {
     let content = try PageContent.load(pageID: pageID, in: graph)
-    return try TextRunIndexer.runs(
+    let runs = try TextRunIndexer.runs(
       in: content, graph: graph, allowStandard14MetricFallback: true)
-      .map(\.text).joined(separator: " ")
+    return runs.map(\.text).joined(separator: " ")
+      .split(whereSeparator: \.isWhitespace).joined(separator: " ")
   }
 
   @Test func reflowReplacesParagraphAndPreservesOtherContent() throws {

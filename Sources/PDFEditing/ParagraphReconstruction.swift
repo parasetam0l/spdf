@@ -198,6 +198,18 @@ public enum ParagraphReconstruction {
         bounds[1] = min(bounds[1], line.bounds[1])
         bounds[2] = max(bounds[2], line.bounds[2])
         bounds[3] = max(bounds[3], line.bounds[3])
+        // TXT-01: line bounds use estimated advances for fonts without
+        // widths; the placed clusters carry the actual visible right edge.
+        // Use the non-whitespace clusters so trailing soft-wrap spaces do not
+        // widen the paragraph, but do not let a metric estimate shrink it.
+        for index in line.range where layout.clusters.indices.contains(index) {
+          let cluster = layout.clusters[index]
+          guard !cluster.isWhitespace else { continue }
+          bounds[0] = min(bounds[0], cluster.bounds[0])
+          bounds[1] = min(bounds[1], cluster.bounds[1])
+          bounds[2] = max(bounds[2], cluster.bounds[2])
+          bounds[3] = max(bounds[3], cluster.bounds[3])
+        }
       }
       let lineRuns = block.map(\.runIndices)
       let runStyleList = unique(block.flatMap(\.runIndices)).map { runIndex -> ParagraphStyle in
