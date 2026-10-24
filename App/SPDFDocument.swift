@@ -3588,8 +3588,8 @@ final class SPDFDocument: NSDocument {
   /// destination folder. Files are named `<document>-part-01.pdf`.
   func presentSplitDocument() {
     guard canEditContent, let viewer, viewer.pageCount > 0 else { return }
-    let modePopup = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 170, height: 24))
-    modePopup.addItems(withTitles: ["Every N pages", "Page ranges"])
+    let modePopup = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 190, height: 24))
+    modePopup.addItems(withTitles: ["Every N pages", "Page ranges", "Top-level bookmarks"])
     let nField = NSTextField(frame: NSRect(x: 0, y: 0, width: 70, height: 22))
     nField.stringValue = "1"
     let rangesField = NSTextField(frame: NSRect(x: 0, y: 0, width: 220, height: 22))
@@ -3606,14 +3606,16 @@ final class SPDFDocument: NSDocument {
     alert.messageText = "Split Document"
     alert.informativeText =
       "Every-N groups pages in order; ranges treat each comma group as one file "
-      + "(for example 1-3, 4-6). A page cannot appear in two parts."
+      + "(for example 1-3, 4-6); bookmarks start a new part at each top-level bookmark "
+      + "with a destination. A page cannot appear in two parts."
     alert.accessoryView = grid
     alert.addButton(withTitle: "Choose Folder…")
     alert.addButton(withTitle: "Cancel")
     guard alert.runModal() == .alertFirstButtonReturn else { return }
     let pageIDs = editSession.pageIDs
     var groups: [[PDFObjectID]] = []
-    if modePopup.indexOfSelectedItem == 0 {
+    switch modePopup.indexOfSelectedItem {
+    case 0:
       let n = max(1, Int(nField.stringValue) ?? 1)
       var index = 0
       while index < pageIDs.count {
@@ -3621,11 +3623,35 @@ final class SPDFDocument: NSDocument {
         groups.append(Array(pageIDs[index..<end]))
         index = end
       }
-    } else {
+    case 1:
       for part in rangesField.stringValue.split(separator: ",") {
         let indices = pageIndices(from: String(part), count: pageIDs.count)
         guard !indices.isEmpty else { continue }
         groups.append(indices.map { pageIDs[$0] })
+      }
+    default:
+      guard let graph = editSession.currentGraph else { return }
+      let items = PDFOutlineInventory.items(in: graph, pageIDs: pageIDs)
+      var starts: [(page: Int, title: String)] = []
+      for item in items {
+        guard let page = item.pageIndex, page >= 0, page < pageIDs.count,
+          !starts.contains(where: { $0.page == page })
+        else { continue }
+        starts.append((page, item.title))
+      }
+      starts.sort { $0.page < $1.page }
+      guard !starts.isEmpty else {
+        presentError(
+          PDFError(.unsupported, "This document has no top-level bookmarks with page destinations"))
+        return
+      }
+      if let first = starts.first, first.page > 0 {
+        groups.append(Array(pageIDs[0..<first.page]))
+      }
+      for (index, start) in starts.enumerated() {
+        let end = index + 1 < starts.count ? starts[index + 1].page : pageIDs.count
+        guard start.page < end else { continue }
+        groups.append(Array(pageIDs[start.page..<end]))
       }
     }
     guard !groups.isEmpty else {
