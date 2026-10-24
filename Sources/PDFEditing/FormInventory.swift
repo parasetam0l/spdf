@@ -37,11 +37,15 @@ public struct FormField: Sendable, Equatable {
   public let options: [FormChoiceOption]
   /// P24-009: selected option indexes (/I).
   public let selectedIndexes: [Int]
+  /// FRM-05: text field maximum length (/MaxLen), when present.
+  public let maxLength: Int?
 
   public var isReadOnly: Bool { flags & 1 != 0 }
   public var isRequired: Bool { flags & 2 != 0 }
   /// P24-006: multiline text flag (bit 13).
   public var isMultiline: Bool { kind == .text && flags & 4096 != 0 }
+  /// FRM-05: comb text flag (bit 25) spreads characters across cells.
+  public var isComb: Bool { kind == .text && flags & 16_777_216 != 0 }
   /// P24-010: push buttons are modeled but their actions never run.
   public var isPushButton: Bool { kind == .button && flags & 65536 != 0 }
   /// P24-008: radio groups use bit 16.
@@ -287,10 +291,17 @@ public enum FormInventory {
         return nil
       }
     }
+    var maxLength: Int?
+    if case .integer(let raw)? = field[PDFName("MaxLen")], raw > 0,
+      let length = Int(exactly: raw)
+    {
+      maxLength = length
+    }
     results.append(
       FormField(
         fieldID: resolvedObjectID(value), name: name, kind: kind, flags: ff, value: v,
-        defaultValue: dv, widgets: widgets, options: options, selectedIndexes: selectedIndexes))
+        defaultValue: dv, widgets: widgets, options: options, selectedIndexes: selectedIndexes,
+        maxLength: maxLength))
   }
 
   static func makeWidget(

@@ -46,7 +46,8 @@ public struct SetFormTextCommand: PDFEditCommand, Equatable, Sendable {
       guard let widgetID = widget.objectID, let rect = widget.rect else { continue }
       let appearance = Self.textAppearance(
         text: context.displayText, rect: rect, multiline: context.field.isMultiline,
-        da: context.da, fontID: fontID)
+        da: context.da, fontID: fontID, comb: context.field.isComb,
+        maxLength: context.field.maxLength)
       nextNumber = try Self.installAppearance(
         appearance, widgetID: widgetID, in: &graph, nextNumber: nextNumber)
     }
@@ -137,7 +138,7 @@ public struct SetFormTextCommand: PDFEditCommand, Equatable, Sendable {
 
   static func textAppearance(
     text: String, rect: [Double], multiline: Bool, da: (size: Double, color: [Double]),
-    fontID: PDFObjectID, alignment: Int = 0
+    fontID: PDFObjectID, alignment: Int = 0, comb: Bool = false, maxLength: Int? = nil
   ) -> PDFStream {
     let width = rect[2] - rect[0]
     let height = rect[3] - rect[1]
@@ -148,24 +149,42 @@ public struct SetFormTextCommand: PDFEditCommand, Equatable, Sendable {
     content += "\(AnnotationSupport.number(da.color[0])) "
     content += "\(AnnotationSupport.number(da.color[1])) "
     content += "\(AnnotationSupport.number(da.color[2])) rg\n"
-    for (index, line) in text.components(separatedBy: .newlines).enumerated() {
-      guard let escaped = AnnotationSupport.escapedLiteral(line) else { continue }
-      let y: Double
-      if multiline {
-        y = height - size - 2 - Double(index) * leading
-      } else {
-        y = (height - size) / 2 + size * 0.2
+    if comb {
+      let flat = text.replacingOccurrences(of: "\n", with: " ")
+      let cells = max(maxLength ?? max(flat.count, 1), 1)
+      let cellWidth = width / Double(cells)
+      let y = (height - size) / 2 + size * 0.2
+      for (index, character) in flat.prefix(cells).enumerated() {
+        let glyph = String(character)
+        guard let escaped = AnnotationSupport.escapedLiteral(glyph) else { continue }
+        let estimatedWidth = size * 0.5
+        let x = Double(index) * cellWidth + max(0, (cellWidth - estimatedWidth) / 2)
+        content +=
+          "1 0 0 1 \(AnnotationSupport.number(x)) \(AnnotationSupport.number(y)) Tm "
+          + "\(escaped) Tj\n"
       }
-      // P25-012: alignment (0 left, 1 center, 2 right) with an estimated
-      // Helvetica width for the line.
-      let estimatedWidth = Double(line.count) * size * 0.5
-      let x: Double
-      switch alignment {
-      case 1: x = max(2, (width - estimatedWidth) / 2)
-      case 2: x = max(2, width - estimatedWidth - 2)
-      default: x = 2
+    } else {
+      for (index, line) in text.components(separatedBy: .newlines).enumerated() {
+        guard let escaped = AnnotationSupport.escapedLiteral(line) else { continue }
+        let y: Double
+        if multiline {
+          y = height - size - 2 - Double(index) * leading
+        } else {
+          y = (height - size) / 2 + size * 0.2
+        }
+        // P25-012: alignment (0 left, 1 center, 2 right) with an estimated
+        // Helvetica width for the line.
+        let estimatedWidth = Double(line.count) * size * 0.5
+        let x: Double
+        switch alignment {
+        case 1: x = max(2, (width - estimatedWidth) / 2)
+        case 2: x = max(2, width - estimatedWidth - 2)
+        default: x = 2
+        }
+        content +=
+          "1 0 0 1 \(AnnotationSupport.number(x)) \(AnnotationSupport.number(y)) Tm "
+          + "\(escaped) Tj\n"
       }
-      content += "1 0 0 1 \(AnnotationSupport.number(x)) \(AnnotationSupport.number(y)) Tm \(escaped) Tj\n"
     }
     content += "ET\nQ\n"
     return AnnotationSupport.formAppearance(

@@ -308,6 +308,33 @@ struct FormTests {
     #expect(reopenedTeam.stringValue == "red, blue")
   }
 
+  @Test func combTextFieldDistributesCharactersAcrossCells() throws {
+    let (graph, _) = try formFixture()
+    var comb = graph
+    guard case .dictionary(var field)? = comb.objects[PDFObjectID(110)] else {
+      Issue.record("name field missing")
+      return
+    }
+    field[PDFName("Ff")] = .integer(16_777_216)
+    field[PDFName("MaxLen")] = .integer(6)
+    comb.objects[PDFObjectID(110)] = .dictionary(field)
+    let filled = try PDFEditingEngine.commit(
+      PDFTransaction([SetFormTextCommand(fieldName: "name", text: "ABC")]), to: comb)
+    guard case .stream(let appearance)? = filled.objects[PDFObjectID(111)] else {
+      Issue.record("comb appearance missing")
+      return
+    }
+    let content = String(decoding: appearance.bytes, as: UTF8.self)
+    #expect(content.components(separatedBy: " Tm ").count - 1 == 3)
+    #expect(content.contains("(A) Tj"))
+    #expect(content.contains("(B) Tj"))
+    #expect(content.contains("(C) Tj"))
+    #expect(throws: PDFError.self) {
+      _ = try PDFEditingEngine.commit(
+        PDFTransaction([SetFormTextCommand(fieldName: "name", text: "ABCDEFG")]), to: comb)
+    }
+  }
+
   @Test func resetRestoresDocumentedDefaultValues() throws {
     let (graph, pageIDs) = try formFixture()
     let filled = try PDFEditingEngine.commit(
