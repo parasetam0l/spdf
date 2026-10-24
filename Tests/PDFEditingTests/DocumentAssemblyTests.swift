@@ -137,6 +137,24 @@ struct DocumentAssemblyTests {
     }
   }
 
+  @Test func sizeSplitGroupsByAssembledBytesAndReportsOversizedPages() throws {
+    let parsed = try PDFParser.parse(PDFFixtures.imagePages())
+    let pageIDs = parsed.pageIDs
+    let onePageSize = try PDFWriter.write(
+      DocumentAssembly.extract(parsed.graph, pageIDs: [pageIDs[0]]).graph
+    ).count
+    let grouped = try DocumentAssembly.groupPagesBySize(
+      pageIDs, in: parsed.graph, maxBytes: onePageSize)
+    #expect(grouped.groups.flatMap { $0 } == pageIDs)
+    #expect(grouped.groups.count >= 2)
+    #expect(grouped.groups.allSatisfy { !$0.isEmpty })
+
+    let tiny = try DocumentAssembly.groupPagesBySize(
+      pageIDs, in: parsed.graph, maxBytes: 1)
+    #expect(tiny.oversized == Set(pageIDs))
+    #expect(tiny.groups.count == pageIDs.count)
+  }
+
   // MARK: - P23-008/P23-009/P23-014/P23-015/P23-017
 
   @Test func extractionKeepsSelectedPagesAndDropsForeignTargets() throws {

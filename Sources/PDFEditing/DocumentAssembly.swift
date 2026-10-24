@@ -245,6 +245,42 @@ public enum DocumentAssembly {
     }
   }
 
+  /// PAG-03: group pages greedily by the actual assembled output size. A
+  /// single page larger than the limit is kept as its own part and reported
+  /// as oversized; no page is dropped or duplicated.
+  public static func groupPagesBySize(
+    _ pageIDs: [PDFObjectID], in graph: PDFGraph, maxBytes: Int,
+    limits: PDFLimits = PDFLimits()
+  ) throws -> (groups: [[PDFObjectID]], oversized: Set<PDFObjectID>) {
+    guard maxBytes > 0 else {
+      throw PDFError(.malformed, "The split size limit must be positive")
+    }
+    guard !pageIDs.isEmpty else {
+      throw PDFError(.malformed, "There are no pages to split")
+    }
+    func assembledSize(_ ids: [PDFObjectID]) throws -> Int {
+      let extracted = try extract(graph, pageIDs: ids, limits: limits)
+      return try PDFWriter.write(extracted.graph, limits: limits).count
+    }
+    var groups: [[PDFObjectID]] = []
+    var current: [PDFObjectID] = []
+    var oversized = Set<PDFObjectID>()
+    for pageID in pageIDs {
+      let candidate = current + [pageID]
+      let size = try assembledSize(candidate)
+      if !current.isEmpty, size > maxBytes {
+        groups.append(current)
+        current = [pageID]
+        if try assembledSize([pageID]) > maxBytes { oversized.insert(pageID) }
+      } else {
+        current = candidate
+        if current.count == 1, size > maxBytes { oversized.insert(pageID) }
+      }
+    }
+    if !current.isEmpty { groups.append(current) }
+    return (groups, oversized)
+  }
+
   /// P23-008/P23-009: extract the selected pages into a new document. Content,
   /// annotations, and resources come along; destinations and outlines are
   /// remapped when their targets survive and dropped (with a report) when they

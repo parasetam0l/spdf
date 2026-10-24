@@ -1198,6 +1198,14 @@
           guard partPages == [1, 2],
             try first.data(ofType: "com.adobe.pdf") == original
           else { throw PDFError(.malformed, "Split parts or source state are wrong") }
+          // PAG-03: measured size split keeps oversized single pages alone.
+          let sizeDirectory = output.appendingPathComponent("split-size", isDirectory: true)
+          try FileManager.default.createDirectory(
+            at: sizeDirectory, withIntermediateDirectories: true)
+          let sizeParts = try first.splitDocumentBySize(to: sizeDirectory, maxBytes: 1)
+          guard sizeParts.results.count == 3, sizeParts.oversized.count == 3 else {
+            throw PDFError(.malformed, "Measured size split did not isolate pages")
+          }
           // PAG-02: combine external PDFs in order through the verified writer.
           let combineURL = output.appendingPathComponent("combined.pdf")
           let firstSource = try Data(contentsOf: firstURL)

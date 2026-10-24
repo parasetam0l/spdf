@@ -3584,35 +3584,58 @@ final class SPDFDocument: NSDocument {
     return results
   }
 
-  /// PAG-03: choose every-N-pages or explicit comma-separated ranges, then a
-  /// destination folder. Files are named `<document>-part-01.pdf`.
+  /// PAG-03: split by measured output size. A single oversized page is kept
+  /// as its own part and reported.
+  func splitDocumentBySize(
+    to directory: URL, maxBytes: Int
+  ) throws -> (results: [(url: URL, report: DocumentAssemblyReport)], oversized: Set<PDFObjectID>) {
+    guard let graph = editSession.currentGraph else {
+      throw PDFError(.malformed, "There is no document to split")
+    }
+    let grouped = try DocumentAssembly.groupPagesBySize(
+      editSession.pageIDs, in: graph, maxBytes: maxBytes,
+      limits: SPDFDocumentResourcePolicy.parsingLimits)
+    let results = try splitDocument(to: directory, pageGroups: grouped.groups)
+    return (results, grouped.oversized)
+  }
+
+  /// PAG-03: choose every-N-pages, explicit ranges, bookmarks, or a measured
+  /// byte-size limit, then a destination folder.
   func presentSplitDocument() {
     guard canEditContent, let viewer, viewer.pageCount > 0 else { return }
     let modePopup = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 190, height: 24))
-    modePopup.addItems(withTitles: ["Every N pages", "Page ranges", "Top-level bookmarks"])
+    modePopup.addItems(withTitles: [
+      "Every N pages", "Page ranges", "Top-level bookmarks", "Maximum size",
+    ])
     let nField = NSTextField(frame: NSRect(x: 0, y: 0, width: 70, height: 22))
     nField.stringValue = "1"
     let rangesField = NSTextField(frame: NSRect(x: 0, y: 0, width: 220, height: 22))
     rangesField.stringValue = "1-\(viewer.pageCount)"
+    let sizeField = NSTextField(frame: NSRect(x: 0, y: 0, width: 70, height: 22))
+    sizeField.stringValue = "5"
     let rows: [[NSView]] = [
       [NSTextField(labelWithString: "Split:"), modePopup],
       [NSTextField(labelWithString: "Pages per file:"), nField],
       [NSTextField(labelWithString: "Ranges:"), rangesField],
+      [NSTextField(labelWithString: "Max MB per file:"), sizeField],
     ]
     let grid = NSGridView(views: rows)
     grid.column(at: 0).xPlacement = .trailing
-    grid.frame = NSRect(x: 0, y: 0, width: 340, height: 100)
+    grid.frame = NSRect(x: 0, y: 0, width: 340, height: 130)
     let alert = NSAlert()
     alert.messageText = "Split Document"
     alert.informativeText =
       "Every-N groups pages in order; ranges treat each comma group as one file "
       + "(for example 1-3, 4-6); bookmarks start a new part at each top-level bookmark "
-      + "with a destination. A page cannot appear in two parts."
+      + "with a destination; maximum size measures each assembled part and keeps an "
+      + "oversized single page alone. A page cannot appear in two parts."
     alert.accessoryView = grid
     alert.addButton(withTitle: "Choose Folder…")
     alert.addButton(withTitle: "Cancel")
     guard alert.runModal() == .alertFirstButtonReturn else { return }
     let pageIDs = editSession.pageIDs
+    let isSizeMode = modePopup.indexOfSelectedItem == 3
+    let maxBytes = max(1, Int((Double(sizeField.stringValue) ?? 5) * 1_024 * 1_024))
     var groups: [[PDFObjectID]] = []
     switch modePopup.indexOfSelectedItem {
     case 0:
@@ -3629,7 +3652,7 @@ final class SPDFDocument: NSDocument {
         guard !indices.isEmpty else { continue }
         groups.append(indices.map { pageIDs[$0] })
       }
-    default:
+    case 2:
       guard let graph = editSession.currentGraph else { return }
       let items = PDFOutlineInventory.items(in: graph, pageIDs: pageIDs)
       var starts: [(page: Int, title: String)] = []
@@ -3653,8 +3676,10 @@ final class SPDFDocument: NSDocument {
         guard start.page < end else { continue }
         groups.append(Array(pageIDs[start.page..<end]))
       }
+    default:
+      break
     }
-    guard !groups.isEmpty else {
+    guard isSizeMode || !groups.isEmpty else {
       NSSound.beep()
       return
     }
@@ -3666,12 +3691,30 @@ final class SPDFDocument: NSDocument {
     panel.begin { [weak self] response in
       guard response == .OK, let directory = panel.url, let self else { return }
       do {
-        let results = try self.splitDocument(to: directory, pageGroups: groups)
-        let alert = NSAlert()
-        alert.messageText = "Document Split"
-        alert.informativeText =
+        let results: [(url: URL, report: DocumentAssemblyReport)]
+        var oversized = Set<PDFObjectID>()
+        if isSizeMode {
+          let outcome = try self.splitDocumentBySize(
+            to: directory, maxBytes: maxBytes)
+          results = outcome.results
+          oversized = outcome.oversized
+        } else {
+          results = try self.splitDocument(to: directory, pageGroups: groups)
+        }
+        var detail =
           results.map { "\($0.url.lastPathComponent): \($0.report.report())" }
           .joined(separator: "\n\n")
+        if !oversized.isEmpty {
+          let pages = self.editSession.pageIDs.enumerated()
+            .filter { oversized.contains($0.element) }
+            .map { String($0.offset + 1) }
+          detail +=
+            "\n\nThese single pages exceed the chosen size and were kept alone: "
+            + pages.joined(separator: ", ")
+        }
+        let alert = NSAlert()
+        alert.messageText = "Document Split"
+        alert.informativeText = detail
         alert.addButton(withTitle: "OK")
         alert.runModal()
       } catch {
