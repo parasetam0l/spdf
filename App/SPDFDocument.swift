@@ -6123,7 +6123,7 @@ final class SPDFDocument: NSDocument {
           self.refreshViewer(preservingPage: self.viewer?.pageNumber ?? 1)
         }
         var lines = [
-          "Imported \(plan.added) new comment\(plan.added == 1 ? "" : "s"), updated \(plan.updated), unchanged \(plan.unchanged)."
+          "Imported \(plan.added) new comment\(plan.added == 1 ? "" : "s"), updated \(plan.updated), moved \(plan.moved), unchanged \(plan.unchanged)."
         ]
         if !plan.skipped.isEmpty {
           lines.append("")

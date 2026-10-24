@@ -96,16 +96,18 @@ public struct CommentMergePlan: Sendable {
   public let commands: [any PDFEditCommand]
   public let added: Int
   public let updated: Int
+  public let moved: Int
   public let unchanged: Int
   public let skipped: [String]
 
   public init(
-    commands: [any PDFEditCommand], added: Int, updated: Int, unchanged: Int,
-    skipped: [String]
+    commands: [any PDFEditCommand], added: Int, updated: Int, moved: Int = 0,
+    unchanged: Int, skipped: [String]
   ) {
     self.commands = commands
     self.added = added
     self.updated = updated
+    self.moved = moved
     self.unchanged = unchanged
     self.skipped = skipped
   }
@@ -405,6 +407,7 @@ public enum CommentExchange {
     var newEntries: [CommentExchangeEntry] = []
     var skipped = issues
     var updated = 0
+    var moved = 0
     var unchanged = 0
     for entry in entries {
       let id = entry.identity.isEmpty ? derivedIdentity(entry) : entry.identity
@@ -422,16 +425,34 @@ public enum CommentExchange {
             "Page \(entry.pageIndex + 1): identifier \(id) belongs to a different comment type.")
           continue
         }
-        guard comment.pageIndex == entry.pageIndex else {
-          skipped.append(
-            "Page \(entry.pageIndex + 1): moving an existing comment to another page is not merged.")
-          continue
-        }
         guard supportedSubtypes.contains(entry.subtype) else {
           // An annotation type this importer cannot author stays exactly as
           // it is when the same file is round-tripped; new entries of that
           // type are reported below.
           unchanged += 1
+          continue
+        }
+        if comment.pageIndex != entry.pageIndex {
+          guard comment.annotation.objectID != nil else {
+            skipped.append(
+              "Page \(entry.pageIndex + 1): a direct comment dictionary cannot move pages.")
+            continue
+          }
+          let normalizedEntry = normalized(entry, identity: id)
+          if let issue = newEntryIssue(normalizedEntry) {
+            skipped.append("Page \(entry.pageIndex + 1): \(issue)")
+            continue
+          }
+          if let update = updateCommand(
+            for: comment, entry: entry, identity: id, pageID: comment.pageID)
+          {
+            commands.append(update)
+          }
+          commands.append(
+            MoveCommentToPageCommand(
+              sourcePageID: comment.pageID, sourceIndex: comment.annotation.index,
+              destinationPageID: pageIDs[entry.pageIndex], entry: normalizedEntry))
+          moved += 1
           continue
         }
         if entry.subtype == PDFName("FreeText"), let issue = newEntryIssue(entry) {
@@ -501,8 +522,8 @@ public enum CommentExchange {
           entries: resolved, pageIDs: pageIDs, existingParents: existingParents))
     }
     return CommentMergePlan(
-      commands: commands, added: resolved.count, updated: updated, unchanged: unchanged,
-      skipped: skipped)
+      commands: commands, added: resolved.count, updated: updated, moved: moved,
+      unchanged: unchanged, skipped: skipped)
   }
 
   // MARK: - Export helpers
@@ -1305,7 +1326,7 @@ public struct ImportCommentsCommand: PDFEditCommand, Sendable {
     }
   }
 
-  private static func polygonAppearance(
+  static func polygonAppearance(
     points: [Double], rect: [Double], color: [Double], borderWidth: Double,
     opacity: Double, closed: Bool
   ) -> PDFStream {

@@ -305,6 +305,62 @@ struct CommentExchangeTests {
     #expect(repeatPlan.unchanged == 1)
   }
 
+  @Test func importingAnExistingCommentOnAnotherPageMovesIt() throws {
+    let (graph, pageIDs) = try reviewedDocument()
+    let exported = try CommentExchange.export(
+      comments: CommentList.comments(in: graph, pageIDs: pageIDs))
+    let parsed = try CommentExchange.parse(exported.data)
+    let root = try #require(
+      parsed.entries.first { $0.contents == "Smoke review" && $0.inReplyTo == nil })
+    let moved = CommentExchangeEntry(
+      identity: root.identity, pageIndex: 2, subtype: PDFName("Highlight"),
+      rect: [100, 200, 180, 230],
+      quadPoints: [100, 230, 180, 230, 100, 200, 180, 200],
+      contents: "Moved review", author: root.author, modified: root.modified,
+      subject: root.subject, state: PDFName("Accepted"), stateModel: root.stateModel,
+      color: [0, 0, 1], opacity: 0.4, flags: 4)
+    let plan = try CommentExchange.plan(
+      entries: [moved], into: graph, pageIDs: pageIDs)
+    #expect(plan.moved == 1)
+    #expect(plan.added == 0)
+    #expect(plan.updated == 0)
+    #expect(plan.skipped.isEmpty)
+    #expect(plan.commands.count == 2)
+
+    let updated = try PDFEditingEngine.commit(
+      PDFTransaction(plan.commands), to: graph)
+    let comments = CommentList.comments(in: updated, pageIDs: pageIDs)
+    #expect(comments.count == 3)
+    let movedRoot = try #require(
+      comments.first { $0.contents == "Moved review" })
+    #expect(movedRoot.pageIndex == 2)
+    #expect(movedRoot.annotation.rect == [100, 200, 180, 230])
+    #expect(movedRoot.annotation.color == [0, 0, 1])
+    #expect(movedRoot.reviewState == PDFName("Accepted"))
+    let threads = CommentList.threads(comments, by: CommentFilter())
+    #expect(
+      threads.contains {
+        $0.root.contents == "Moved review" && $0.replies.map(\.contents) == ["Smoke reply"]
+      })
+    guard case .dictionary(let ap)? = movedRoot.annotation.dictionary[PDFName("AP")],
+      case .reference(let apID)? = ap[PDFName("N")],
+      case .stream(let stream)? = updated.objects[apID]
+    else {
+      Issue.record("Moved comment appearance is missing")
+      return
+    }
+    #expect(String(decoding: stream.bytes, as: UTF8.self).contains("0 0 1 rg"))
+
+    let reopened = try PDFParser.parse(try PDFWriter.write(updated))
+    let reopenedComments = CommentList.comments(in: reopened.graph, pageIDs: reopened.pageIDs)
+    #expect(reopenedComments.first { $0.contents == "Moved review" }?.pageIndex == 2)
+    let repeatPlan = try CommentExchange.plan(
+      entries: [moved], into: reopened.graph, pageIDs: reopened.pageIDs)
+    #expect(repeatPlan.moved == 0)
+    #expect(repeatPlan.added == 0)
+    #expect(repeatPlan.unchanged == 1)
+  }
+
   @Test func polygonAndPolyLineRoundTripVertices() throws {
     let parsed = try PDFParser.parse(PDFFixtures.onePage())
     let entries = [

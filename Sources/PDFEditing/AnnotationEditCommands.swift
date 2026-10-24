@@ -108,8 +108,9 @@ public struct SetAnnotationStyleCommand: PDFEditCommand, Equatable, Sendable {
 
   static let supportedSubtypes: Set<PDFName> = [
     PDFName("Highlight"), PDFName("Underline"), PDFName("StrikeOut"), PDFName("Squiggly"),
-    PDFName("Square"), PDFName("Circle"), PDFName("Line"), PDFName("Ink"),
-    PDFName("Text"), PDFName("FreeText"), PDFName("Stamp"),
+    PDFName("Square"), PDFName("Circle"), PDFName("Line"), PDFName("Polygon"),
+    PDFName("PolyLine"), PDFName("Ink"), PDFName("Text"), PDFName("FreeText"),
+    PDFName("Stamp"),
   ]
 
   public func validate(in graph: PDFGraph) throws {
@@ -198,6 +199,15 @@ public struct SetAnnotationStyleCommand: PDFEditCommand, Equatable, Sendable {
       stream = AddInkCommand.appearance(
         strokes: strokes, rect: rect, color: newColor,
         borderWidth: width > 0 ? width : 2, opacity: newOpacity)
+    case PDFName("Polygon"), PDFName("PolyLine"):
+      guard let points = Self.vertices(of: dictionary) else {
+        throw PDFError(.malformed, "Polygon or polyline has no vertices")
+      }
+      let width = AnnotationSupport.borderWidth(of: dictionary)
+      stream = ImportCommentsCommand.polygonAppearance(
+        points: points, rect: rect, color: newColor,
+        borderWidth: width > 0 ? width : 1, opacity: newOpacity,
+        closed: subtype == PDFName("Polygon"))
     case PDFName("Text"):
       let size = min(max(min(rect[2] - rect[0], rect[3] - rect[1]), 8), 72)
       stream = AddNoteCommand.appearance(size: size, color: newColor, opacity: newOpacity)
@@ -293,6 +303,15 @@ public struct SetAnnotationStyleCommand: PDFEditCommand, Equatable, Sendable {
     return result.isEmpty ? nil : result
   }
 
+  static func vertices(of dictionary: [PDFName: PDFValue]) -> [Double]? {
+    guard case .array(let values)? = dictionary[PDFName("Vertices")] else { return nil }
+    let numbers = values.compactMap(Annotation.number)
+    guard numbers.count == values.count, numbers.count >= 4, numbers.count % 2 == 0 else {
+      return nil
+    }
+    return numbers
+  }
+
   static func text(_ value: PDFValue?) -> String? {
     guard case .string(let data)? = value else { return nil }
     return AnnotationText.decode(data)
@@ -351,6 +370,13 @@ public struct SetAnnotationStyleCommand: PDFEditCommand, Equatable, Sendable {
     case PDFName("Ink"):
       guard inkStrokes(of: dictionary) != nil else {
         throw PDFError(.malformed, "Ink annotation has no strokes")
+      }
+    case PDFName("Polygon"), PDFName("PolyLine"):
+      guard let points = vertices(of: dictionary) else {
+        throw PDFError(.malformed, "Polygon or polyline has no vertices")
+      }
+      if subtype == PDFName("Polygon"), points.count < 6 {
+        throw PDFError(.malformed, "Polygon needs at least three vertices")
       }
     case PDFName("Text"), PDFName("FreeText"), PDFName("Stamp"):
       guard Annotation.numbers(dictionary[PDFName("Rect")], count: 4) != nil else {
