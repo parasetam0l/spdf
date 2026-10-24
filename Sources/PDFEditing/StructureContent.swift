@@ -267,11 +267,18 @@ public struct PDFOutlineItem: Sendable, Equatable {
   public let title: String
   public let pageIndex: Int?
   public let children: [PDFOutlineItem]
+  /// Object identity when the outline entry is indirect; nil for a synthetic
+  /// entry.
+  public let objectID: PDFObjectID?
 
-  public init(title: String, pageIndex: Int?, children: [PDFOutlineItem]) {
+  public init(
+    title: String, pageIndex: Int?, children: [PDFOutlineItem],
+    objectID: PDFObjectID? = nil
+  ) {
     self.title = title
     self.pageIndex = pageIndex
     self.children = children
+    self.objectID = objectID
   }
 }
 
@@ -312,7 +319,10 @@ public enum PDFOutlineInventory {
         if case .reference(let childID)? = item[PDFName("First")] {
           children = walk(childID, depth: depth + 1)
         }
-        items.append(PDFOutlineItem(title: title, pageIndex: pageIndex, children: children))
+        items.append(
+          PDFOutlineItem(
+            title: title, pageIndex: pageIndex, children: children,
+            objectID: itemID))
         if case .reference(let nextID)? = item[PDFName("Next")] {
           current = nextID
         } else {

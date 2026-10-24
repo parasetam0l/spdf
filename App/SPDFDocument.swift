@@ -3902,6 +3902,88 @@ final class SPDFDocument: NSDocument {
     }
   }
 
+  /// PAG-09: add a top-level bookmark at the current page.
+  func presentAddBookmark() {
+    guard canEditContent, let viewer, viewer.pageNumber > 0,
+      viewer.pageNumber <= editSession.pageIDs.count
+    else { return }
+    let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 300, height: 22))
+    field.stringValue = "Page \(viewer.pageNumber)"
+    let grid = NSGridView(views: [
+      [NSTextField(labelWithString: "Title:"), field]
+    ])
+    grid.column(at: 0).xPlacement = .trailing
+    grid.frame = NSRect(x: 0, y: 0, width: 380, height: 40)
+    let alert = NSAlert()
+    alert.messageText = "Add Bookmark"
+    alert.informativeText = "Adds a top-level bookmark to the current page."
+    alert.accessoryView = grid
+    alert.addButton(withTitle: "Add")
+    alert.addButton(withTitle: "Cancel")
+    guard alert.runModal() == .alertFirstButtonReturn else { return }
+    let title = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !title.isEmpty else {
+      NSSound.beep()
+      return
+    }
+    do {
+      try editSession.apply(
+        PDFTransaction([
+          AddBookmarkCommand(
+            title: title, pageID: editSession.pageIDs[viewer.pageNumber - 1])
+        ]))
+    } catch {
+      presentError(error)
+      return
+    }
+    noteUserEdit()
+    refreshViewer(preservingPage: viewer.pageNumber)
+  }
+
+  /// PAG-09: remove one existing bookmark and its descendants.
+  func presentRemoveBookmark() {
+    guard canEditContent, let graph = editSession.currentGraph else { return }
+    var flat: [(title: String, depth: Int, objectID: PDFObjectID)] = []
+    func walk(_ items: [PDFOutlineItem], depth: Int) {
+      for item in items {
+        if let id = item.objectID { flat.append((item.title, depth, id)) }
+        walk(item.children, depth: depth + 1)
+      }
+    }
+    walk(
+      PDFOutlineInventory.items(in: graph, pageIDs: editSession.pageIDs), depth: 0)
+    guard !flat.isEmpty else {
+      let alert = NSAlert()
+      alert.messageText = "No Bookmarks"
+      alert.informativeText = "This document has no bookmarks to remove."
+      alert.addButton(withTitle: "OK")
+      alert.runModal()
+      return
+    }
+    let popup = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 360, height: 24))
+    popup.addItems(withTitles: flat.map {
+      String(repeating: "  ", count: $0.depth) + $0.title
+    })
+    let alert = NSAlert()
+    alert.messageText = "Remove Bookmark"
+    alert.informativeText =
+      "Removes the selected bookmark and any child bookmarks as one undo step."
+    alert.accessoryView = popup
+    alert.addButton(withTitle: "Remove")
+    alert.addButton(withTitle: "Cancel")
+    guard alert.runModal() == .alertFirstButtonReturn else { return }
+    let item = flat[max(0, popup.indexOfSelectedItem)]
+    do {
+      try editSession.apply(
+        PDFTransaction([RemoveBookmarkCommand(objectID: item.objectID)]))
+    } catch {
+      presentError(error)
+      return
+    }
+    noteUserEdit()
+    refreshViewer(preservingPage: viewer?.pageNumber ?? 1)
+  }
+
   /// PAG-09: edit the document information dictionary.
   func presentDocumentMetadata() {
     guard canEditContent, let graph = editSession.currentGraph else { return }
