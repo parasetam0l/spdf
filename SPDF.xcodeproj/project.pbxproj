@@ -42,6 +42,7 @@
 		A7B6DD2E541614F439B22C8D /* DocumentSession in Frameworks */ = {isa = PBXBuildFile; productRef = E4807F76590BAF1A9C61F0A9 /* DocumentSession */; };
 		B5ED5932EEADA8C869BCBF09 /* PageOrganizer.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1EB135BD7BF21701C6FA995 /* PageOrganizer.swift */; };
 		BA02870B845C4579EF78B9F5 /* AppUpdater.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4B5DD137683723B1199261BD /* AppUpdater.swift */; };
+		BA49026DF218DBD9C2A3416A /* CombineDocuments.swift in Sources */ = {isa = PBXBuildFile; fileRef = C168F8ADE4C1C2B2357AB45D /* CombineDocuments.swift */; };
 		D1F6538C09136F84873D47F1 /* SPDFApplication.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3F519216B8858C30CEFEE846 /* SPDFApplication.swift */; };
 		D426C9CFBFC337ACD496AC17 /* SPDFDocument.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6F91EF2F352F7D8A64BA83B0 /* SPDFDocument.swift */; };
 		D43832A0B248F0F66322E774 /* AccessibilityAudit.swift in Sources */ = {isa = PBXBuildFile; fileRef = A426D276236110E33031673E /* AccessibilityAudit.swift */; };
@@ -95,6 +96,7 @@
 		B9390A4E48951B844369EC28 /* spdf */ = {isa = PBXFileReference; lastKnownFileType = folder; name = spdf; path = .; sourceTree = SOURCE_ROOT; };
 		C0705225D1C69ADFF420119E /* UpdateSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UpdateSettingsView.swift; sourceTree = "<group>"; };
 		C08CF3F98E01E8C697903CEB /* ImportedParagraphSmoke.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ImportedParagraphSmoke.swift; sourceTree = "<group>"; };
+		C168F8ADE4C1C2B2357AB45D /* CombineDocuments.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CombineDocuments.swift; sourceTree = "<group>"; };
 		C2D20568FDE859912E452D28 /* ComparisonSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComparisonSession.swift; sourceTree = "<group>"; };
 		C70DB85406AC9CCA1F09669C /* ComparisonWindow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComparisonWindow.swift; sourceTree = "<group>"; };
 		CAEDDE0A21FD109A8C499FD3 /* SignatureCanvas.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SignatureCanvas.swift; sourceTree = "<group>"; };
@@ -128,6 +130,7 @@
 				07489EF96ED38AC775027645 /* ApplicationDelegate.swift */,
 				4B5DD137683723B1199261BD /* AppUpdater.swift */,
 				0CF10BA4A83CEEEA549975AF /* Assets.xcassets */,
+				C168F8ADE4C1C2B2357AB45D /* CombineDocuments.swift */,
 				50BAA98BFBFE2B0F82566CFA /* CommentsModel.swift */,
 				A10BEC367F4A982BF380EEF7 /* CommentsPanel.swift */,
 				C2D20568FDE859912E452D28 /* ComparisonSession.swift */,
@@ -314,6 +317,7 @@
 				3FD6850EB221398A65AB2A22 /* ActualUpdaterProbe.swift in Sources */,
 				BA02870B845C4579EF78B9F5 /* AppUpdater.swift in Sources */,
 				73CAAFA4B2309D979E39F4F6 /* ApplicationDelegate.swift in Sources */,
+				BA49026DF218DBD9C2A3416A /* CombineDocuments.swift in Sources */,
 				9BDD7D0E0E17C86FCEEAADF2 /* CommentsModel.swift in Sources */,
 				D476B0FEEFA9A0A50D0C12C7 /* CommentsPanel.swift in Sources */,
 				2DC129A2BA815F4E141D9C21 /* ComparisonSession.swift in Sources */,
