@@ -897,6 +897,17 @@
             .item(withTitle: "Manage Attachments…") != nil
         else { throw PDFError(.malformed, "Attachment manager window or menu is missing") }
         attachmentManager.close()
+        attachmentDocument.manageBookmarks()
+        try await Task.sleep(for: .milliseconds(80))
+        guard
+          let bookmarkManager = NSApp.windows.first(where: {
+            $0.title == "Bookmarks" && $0.isVisible
+          }),
+          !bookmarkManager.isReleasedWhenClosed,
+          NSApp.mainMenu?.item(withTitle: "Page")?.submenu?
+            .item(withTitle: "Manage Bookmarks…") != nil
+        else { throw PDFError(.malformed, "Bookmark manager window or menu is missing") }
+        bookmarkManager.close()
 
         // P34-021–P34-024: print-to-PDF derivative through the native print
         // pipeline, reopened with an independent reader.
