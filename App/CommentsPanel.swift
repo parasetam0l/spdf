@@ -25,7 +25,8 @@ struct CommentsPanel: View {
 
   private static let subtypes: [PDFName] = [
     PDFName("Highlight"), PDFName("Underline"), PDFName("StrikeOut"), PDFName("Squiggly"),
-    PDFName("Text"), PDFName("Square"), PDFName("Circle"), PDFName("Line"), PDFName("Ink"),
+    PDFName("Text"), PDFName("FreeText"), PDFName("Square"), PDFName("Circle"),
+    PDFName("Line"), PDFName("Polygon"), PDFName("PolyLine"), PDFName("Ink"),
     PDFName("Stamp"), PDFName("FileAttachment"),
   ]
 
@@ -291,9 +292,12 @@ struct CommentsPanel: View {
     case PDFName("Underline"): return "Underline"
     case PDFName("StrikeOut"): return "Strikethrough"
     case PDFName("Text"): return "Note"
+    case PDFName("FreeText"): return "Free Text"
     case PDFName("Square"): return "Square"
     case PDFName("Circle"): return "Circle"
     case PDFName("Line"): return "Line"
+    case PDFName("Polygon"): return "Polygon"
+    case PDFName("PolyLine"): return "Polyline"
     case PDFName("Ink"): return "Ink"
     case PDFName("Stamp"): return "Stamp"
     case PDFName("FileAttachment"): return "Attachment"
@@ -316,9 +320,12 @@ struct CommentsPanel: View {
     case PDFName("Underline"): return "underline"
     case PDFName("StrikeOut"): return "strikethrough"
     case PDFName("Text"): return "note.text"
+    case PDFName("FreeText"): return "textformat"
     case PDFName("Square"): return "square"
     case PDFName("Circle"): return "circle"
     case PDFName("Line"): return "line.diagonal"
+    case PDFName("Polygon"): return "pentagon"
+    case PDFName("PolyLine"): return "scribble"
     case PDFName("Ink"): return "scribble"
     case PDFName("Stamp"): return "seal"
     default: return "text.bubble"

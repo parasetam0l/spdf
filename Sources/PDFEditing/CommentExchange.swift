@@ -28,6 +28,7 @@ public struct CommentExchangeEntry: Sendable, Equatable {
   public let lineEnd: [Double]?
   public let startEnding: PDFName?
   public let endEnding: PDFName?
+  public let vertices: [Double]?
 
   public init(
     identity: String, pageIndex: Int, subtype: PDFName, rect: [Double],
@@ -37,7 +38,7 @@ public struct CommentExchangeEntry: Sendable, Equatable {
     opacity: Double? = nil, flags: Int? = nil, iconName: PDFName? = nil,
     inReplyTo: String? = nil, borderWidth: Double? = nil, inkStrokes: [[Double]]? = nil,
     defaultAppearance: String? = nil, lineStart: [Double]? = nil, lineEnd: [Double]? = nil,
-    startEnding: PDFName? = nil, endEnding: PDFName? = nil
+    startEnding: PDFName? = nil, endEnding: PDFName? = nil, vertices: [Double]? = nil
   ) {
     self.identity = identity
     self.pageIndex = pageIndex
@@ -63,6 +64,7 @@ public struct CommentExchangeEntry: Sendable, Equatable {
     self.lineEnd = lineEnd
     self.startEnding = startEnding
     self.endEnding = endEnding
+    self.vertices = vertices
   }
 }
 
@@ -116,7 +118,8 @@ public enum CommentExchange {
   public static let supportedSubtypes: Set<PDFName> = [
     PDFName("Text"), PDFName("Highlight"), PDFName("Underline"), PDFName("StrikeOut"),
     PDFName("Squiggly"), PDFName("Square"), PDFName("Circle"), PDFName("Ink"),
-    PDFName("FreeText"), PDFName("Stamp"), PDFName("Line"),
+    PDFName("FreeText"), PDFName("Stamp"), PDFName("Line"), PDFName("Polygon"),
+    PDFName("PolyLine"),
   ]
 
   /// Identity used in XFDF. Generated annotations carry /NM; older comments
@@ -209,9 +212,17 @@ public enum CommentExchange {
       if let strokes = inkStrokes(comment.annotation), !strokes.isEmpty {
         attributes.append(("width", number(borderWidth(comment.annotation) ?? 2)))
       } else if subtype == PDFName("Square") || subtype == PDFName("Circle")
-        || subtype == PDFName("Line")
+        || subtype == PDFName("Line") || subtype == PDFName("Polygon")
+        || subtype == PDFName("PolyLine")
       {
         attributes.append(("width", number(borderWidth(comment.annotation) ?? 1)))
+      }
+      if subtype == PDFName("Polygon") || subtype == PDFName("PolyLine") {
+        guard let points = vertices(comment.annotation), points.count >= 4 else {
+          skipped.append("Page \(comment.pageIndex + 1): \(typeName(subtype)) has no vertices.")
+          continue
+        }
+        attributes.append(("vertices", numbers(points)))
       }
       if subtype == PDFName("Line") {
         guard let points = linePoints(comment.annotation), points.count == 4 else {
@@ -481,7 +492,7 @@ public enum CommentExchange {
             borderWidth: entry.borderWidth, inkStrokes: entry.inkStrokes,
             defaultAppearance: entry.defaultAppearance, lineStart: entry.lineStart,
             lineEnd: entry.lineEnd, startEnding: entry.startEnding,
-            endEnding: entry.endEnding))
+            endEnding: entry.endEnding, vertices: entry.vertices))
       }
     }
     if !resolved.isEmpty {
@@ -652,6 +663,16 @@ public enum CommentExchange {
     return (name(values[0]), name(values[1]))
   }
 
+  static func vertices(_ annotation: Annotation) -> [Double]? {
+    guard case .array(let values)? = annotation.dictionary[PDFName("Vertices")] else {
+      return nil
+    }
+    let points = values.compactMap(numberValue)
+    guard points.count == values.count, points.count >= 4, points.count % 2 == 0
+    else { return nil }
+    return points
+  }
+
   static func borderWidth(_ annotation: Annotation) -> Double? {
     if case .dictionary(let border)? = annotation.dictionary[PDFName("BS")],
       let width = numberValue(border[PDFName("W")] ?? .null)
@@ -776,6 +797,14 @@ public enum CommentExchange {
         return "line end ending \(typeName(tail)) is unsupported."
       }
     }
+    if entry.subtype == PDFName("Polygon") || entry.subtype == PDFName("PolyLine") {
+      guard let points = entry.vertices, points.count >= 4, points.count % 2 == 0,
+        points.allSatisfy(\.isFinite)
+      else { return "polygon or polyline vertices are invalid." }
+      if entry.subtype == PDFName("Polygon"), points.count < 6 {
+        return "polygon needs at least three vertices."
+      }
+    }
     if let color = entry.color {
       guard color.count == 3, color.allSatisfy({ $0.isFinite && $0 >= 0 && $0 <= 1 }) else {
         return "color is invalid."
@@ -848,7 +877,8 @@ public enum CommentExchange {
       inReplyTo: entry.inReplyTo, borderWidth: entry.borderWidth,
       inkStrokes: entry.inkStrokes, defaultAppearance: entry.defaultAppearance,
       lineStart: entry.lineStart, lineEnd: entry.lineEnd,
-      startEnding: entry.startEnding, endEnding: entry.endEnding)
+      startEnding: entry.startEnding, endEnding: entry.endEnding,
+      vertices: entry.vertices)
   }
 
   static func quadPoints(from rect: [Double]) -> [Double] {
@@ -864,6 +894,7 @@ public enum CommentExchange {
       numbers(entry.quadPoints ?? []), entry.contents ?? "", entry.author ?? "",
       entry.modified ?? "", entry.defaultAppearance ?? "",
       numbers(entry.lineStart ?? []), numbers(entry.lineEnd ?? []),
+      numbers(entry.vertices ?? []),
     ].joined(separator: "|")
     var hash: UInt64 = 14_695_981_039_346_656_037
     for byte in seed.utf8 {
@@ -921,6 +952,7 @@ private final class Pending {
     let lineEnd = attributes["end"].flatMap(CommentExchange.parseNumbers).flatMap {
       $0.count == 2 ? $0 : nil
     }
+    let vertices = attributes["vertices"].flatMap(CommentExchange.parseNumbers)
     let result = CommentExchangeEntry(
       identity: identity, pageIndex: page, subtype: subtype, rect: normalizedRect,
       quadPoints: coords, contents: contents, author: nonEmpty(attributes["title"]),
@@ -933,7 +965,7 @@ private final class Pending {
       inkStrokes: inkStrokes.isEmpty ? nil : inkStrokes,
       defaultAppearance: nonEmpty(defaultAppearance), lineStart: lineStart,
       lineEnd: lineEnd, startEnding: nonEmpty(attributes["head"]).map { PDFName($0) },
-      endEnding: nonEmpty(attributes["tail"]).map { PDFName($0) })
+      endEnding: nonEmpty(attributes["tail"]).map { PDFName($0) }, vertices: vertices)
     return result.identity.isEmpty
       ? CommentExchangeEntry(
         identity: CommentExchange.derivedIdentity(result), pageIndex: result.pageIndex,
@@ -945,7 +977,7 @@ private final class Pending {
         borderWidth: result.borderWidth, inkStrokes: result.inkStrokes,
         defaultAppearance: result.defaultAppearance, lineStart: result.lineStart,
         lineEnd: result.lineEnd, startEnding: result.startEnding,
-        endEnding: result.endEnding)
+        endEnding: result.endEnding, vertices: result.vertices)
       : result
   }
 
@@ -1035,6 +1067,16 @@ public struct ImportCommentsCommand: PDFEditCommand, Sendable {
         }
         if let tail = entry.endEnding, !supported.contains(tail) {
           throw PDFError(.unsupported, "An imported line has an unsupported end ending")
+        }
+      }
+      if entry.subtype == PDFName("Polygon") || entry.subtype == PDFName("PolyLine") {
+        guard let points = entry.vertices, points.count >= 4, points.count % 2 == 0,
+          points.allSatisfy(\.isFinite)
+        else {
+          throw PDFError(.malformed, "An imported polygon or polyline has invalid vertices")
+        }
+        if entry.subtype == PDFName("Polygon"), points.count < 6 {
+          throw PDFError(.malformed, "An imported polygon needs at least three vertices")
         }
       }
       if let color = entry.color {
@@ -1152,6 +1194,15 @@ public struct ImportCommentsCommand: PDFEditCommand, Sendable {
           PDFName("Type"): .name(PDFName("Border")), PDFName("W"): .real(width),
         ])
       }
+      if entry.subtype == PDFName("Polygon") || entry.subtype == PDFName("PolyLine"),
+        let points = entry.vertices
+      {
+        dictionary[PDFName("Vertices")] = .array(points.map { .real($0) })
+        dictionary[PDFName("IC")] = .array(color.map { .real($0) })
+        dictionary[PDFName("BS")] = .dictionary([
+          PDFName("Type"): .name(PDFName("Border")), PDFName("W"): .real(width),
+        ])
+      }
       if entry.subtype == PDFName("FreeText"), let fontID {
         let size = CommentExchange.freeTextFontSize(entry.defaultAppearance)
         dictionary[PDFName("DA")] = .string(
@@ -1243,10 +1294,56 @@ public struct ImportCommentsCommand: PDFEditCommand, Sendable {
       return AddLineCommand.appearance(
         from: start, to: end, rect: geometry.rect, startArrow: geometry.startArrow,
         endArrow: geometry.endArrow, color: color, borderWidth: width, opacity: opacity)
+    case PDFName("Polygon"), PDFName("PolyLine"):
+      return Self.polygonAppearance(
+        points: entry.vertices ?? [], rect: entry.rect, color: color,
+        borderWidth: width, opacity: opacity,
+        closed: entry.subtype == PDFName("Polygon"))
     default:
       return AddHighlightCommand.appearance(
         quads: quads, rect: entry.rect, color: color, opacity: opacity)
     }
+  }
+
+  private static func polygonAppearance(
+    points: [Double], rect: [Double], color: [Double], borderWidth: Double,
+    opacity: Double, closed: Bool
+  ) -> PDFStream {
+    guard points.count >= 4, points.count % 2 == 0 else {
+      return AnnotationSupport.formAppearance(
+        rect: rect, content: "q\nQ\n",
+        resources: AnnotationSupport.stateResources(opacity: opacity, blendMultiply: false))
+    }
+    var content = "q\n"
+    content += "\(AnnotationSupport.number(color[0])) "
+    content += "\(AnnotationSupport.number(color[1])) "
+    content += "\(AnnotationSupport.number(color[2])) rg\n"
+    content += "\(AnnotationSupport.number(color[0])) "
+    content += "\(AnnotationSupport.number(color[1])) "
+    content += "\(AnnotationSupport.number(color[2])) RG\n"
+    content += "\(AnnotationSupport.number(borderWidth)) w\n"
+    content += "/GS0 gs\n"
+    func local(_ index: Int) -> String {
+      let x = points[index] - rect[0]
+      let y = points[index + 1] - rect[1]
+      return "\(AnnotationSupport.number(x)) \(AnnotationSupport.number(y))"
+    }
+    content += "\(local(0)) m\n"
+    var index = 2
+    while index + 1 < points.count {
+      content += "\(local(index)) l\n"
+      index += 2
+    }
+    if closed {
+      content += "h\n"
+      content += borderWidth > 0 ? "B\n" : "f\n"
+    } else if borderWidth > 0 {
+      content += "S\n"
+    }
+    content += "Q\n"
+    return AnnotationSupport.formAppearance(
+      rect: rect, content: content,
+      resources: AnnotationSupport.stateResources(opacity: opacity, blendMultiply: false))
   }
 
   private static func squigglyAppearance(

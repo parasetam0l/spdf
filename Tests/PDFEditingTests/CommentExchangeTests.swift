@@ -305,10 +305,62 @@ struct CommentExchangeTests {
     #expect(repeatPlan.unchanged == 1)
   }
 
+  @Test func polygonAndPolyLineRoundTripVertices() throws {
+    let parsed = try PDFParser.parse(PDFFixtures.onePage())
+    let entries = [
+      CommentExchangeEntry(
+        identity: "polygon-1", pageIndex: 0, subtype: PDFName("Polygon"),
+        rect: [20, 20, 120, 120], contents: "Polygon", author: "Ada",
+        modified: "D:20261013120000Z", color: [0.2, 0.5, 0.9], opacity: 0.4,
+        flags: 4, borderWidth: 2, vertices: [30, 30, 110, 40, 90, 110, 30, 80]),
+      CommentExchangeEntry(
+        identity: "polyline-1", pageIndex: 0, subtype: PDFName("PolyLine"),
+        rect: [140, 20, 240, 120], contents: "Polyline", author: "Ada",
+        modified: "D:20261013120500Z", color: [0.9, 0.2, 0.1], opacity: 1,
+        flags: 4, borderWidth: 2, vertices: [150, 30, 190, 110, 230, 40]),
+    ]
+    let imported = try PDFEditingEngine.commit(
+      PDFTransaction([
+        ImportCommentsCommand(entries: entries, pageIDs: parsed.pageIDs)
+      ]), to: parsed.graph)
+    let comments = CommentList.comments(in: imported, pageIDs: parsed.pageIDs)
+    #expect(comments.map { $0.subtype } == [PDFName("Polygon"), PDFName("PolyLine")])
+    #expect(comments.allSatisfy { $0.annotation.dictionary[PDFName("AP")] != nil })
+    #expect(comments.allSatisfy { $0.annotation.dictionary[PDFName("Vertices")] != nil })
+
+    let exported = try CommentExchange.export(comments: comments)
+    let portable = try CommentExchange.parse(exported.data)
+    #expect(portable.entries.count == 2)
+    let polygon = try #require(
+      portable.entries.first { $0.subtype == PDFName("Polygon") })
+    #expect(polygon.vertices?.count == 8)
+    #expect(polygon.contents == "Polygon")
+    #expect(polygon.color != nil)
+    let polyline = try #require(
+      portable.entries.first { $0.subtype == PDFName("PolyLine") })
+    #expect(polyline.vertices == [150, 30, 190, 110, 230, 40])
+
+    let fresh = try PDFParser.parse(PDFFixtures.onePage())
+    let plan = try CommentExchange.plan(
+      entries: portable.entries, issues: portable.issues, into: fresh.graph,
+      pageIDs: fresh.pageIDs)
+    #expect(plan.added == 2)
+    #expect(plan.skipped.isEmpty)
+    let merged = try PDFEditingEngine.commit(
+      PDFTransaction(plan.commands), to: fresh.graph)
+    let reopened = try PDFParser.parse(try PDFWriter.write(merged))
+    #expect(
+      CommentList.comments(in: reopened.graph, pageIDs: reopened.pageIDs).count == 2)
+    let repeatPlan = try CommentExchange.plan(
+      entries: portable.entries, into: reopened.graph, pageIDs: reopened.pageIDs)
+    #expect(repeatPlan.added == 0)
+    #expect(repeatPlan.unchanged == 2)
+  }
+
   @Test func unsupportedAndMalformedCommentsAreReported() throws {
     let entry = CommentExchangeEntry(
-      identity: "polygon-1", pageIndex: 0, subtype: PDFName("Polygon"),
-      rect: [0, 0, 20, 20], contents: "Polygon")
+      identity: "attachment-1", pageIndex: 0, subtype: PDFName("FileAttachment"),
+      rect: [0, 0, 20, 20], contents: "Attachment")
     let parsed = try PDFParser.parse(PDFFixtures.onePage())
     let plan = try CommentExchange.plan(
       entries: [entry], into: parsed.graph, pageIDs: parsed.pageIDs)
