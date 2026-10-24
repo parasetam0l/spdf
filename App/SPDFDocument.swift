@@ -64,6 +64,8 @@ final class SPDFDocument: NSDocument {
   private var combineWindow: NSWindow?
   private var attachmentsModel: AttachmentsModel?
   private var attachmentsWindow: NSWindow?
+  private var bookmarksModel: BookmarksModel?
+  private var bookmarksWindow: NSWindow?
   private var signatureWindow: NSWindow?
   private var warnedXFA = false
   /// Test hook: where provisioned fonts are installed (defaults to
@@ -4148,6 +4150,155 @@ final class SPDFDocument: NSDocument {
     refreshViewer(preservingPage: viewer?.pageNumber ?? 1)
   }
 
+  /// PAG-09: an outline manager with explicit hierarchy operations. Every
+  /// change is a canonical undo step and refreshes the window in place.
+  var canManageBookmarks: Bool { editSession.currentGraph != nil }
+
+  func manageBookmarks() {
+    if let window = bookmarksWindow {
+      refreshBookmarks()
+      window.makeKeyAndOrderFront(nil)
+      return
+    }
+    guard canManageBookmarks else { return }
+    let model = BookmarksModel()
+    let window = NSWindow(
+      contentRect: NSRect(x: 0, y: 0, width: 680, height: 460),
+      styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered,
+      defer: false)
+    window.title = "Bookmarks"
+    window.isReleasedWhenClosed = false
+    window.setFrameAutosaveName("spdf-bookmarks")
+    window.contentView = NSHostingView(
+      rootView: BookmarksManagerPanel(
+        model: model, canEditContent: canEditContent,
+        editingRestrictionNotice: contentEditingRestrictionNotice,
+        onAdd: { [weak self] in self?.presentAddBookmark() },
+        onEdit: { [weak self] entry in self?.editBookmark(entry) },
+        onMove: { [weak self] entry, direction in
+          self?.moveBookmark(entry, direction: direction)
+        },
+        onNest: { [weak self] entry in self?.nestBookmark(entry) },
+        onOutdent: { [weak self] entry in self?.outdentBookmark(entry) },
+        onRemove: { [weak self] entry in self?.removeBookmark(entry) },
+        onSelect: { [weak self] entry in
+          guard let page = entry.pageIndex else { return }
+          self?.viewer?.go(to: page + 1)
+        },
+        onClose: { [weak self, weak window] in
+          window?.close()
+          self?.bookmarksModel = nil
+          self?.bookmarksWindow = nil
+        }))
+    bookmarksModel = model
+    bookmarksWindow = window
+    refreshBookmarks()
+    window.center()
+    window.makeKeyAndOrderFront(nil)
+  }
+
+  private func refreshBookmarks() {
+    guard let model = bookmarksModel else { return }
+    guard let graph = editSession.currentGraph else {
+      model.entries = []
+      return
+    }
+    let items = PDFOutlineInventory.items(in: graph, pageIDs: editSession.pageIDs)
+    var entries: [BookmarkManagerEntry] = []
+    func walk(
+      _ items: [PDFOutlineItem], depth: Int, parentID: PDFObjectID?
+    ) {
+      for (index, item) in items.enumerated() {
+        guard let id = item.objectID else { continue }
+        entries.append(
+          BookmarkManagerEntry(
+            id: id, title: item.title, pageIndex: item.pageIndex, depth: depth,
+            previousID: index > 0 ? items[index - 1].objectID : nil,
+            nextID: index + 1 < items.count ? items[index + 1].objectID : nil,
+            parentID: parentID))
+        walk(item.children, depth: depth + 1, parentID: id)
+      }
+    }
+    walk(items, depth: 0, parentID: nil)
+    model.entries = entries
+  }
+
+  private func editBookmark(_ entry: BookmarkManagerEntry) {
+    guard canEditContent else { return }
+    let titleField = NSTextField(frame: NSRect(x: 0, y: 0, width: 280, height: 22))
+    titleField.stringValue = entry.title
+    let pageField = NSTextField(frame: NSRect(x: 0, y: 0, width: 70, height: 22))
+    pageField.stringValue = "\((entry.pageIndex ?? max(0, (viewer?.pageNumber ?? 1) - 1)) + 1)"
+    let grid = NSGridView(views: [
+      [NSTextField(labelWithString: "Title:"), titleField],
+      [NSTextField(labelWithString: "Page:"), pageField],
+    ])
+    grid.column(at: 0).xPlacement = .trailing
+    grid.frame = NSRect(x: 0, y: 0, width: 380, height: 60)
+    let alert = NSAlert()
+    alert.messageText = "Edit Bookmark"
+    alert.informativeText = "The bookmark destination is updated to the chosen page."
+    alert.accessoryView = grid
+    alert.addButton(withTitle: "Apply")
+    alert.addButton(withTitle: "Cancel")
+    guard alert.runModal() == .alertFirstButtonReturn else { return }
+    let title = titleField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard let page = Int(pageField.stringValue),
+      page >= 1, page <= editSession.pageIDs.count, !title.isEmpty
+    else {
+      NSSound.beep()
+      return
+    }
+    do {
+      try editSession.apply(
+        PDFTransaction([
+          EditBookmarkCommand(
+            objectID: entry.id, title: title, pageID: editSession.pageIDs[page - 1])
+        ]))
+    } catch {
+      presentError(error)
+      return
+    }
+    noteUserEdit()
+    refreshViewer(preservingPage: viewer?.pageNumber ?? 1)
+  }
+
+  private func moveBookmark(_ entry: BookmarkManagerEntry, direction: BookmarkMoveDirection) {
+    applyBookmarkCommand(MoveBookmarkCommand(objectID: entry.id, direction: direction))
+  }
+
+  private func nestBookmark(_ entry: BookmarkManagerEntry) {
+    applyBookmarkCommand(NestBookmarkCommand(objectID: entry.id))
+  }
+
+  private func outdentBookmark(_ entry: BookmarkManagerEntry) {
+    applyBookmarkCommand(OutdentBookmarkCommand(objectID: entry.id))
+  }
+
+  private func removeBookmark(_ entry: BookmarkManagerEntry) {
+    guard canEditContent else { return }
+    let alert = NSAlert()
+    alert.messageText = "Remove bookmark?"
+    alert.informativeText =
+      "\(entry.title) and any child bookmarks will be removed as one undo step."
+    alert.addButton(withTitle: "Remove")
+    alert.addButton(withTitle: "Cancel")
+    guard alert.runModal() == .alertFirstButtonReturn else { return }
+    applyBookmarkCommand(RemoveBookmarkCommand(objectID: entry.id))
+  }
+
+  private func applyBookmarkCommand(_ command: any PDFEditCommand) {
+    guard canEditContent else { return }
+    do {
+      try editSession.apply(PDFTransaction([command]))
+    } catch {
+      presentError(error)
+      return
+    }
+    noteUserEdit()
+    refreshViewer(preservingPage: viewer?.pageNumber ?? 1)
+  }
+
   /// PAG-09: add a top-level bookmark at the current page.
   func presentAddBookmark() {
     guard canEditContent, let viewer, viewer.pageNumber > 0,
@@ -6293,6 +6444,7 @@ final class SPDFDocument: NSDocument {
     refreshForms()
     refreshFonts()
     refreshAttachments()
+    refreshBookmarks()
     refreshDocumentInfo()
     snapshotRecoveryIfNeeded()
   }
@@ -6417,6 +6569,9 @@ final class SPDFDocument: NSDocument {
     attachmentsWindow?.close()
     attachmentsWindow = nil
     attachmentsModel = nil
+    bookmarksWindow?.close()
+    bookmarksWindow = nil
+    bookmarksModel = nil
     signatureWindow?.close()
     signatureWindow = nil
     for window in tableReviewWindows { window.close() }

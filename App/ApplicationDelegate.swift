@@ -409,6 +409,9 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
   @objc private func editBookmark(_ sender: Any?) {
     currentDocument?.presentEditBookmark()
   }
+  @objc private func manageBookmarks(_ sender: Any?) {
+    currentDocument?.manageBookmarks()
+  }
   @objc private func splitDocument(_ sender: Any?) {
     currentDocument?.presentSplitDocument()
   }
@@ -819,6 +822,8 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
       return document.canExportAttachments
     case #selector(manageAttachments):
       return document.canManageAttachments
+    case #selector(manageBookmarks):
+      return document.canManageBookmarks
     case #selector(printDocument), #selector(exportPrintPDF):
       return document.canPrint
     case #selector(exportImages):
@@ -1107,6 +1112,7 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
     add("Add Page Mark…", #selector(addPageMark), target: self, to: page)
     add("Remove Page Mark…", #selector(removePageMark), target: self, to: page)
     page.addItem(.separator())
+    add("Manage Bookmarks…", #selector(manageBookmarks), target: self, to: page)
     add("Add Bookmark…", #selector(addBookmark), target: self, to: page)
     add("Edit Bookmark…", #selector(editBookmark), target: self, to: page)
     add("Remove Bookmark…", #selector(removeBookmark), target: self, to: page)

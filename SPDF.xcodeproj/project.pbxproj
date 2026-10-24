@@ -44,6 +44,7 @@
 		B5ED5932EEADA8C869BCBF09 /* PageOrganizer.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1EB135BD7BF21701C6FA995 /* PageOrganizer.swift */; };
 		BA02870B845C4579EF78B9F5 /* AppUpdater.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4B5DD137683723B1199261BD /* AppUpdater.swift */; };
 		BA49026DF218DBD9C2A3416A /* CombineDocuments.swift in Sources */ = {isa = PBXBuildFile; fileRef = C168F8ADE4C1C2B2357AB45D /* CombineDocuments.swift */; };
+		C6129A84679E92312DB9CA3A /* BookmarksWindow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 76DB20CEBC03FB7FC9EC9C11 /* BookmarksWindow.swift */; };
 		D1F6538C09136F84873D47F1 /* SPDFApplication.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3F519216B8858C30CEFEE846 /* SPDFApplication.swift */; };
 		D426C9CFBFC337ACD496AC17 /* SPDFDocument.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6F91EF2F352F7D8A64BA83B0 /* SPDFDocument.swift */; };
 		D43832A0B248F0F66322E774 /* AccessibilityAudit.swift in Sources */ = {isa = PBXBuildFile; fileRef = A426D276236110E33031673E /* AccessibilityAudit.swift */; };
@@ -81,6 +82,7 @@
 		589D64EAB51B3FA3C1A1F58F /* SignaturesModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SignaturesModel.swift; sourceTree = "<group>"; };
 		6716E75AAC823E2EA26B0072 /* TableReviewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TableReviewModel.swift; sourceTree = "<group>"; };
 		6F91EF2F352F7D8A64BA83B0 /* SPDFDocument.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SPDFDocument.swift; sourceTree = "<group>"; };
+		76DB20CEBC03FB7FC9EC9C11 /* BookmarksWindow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BookmarksWindow.swift; sourceTree = "<group>"; };
 		83C1D98BA1E6E946D35C5A49 /* DiagnosticWatchdog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiagnosticWatchdog.swift; sourceTree = "<group>"; };
 		861EA8B50EF918A38F86E7CE /* WorkspacePreferences.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspacePreferences.swift; sourceTree = "<group>"; };
 		9452F6B367E81926CFCAB840 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
@@ -133,6 +135,7 @@
 				4B5DD137683723B1199261BD /* AppUpdater.swift */,
 				0CF10BA4A83CEEEA549975AF /* Assets.xcassets */,
 				B3CC53A357D85652A4EE5C92 /* AttachmentsWindow.swift */,
+				76DB20CEBC03FB7FC9EC9C11 /* BookmarksWindow.swift */,
 				C168F8ADE4C1C2B2357AB45D /* CombineDocuments.swift */,
 				50BAA98BFBFE2B0F82566CFA /* CommentsModel.swift */,
 				A10BEC367F4A982BF380EEF7 /* CommentsPanel.swift */,
@@ -321,6 +324,7 @@
 				BA02870B845C4579EF78B9F5 /* AppUpdater.swift in Sources */,
 				73CAAFA4B2309D979E39F4F6 /* ApplicationDelegate.swift in Sources */,
 				847D75FC3D196ADA1F89864E /* AttachmentsWindow.swift in Sources */,
+				C6129A84679E92312DB9CA3A /* BookmarksWindow.swift in Sources */,
 				BA49026DF218DBD9C2A3416A /* CombineDocuments.swift in Sources */,
 				9BDD7D0E0E17C86FCEEAADF2 /* CommentsModel.swift in Sources */,
 				D476B0FEEFA9A0A50D0C12C7 /* CommentsPanel.swift in Sources */,
