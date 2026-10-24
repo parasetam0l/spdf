@@ -27,21 +27,20 @@ public enum FormValues {
   public static let schemaVersion = 1
 
   public static func export(in graph: PDFGraph, pageIDs: [PDFObjectID]) throws -> Data {
-    let fields = try FormInventory.fields(in: graph, pageIDs: pageIDs)
+    let values = try self.values(in: graph, pageIDs: pageIDs)
     var entries: [[String: Any]] = []
-    for field in fields {
+    for field in values {
       switch field.kind {
-      case .text:
-        entries.append(["name": field.name, "kind": "text", "value": field.stringValue ?? ""])
-      case .choice:
+      case "text":
+        entries.append(["name": field.name, "kind": "text", "value": field.value ?? ""])
+      case "choice":
         entries.append([
-          "name": field.name, "kind": "choice", "value": field.stringValue ?? "",
-          "selectedIndex": field.selectedIndexes.first ?? -1,
+          "name": field.name, "kind": "choice", "value": field.value ?? "",
+          "selectedIndex": field.selectedIndex ?? -1,
         ])
-      case .button where !field.isPushButton:
+      case "button":
         entries.append([
-          "name": field.name, "kind": "button",
-          "state": field.buttonState.map { String(decoding: $0.bytes, as: UTF8.self) } ?? "Off",
+          "name": field.name, "kind": "button", "state": field.buttonState ?? "Off",
         ])
       default:
         continue
@@ -50,6 +49,36 @@ public enum FormValues {
     let payload: [String: Any] = ["schemaVersion": schemaVersion, "fields": entries]
     return try JSONSerialization.data(
       withJSONObject: payload, options: [.prettyPrinted, .sortedKeys])
+  }
+
+  /// Current values in the portable exchange shape. FDF/XFDF writers reuse
+  /// this instead of re-reading the form inventory.
+  public static func values(
+    in graph: PDFGraph, pageIDs: [PDFObjectID]
+  ) throws -> [FormFieldValue] {
+    let fields = try FormInventory.fields(in: graph, pageIDs: pageIDs)
+    var values: [FormFieldValue] = []
+    for field in fields {
+      switch field.kind {
+      case .text:
+        values.append(
+          FormFieldValue(name: field.name, kind: "text", value: field.stringValue ?? ""))
+      case .choice:
+        values.append(
+          FormFieldValue(
+            name: field.name, kind: "choice", value: field.stringValue ?? "",
+            selectedIndex: field.selectedIndexes.first ?? -1))
+      case .button where !field.isPushButton:
+        values.append(
+          FormFieldValue(
+            name: field.name, kind: "button",
+            buttonState: field.buttonState.map { String(decoding: $0.bytes, as: UTF8.self) }
+              ?? "Off"))
+      default:
+        continue
+      }
+    }
+    return values
   }
 
   public static func parse(_ data: Data) throws -> [FormFieldValue] {

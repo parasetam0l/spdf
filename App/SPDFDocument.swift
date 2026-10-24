@@ -1827,19 +1827,44 @@ final class SPDFDocument: NSDocument {
     return FormInventory.orphanedWidgets(in: graph, pageIDs: editSession.pageIDs).count
   }
 
-  /// P24-022: export supported field values as explicit local JSON.
+  /// P24-022/FRM-03: export supported field values as JSON, FDF or XFDF.
   func exportFormValues() {
     guard let graph = editSession.currentGraph else { return }
+    let formatPopup = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 200, height: 24))
+    formatPopup.addItems(withTitles: ["JSON (sPDF)", "XFDF (Acrobat)", "FDF (Acrobat)"])
+    let dialog = NSAlert()
+    dialog.messageText = "Export Form Values"
+    dialog.informativeText =
+      "XFDF and FDF are the portable Acrobat interchange formats; JSON keeps the sPDF schema."
+    dialog.accessoryView = formatPopup
+    dialog.addButton(withTitle: "Export…")
+    dialog.addButton(withTitle: "Cancel")
+    guard dialog.runModal() == .alertFirstButtonReturn else { return }
+    let formatIndex = max(0, formatPopup.indexOfSelectedItem)
     let data: Data
+    let fileExtension: String
     do {
-      data = try FormValues.export(in: graph, pageIDs: editSession.pageIDs)
+      switch formatIndex {
+      case 1:
+        data = FormDataExchange.export(
+          try FormValues.values(in: graph, pageIDs: editSession.pageIDs), format: .xfdf)
+        fileExtension = "xfdf"
+      case 2:
+        data = FormDataExchange.export(
+          try FormValues.values(in: graph, pageIDs: editSession.pageIDs), format: .fdf)
+        fileExtension = "fdf"
+      default:
+        data = try FormValues.export(in: graph, pageIDs: editSession.pageIDs)
+        fileExtension = "json"
+      }
     } catch {
       presentError(error)
       return
     }
     let panel = NSSavePanel()
-    panel.nameFieldStringValue = "form-values.json"
-    panel.allowedContentTypes = [.json]
+    panel.nameFieldStringValue = "form-values.\(fileExtension)"
+    panel.allowedContentTypes =
+      [UTType(filenameExtension: fileExtension) ?? .data]
     panel.begin { [weak self] response in
       guard response == .OK, let url = panel.url, let self else { return }
       do {
@@ -3730,11 +3755,16 @@ final class SPDFDocument: NSDocument {
     return extracted.count
   }
 
-  /// P24-022: import values from the local schema, reporting skipped fields.
+  /// P24-022/FRM-03: import values from JSON, XFDF or FDF and report skipped
+  /// or ambiguous fields.
   func importFormValues() {
     guard canEditContent else { return }
     let panel = NSOpenPanel()
-    panel.allowedContentTypes = [.json]
+    panel.allowedContentTypes = [
+      .json,
+      UTType(filenameExtension: "xfdf") ?? .data,
+      UTType(filenameExtension: "fdf") ?? .data,
+    ]
     panel.allowsMultipleSelection = false
     panel.begin { [weak self] response in
       guard response == .OK, let url = panel.url, let self,
@@ -3742,9 +3772,24 @@ final class SPDFDocument: NSDocument {
         let graph = self.editSession.currentGraph
       else { return }
       do {
-        let values = try FormValues.parse(try Data(contentsOf: url))
-        let (commands, skipped, ambiguous) = try FormValues.commands(
-          for: values, in: graph, pageIDs: self.editSession.pageIDs)
+        let data = try Data(contentsOf: url)
+        let (commands, skipped, ambiguous): (
+          [any PDFEditCommand], [String], [String]
+        )
+        switch url.pathExtension.lowercased() {
+        case "xfdf":
+          let values = try FormDataExchange.parse(data, format: .xfdf)
+          (commands, skipped, ambiguous) = try FormDataExchange.commands(
+            forRawValues: values, in: graph, pageIDs: self.editSession.pageIDs)
+        case "fdf":
+          let values = try FormDataExchange.parse(data, format: .fdf)
+          (commands, skipped, ambiguous) = try FormDataExchange.commands(
+            forRawValues: values, in: graph, pageIDs: self.editSession.pageIDs)
+        default:
+          let values = try FormValues.parse(data)
+          (commands, skipped, ambiguous) = try FormValues.commands(
+            for: values, in: graph, pageIDs: self.editSession.pageIDs)
+        }
         guard !commands.isEmpty else {
           self.presentError(PDFError(.malformed, "No importable values matched this document"))
           return
@@ -3752,11 +3797,19 @@ final class SPDFDocument: NSDocument {
         try self.editSession.apply(PDFTransaction(commands))
         self.noteUserEdit()
         self.refreshViewer(preservingPage: self.viewer?.pageNumber ?? 1)
-        if !skipped.isEmpty {
+        if !skipped.isEmpty || !ambiguous.isEmpty {
           let alert = NSAlert()
-          alert.messageText = "Some values were skipped"
-          alert.informativeText =
-            "These fields were missing, read-only, or unsupported: \(skipped.joined(separator: ", "))"
+          alert.messageText = "Some values need attention"
+          var lines: [String] = []
+          if !skipped.isEmpty {
+            lines.append(
+              "Missing, read-only, or unsupported: \(skipped.joined(separator: ", "))")
+          }
+          if !ambiguous.isEmpty {
+            lines.append(
+              "Duplicate field names (first match used): \(ambiguous.joined(separator: ", "))")
+          }
+          alert.informativeText = lines.joined(separator: "\n\n")
           alert.addButton(withTitle: "OK")
           alert.runModal()
         }

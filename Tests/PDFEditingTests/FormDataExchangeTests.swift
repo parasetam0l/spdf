@@ -1,0 +1,85 @@
+import Foundation
+import PDFCore
+@testable import PDFEditing
+import PDFFixtures
+import Testing
+
+/// FRM-03: FDF/XFDF export and import preserve text, choice and button values
+/// and report fields the document cannot accept.
+@Suite("Form data exchange")
+struct FormDataExchangeTests {
+  private func filledForm() throws -> (PDFGraph, [PDFObjectID]) {
+    let parsed = try PDFParser.parse(PDFFixtures.formPages())
+    let filled = try PDFEditingEngine.commit(
+      PDFTransaction([
+        SetFormTextCommand(fieldName: "name", text: "Ayse Izci"),
+        SetFormButtonStateCommand(fieldName: "agree", state: PDFName("Yes")),
+      ]), to: parsed.graph)
+    return (filled, parsed.pageIDs)
+  }
+
+  @Test func xfdfRoundTripPreservesUnicodeAndButtonState() throws {
+    let (filled, pageIDs) = try filledForm()
+    let values = try FormValues.values(in: filled, pageIDs: pageIDs)
+    let data = FormDataExchange.export(values, format: .xfdf)
+    let raw = try FormDataExchange.parse(data, format: .xfdf)
+    #expect(raw.contains { $0.name == "name" && $0.value == "Ayse Izci" })
+    #expect(raw.contains { $0.name == "agree" && $0.value == "Yes" })
+
+    let (commands, skipped, ambiguous) = try FormDataExchange.commands(
+      forRawValues: raw, in: filled, pageIDs: pageIDs)
+    #expect(skipped == ["locked"])
+    #expect(ambiguous.isEmpty)
+    let imported = try PDFEditingEngine.commit(PDFTransaction(commands), to: filled)
+    let fields = try FormInventory.fields(in: imported, pageIDs: pageIDs)
+    #expect(fields.first { $0.name == "name" }?.stringValue == "Ayse Izci")
+    #expect(fields.first { $0.name == "agree" }?.buttonState == PDFName("Yes"))
+  }
+
+  @Test func fdfRoundTripPreservesUnicodeAndButtonState() throws {
+    let (filled, pageIDs) = try filledForm()
+    let values = try FormValues.values(in: filled, pageIDs: pageIDs)
+    let data = FormDataExchange.export(values, format: .fdf)
+    let raw = try FormDataExchange.parse(data, format: .fdf)
+    #expect(raw.contains { $0.name == "name" && $0.value == "Ayse Izci" })
+    #expect(raw.contains { $0.name == "agree" && $0.value == "Yes" })
+
+    let (commands, skipped, _) = try FormDataExchange.commands(
+      forRawValues: raw, in: filled, pageIDs: pageIDs)
+    #expect(skipped == ["locked"])
+    let imported = try PDFEditingEngine.commit(PDFTransaction(commands), to: filled)
+    let fields = try FormInventory.fields(in: imported, pageIDs: pageIDs)
+    #expect(fields.first { $0.name == "name" }?.stringValue == "Ayse Izci")
+    #expect(fields.first { $0.name == "agree" }?.buttonState == PDFName("Yes"))
+  }
+
+  @Test func exchangeFormatsCarryUnicodeNamesAndValues() throws {
+    let values = [
+      FormFieldValue(name: "İsim", kind: "text", value: "Ayşe İzci"),
+      FormFieldValue(name: "onay", kind: "button", buttonState: "Evet"),
+    ]
+    for format in FormDataExchange.Format.allCases {
+      let data = FormDataExchange.export(values, format: format)
+      let parsed = try FormDataExchange.parse(data, format: format)
+      #expect(parsed.contains { $0.name == "İsim" && $0.value == "Ayşe İzci" })
+      #expect(parsed.contains { $0.name == "onay" && $0.value == "Evet" })
+    }
+  }
+
+  @Test func unknownFieldsAreReportedNotGuessed() throws {
+    let (filled, pageIDs) = try filledForm()
+    let (commands, skipped, _) = try FormDataExchange.commands(
+      forRawValues: [("missing", "value")], in: filled, pageIDs: pageIDs)
+    #expect(commands.isEmpty)
+    #expect(skipped == ["missing"])
+  }
+
+  @Test func malformedExchangeFilesAreRefused() throws {
+    #expect(throws: PDFError.self) {
+      _ = try FormDataExchange.parse(Data("<not-xfdf/>".utf8), format: .xfdf)
+    }
+    #expect(throws: PDFError.self) {
+      _ = try FormDataExchange.parse(Data("%FDF-1.2\n".utf8), format: .fdf)
+    }
+  }
+}

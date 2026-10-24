@@ -2028,6 +2028,16 @@
         guard toggledFields.first(where: { $0.name == "agree" })?.isChecked == true else {
           throw PDFError(.malformed, "Checkbox state did not round-trip")
         }
+        // FRM-03: FDF/XFDF exchange carries the filled values.
+        let exchangeValues = try FormValues.values(
+          in: toggledFormGraph, pageIDs: formDocument.editSession.pageIDs)
+        for format in FormDataExchange.Format.allCases {
+          let data = FormDataExchange.export(exchangeValues, format: format)
+          let parsed = try FormDataExchange.parse(data, format: format)
+          guard parsed.contains(where: { $0.name == "name" && $0.value == "Smoke fill" }),
+            parsed.contains(where: { $0.name == "agree" && $0.value == "Yes" })
+          else { throw PDFError(.malformed, "\(format.title) form exchange did not round-trip") }
+        }
         formDocument.setFormChoice(fieldName: "department", exportValue: "Support")
         checkpoint("choice fill returned")
         let choiceGraph = try PDFParser.parse(
