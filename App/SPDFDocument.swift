@@ -5256,6 +5256,15 @@ final class SPDFDocument: NSDocument {
     try editSession.apply(PDFTransaction(commands))
     noteUserEdit()
     refreshViewer(preservingPage: viewer?.pageNumber ?? 1)
+    if results.contains(where: { $0.usedFastFallback }) {
+      let alert = NSAlert()
+      alert.messageText = "Fast Recognition Used"
+      alert.informativeText =
+        "Accurate text recognition is unavailable on this system. The selected pages were "
+        + "recognized with Fast quality; review the text before relying on it."
+      alert.addButton(withTitle: "OK")
+      alert.runModal()
+    }
   }
 
   /// P26-010: apply a searchable text layer from caller-provided lines (used

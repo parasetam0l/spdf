@@ -221,6 +221,53 @@ struct OCRJobTests {
     }
   }
 
+  @Test func fastFallbackIsReportedWithResults() throws {
+    struct FallbackStub: TextRecognizing {
+      func recognize(image: CGImage, languages: [String], level: OCRRecognitionLevel) throws
+        -> [OCRObservation]
+      {
+        []
+      }
+
+      func recognizeWithFallback(
+        image: CGImage, languages: [String], level: OCRRecognitionLevel
+      ) throws -> (observations: [OCRObservation], usedFastFallback: Bool) {
+        (
+          [
+            OCRObservation(
+              text: "fallback", confidence: 0.8,
+              boundingBox: CGRect(x: 0.1, y: 0.1, width: 0.4, height: 0.1))
+          ], true
+        )
+      }
+    }
+    let document = try #require(PDFDocument(data: PDFFixtures.imagePages()))
+    let results = try OCRJob.run(
+      document: document, pageIndexes: [0], languages: ["en-US"], level: .accurate,
+      recognizer: FallbackStub())
+    #expect(results.count == 1)
+    #expect(results[0].usedFastFallback)
+    #expect(results[0].lines.map(\.text) == ["fallback"])
+  }
+
+  @Test func realVisionRecognitionProducesText() throws {
+    let data = try PDFFixtures.onePage()
+    let document = try #require(PDFDocument(data: data))
+    do {
+      let results = try OCRJob.run(
+        document: document, pageIndexes: [0], languages: ["en-US"], level: .accurate)
+      #expect(!results.isEmpty)
+      let recognized = results[0].lines.map(\.text).joined(separator: " ")
+      #expect(
+        recognized.uppercased().contains("SPDF")
+          || recognized.uppercased().contains("FIXTURE"))
+    } catch let error as PDFError {
+      // Restricted hosts may have no usable recognizer at all; the failure
+      // must be the explicit unsupported error, never silent success.
+      #expect(error.kind == .unsupported)
+    }
+  }
+
   @Test func visionLanguagesAndTolerantRecognition() throws {
     // P26-002: the language list is queried, not assumed.
     let languages = try VisionTextRecognizer.supportedLanguages()

@@ -28,6 +28,20 @@ public enum OCRRecognitionLevel: String, Sendable {
 public protocol TextRecognizing: Sendable {
   func recognize(image: CGImage, languages: [String], level: OCRRecognitionLevel) throws
     -> [OCRObservation]
+  /// OCR-01: a recognizer may fall back to a supported level. The default
+  /// keeps the requested level; Vision overrides this when Accurate is
+  /// unavailable on the host.
+  func recognizeWithFallback(
+    image: CGImage, languages: [String], level: OCRRecognitionLevel
+  ) throws -> (observations: [OCRObservation], usedFastFallback: Bool)
+}
+
+extension TextRecognizing {
+  public func recognizeWithFallback(
+    image: CGImage, languages: [String], level: OCRRecognitionLevel
+  ) throws -> (observations: [OCRObservation], usedFastFallback: Bool) {
+    (try recognize(image: image, languages: languages, level: level), false)
+  }
 }
 
 /// P26-001/P26-002: the Vision-backed recognizer. Recognition is local; no
@@ -67,6 +81,22 @@ public struct VisionTextRecognizer: TextRecognizing {
       return OCRObservation(
         text: candidate.string, confidence: Double(candidate.confidence),
         boundingBox: observation.boundingBox)
+    }
+  }
+
+  /// OCR-01: this host's Accurate path can fail with `nilError` while Fast
+  /// still recognizes text. Retry Fast once and tell the caller so the UI can
+  /// disclose the quality change.
+  public func recognizeWithFallback(
+    image: CGImage, languages: [String], level: OCRRecognitionLevel
+  ) throws -> (observations: [OCRObservation], usedFastFallback: Bool) {
+    do {
+      return (try recognize(image: image, languages: languages, level: level), false)
+    } catch {
+      guard level == .accurate else { throw error }
+      let observations = try recognize(
+        image: image, languages: languages, level: .fast)
+      return (observations, true)
     }
   }
 }
@@ -194,6 +224,8 @@ public struct OCRTextLine: Sendable, Equatable {
 public struct OCRPageResult: Sendable, Equatable {
   public let pageIndex: Int
   public let lines: [OCRTextLine]
+  /// OCR-01: true when the requested Accurate level failed and Fast was used.
+  public let usedFastFallback: Bool
 }
 
 /// P26-003/P26-018/P26-019/P26-020/P26-028: a local, sequential OCR job over
@@ -229,14 +261,15 @@ public enum OCRJob {
       guard index >= 0, index < document.pageCount, let page = document.page(at: index),
         let raster = OCRPageRasterizer.rasterize(page: page)
       else { continue }
-      let observations = try recognizer.recognize(
+      let outcome = try recognizer.recognizeWithFallback(
         image: raster.image, languages: languages, level: level)
       // Vision can be in a non-interruptible request when Cancel arrives.
       // Do not return or apply that page's result after it acknowledges.
       try Task.checkCancellation()
       results.append(
         OCRPageResult(
-          pageIndex: index, lines: group(observations, transform: raster.transform)))
+          pageIndex: index, lines: group(outcome.observations, transform: raster.transform),
+          usedFastFallback: outcome.usedFastFallback))
       onProgress?(position + 1, total)
     }
     try Task.checkCancellation()
