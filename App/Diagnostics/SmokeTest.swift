@@ -1798,6 +1798,21 @@
         guard third.undoEdit(), try third.data(ofType: "com.adobe.pdf") == imageBaseline else {
           throw PDFError(.malformed, "Image crop undo did not restore the baseline bytes")
         }
+        // IMG-01: numeric size and position use the same undoable route.
+        guard
+          third.setImageGeometry(
+            pageIndex: 0, placementIndex: 0, x: 90, y: 610, width: 60, height: 60)
+        else { throw PDFError(.malformed, "Image geometry did not commit") }
+        let geometryGraph = try PDFParser.parse(try third.data(ofType: "com.adobe.pdf")).graph
+        let geometryPlacements = try ImageInventory.placements(
+          in: geometryGraph, pageID: third.editSession.pageIDs[0])
+        let geometryBounds = geometryPlacements[0].bounds
+        guard abs(geometryBounds[0] - 90) < 0.01, abs(geometryBounds[1] - 610) < 0.01,
+          abs(geometryBounds[2] - 150) < 0.01, abs(geometryBounds[3] - 670) < 0.01
+        else { throw PDFError(.malformed, "Image geometry did not round-trip") }
+        guard third.undoEdit(), try third.data(ofType: "com.adobe.pdf") == imageBaseline else {
+          throw PDFError(.malformed, "Image geometry undo did not restore the baseline bytes")
+        }
         // Preview-first gestures (joint session): rotation keeps the
         // footprint inside the page, and overlay drags on a native image
         // never mutate the document in any tool mode.

@@ -280,6 +280,26 @@ struct ImageEditTests {
     #expect(verticalPlacement.bounds == initial[0].bounds)
   }
 
+  @Test func scalingAndMovingOnePlacementKeepsOthers() throws {
+    let parsed = try PDFParser.parse(PDFFixtures.imagePages())
+    let page = parsed.pageIDs[0]
+    let initial = try ImageInventory.placements(in: parsed.graph, pageID: page)
+    let bounds = initial[0].bounds
+    let edited = try PDFEditingEngine.commit(
+      PDFTransaction([
+        ScaleImageCommand(pageID: page, placementIndex: 0, scaleX: 0.5, scaleY: 2),
+        MoveImageCommand(pageID: page, placementIndex: 0, dx: 10, dy: -5),
+      ]), to: parsed.graph)
+    let placements = try ImageInventory.placements(in: edited, pageID: page)
+    #expect(abs((placements[0].bounds[2] - placements[0].bounds[0])
+      - (bounds[2] - bounds[0]) * 0.5) < 0.0001)
+    #expect(abs((placements[0].bounds[3] - placements[0].bounds[1])
+      - (bounds[3] - bounds[1]) * 2) < 0.0001)
+    #expect(abs(placements[0].bounds[0] - (bounds[0] + 10)) < 0.0001)
+    #expect(abs(placements[0].bounds[1] - (bounds[1] - 5)) < 0.0001)
+    #expect(placements[1].matrix == initial[1].matrix)
+  }
+
   @Test func moveRefusesUnsupportedMatrixPatterns() throws {
     var graph = try PDFParser.parse(PDFFixtures.imagePages()).graph
     guard case .stream(let stream)? = graph.objects[PDFObjectID(5)] else {

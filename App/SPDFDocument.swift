@@ -4077,6 +4077,7 @@ final class SPDFDocument: NSDocument {
       case scale(Double)
       case flip(horizontal: Bool)
       case crop
+      case geometry
       case replace(shared: Bool)
     }
 
@@ -4139,6 +4140,7 @@ final class SPDFDocument: NSDocument {
     add("Flip Image Horizontally", .flip(horizontal: true))
     add("Flip Image Vertically", .flip(horizontal: false))
     add("Crop Image…", .crop)
+    add("Size and Position…", .geometry)
     menu.addItem(.separator())
     add("Scale Image Up", .scale(1.1))
     add("Scale Image Down", .scale(1 / 1.1))
@@ -4163,6 +4165,9 @@ final class SPDFDocument: NSDocument {
         horizontal: horizontal)
     case .crop:
       promptCropImage(
+        pageIndex: command.pageIndex, placementIndex: command.placementIndex)
+    case .geometry:
+      promptImageGeometry(
         pageIndex: command.pageIndex, placementIndex: command.placementIndex)
     case .replace(let shared):
       promptReplaceImage(
@@ -4194,6 +4199,42 @@ final class SPDFDocument: NSDocument {
       ClipImageDrawCommand(
         pageID: pageID, placementIndex: placementIndex, unitRect: unitRect)
     ])
+  }
+
+  /// IMG-01: move and resize one unrotated placement from page-space numbers.
+  /// Scaling keeps the top-left origin, so the move delta is applied after it.
+  @discardableResult
+  func setImageGeometry(
+    pageIndex: Int, placementIndex: Int, x: Double, y: Double, width: Double,
+    height: Double
+  ) -> Bool {
+    guard let pageID = pageID(at: pageIndex), let graph = editSession.currentGraph,
+      width.isFinite, height.isFinite, x.isFinite, y.isFinite,
+      width > 0, height > 0,
+      let placements = try? ImageInventory.placements(in: graph, pageID: pageID),
+      placementIndex >= 0, placementIndex < placements.count
+    else { return false }
+    let bounds = placements[placementIndex].bounds
+    guard bounds.count == 4 else { return false }
+    let currentWidth = bounds[2] - bounds[0]
+    let currentHeight = bounds[3] - bounds[1]
+    guard currentWidth > 0, currentHeight > 0 else { return false }
+    var commands: [any PDFEditCommand] = []
+    let scaleX = width / currentWidth
+    let scaleY = height / currentHeight
+    if abs(scaleX - 1) > 1e-9 || abs(scaleY - 1) > 1e-9 {
+      commands.append(
+        ScaleImageCommand(
+          pageID: pageID, placementIndex: placementIndex, scaleX: scaleX, scaleY: scaleY))
+    }
+    let dx = x - bounds[0]
+    let dy = y - bounds[1]
+    if abs(dx) > 1e-9 || abs(dy) > 1e-9 {
+      commands.append(
+        MoveImageCommand(pageID: pageID, placementIndex: placementIndex, dx: dx, dy: dy))
+    }
+    guard !commands.isEmpty else { return true }
+    return applyImageTransaction(commands)
   }
 
   @discardableResult
@@ -4647,6 +4688,46 @@ final class SPDFDocument: NSDocument {
       unitRect: [
         values[0] / 100, values[1] / 100, values[2] / 100, values[3] / 100,
       ])
+  }
+
+  private func promptImageGeometry(pageIndex: Int, placementIndex: Int) {
+    guard canEditContent, let graph = editSession.currentGraph,
+      let pageID = pageID(at: pageIndex),
+      let placements = try? ImageInventory.placements(in: graph, pageID: pageID),
+      placementIndex >= 0, placementIndex < placements.count
+    else { return }
+    let bounds = placements[placementIndex].bounds
+    guard bounds.count == 4 else { return }
+    let values = [bounds[0], bounds[1], bounds[2] - bounds[0], bounds[3] - bounds[1]]
+    let labels = ["X:", "Y:", "Width:", "Height:"]
+    let fields = values.map { value -> NSTextField in
+      let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 80, height: 22))
+      field.stringValue = String(format: "%.2f", value)
+      return field
+    }
+    let rows: [[NSView]] = zip(labels, fields).map { label, field in
+      [NSTextField(labelWithString: label), field]
+    }
+    let grid = NSGridView(views: rows)
+    grid.column(at: 0).xPlacement = .trailing
+    grid.frame = NSRect(x: 0, y: 0, width: 260, height: 120)
+    let alert = NSAlert()
+    alert.messageText = "Size and Position"
+    alert.informativeText =
+      "Values are page-space points. Width and height scale the placement from its top-left corner; "
+      + "rotated images must be rotated back to 0° or 180° first. The change is one undo step."
+    alert.accessoryView = grid
+    alert.addButton(withTitle: "Apply")
+    alert.addButton(withTitle: "Cancel")
+    guard alert.runModal() == .alertFirstButtonReturn else { return }
+    let entered = fields.compactMap { Double($0.stringValue) }
+    guard entered.count == 4 else {
+      NSSound.beep()
+      return
+    }
+    _ = setImageGeometry(
+      pageIndex: pageIndex, placementIndex: placementIndex,
+      x: entered[0], y: entered[1], width: entered[2], height: entered[3])
   }
 
   private func promptReplaceImage(pageIndex: Int, placementIndex: Int, shared: Bool) {
