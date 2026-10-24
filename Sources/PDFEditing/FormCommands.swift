@@ -76,11 +76,8 @@ public struct SetFormTextCommand: PDFEditCommand, Equatable, Sendable {
     guard let fieldID = field.fieldID else {
       throw PDFError(.unsupported, "Direct field dictionaries cannot be filled in this profile")
     }
-    // P25-013: enforced maximum length.
-    if case .dictionary(let dictionary)? = graph.objects[fieldID],
-      case .integer(let raw)? = dictionary[PDFName("MaxLen")],
-      let maxLength = Int(exactly: raw), text.count > maxLength
-    {
+    // P25-013: enforced maximum length, including inherited /MaxLen.
+    if let maxLength = field.maxLength, text.count > maxLength {
       throw PDFError(
         .malformed, "The text exceeds the field's maximum length of \(maxLength) characters")
     }

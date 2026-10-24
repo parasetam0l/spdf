@@ -159,6 +159,9 @@ public enum FormInventory {
     var dv: PDFValue?
     var da: PDFValue?
     var q: Int64?
+    var maxLen: Int?
+    var opt: PDFValue?
+    var selected: PDFValue?
   }
 
   static func acroFormDictionary(in graph: PDFGraph) -> [PDFName: PDFValue]? {
@@ -232,6 +235,16 @@ public enum FormInventory {
     let da = field[PDFName("DA")] ?? inherited.da
     let q: Int64?
     if case .integer(let raw)? = field[PDFName("Q")] { q = raw } else { q = inherited.q }
+    let maxLen: Int?
+    if case .integer(let raw)? = field[PDFName("MaxLen")], raw > 0,
+      let value = Int(exactly: raw)
+    {
+      maxLen = value
+    } else {
+      maxLen = inherited.maxLen
+    }
+    let opt = field[PDFName("Opt")] ?? inherited.opt
+    let selected = field[PDFName("I")] ?? inherited.selected
     let partial = text(field[PDFName("T")]) ?? ""
     let name =
       prefix.isEmpty
@@ -254,7 +267,9 @@ public enum FormInventory {
       }
     }
     if !childFields.isEmpty {
-      let childInherited = Inherited(ft: ft, ff: ff, v: v, dv: dv, da: da, q: q)
+      let childInherited = Inherited(
+        ft: ft, ff: ff, v: v, dv: dv, da: da, q: q, maxLen: maxLen, opt: opt,
+        selected: selected)
       for kid in childFields {
         try walk(
           kid, inherited: childInherited, prefix: name, in: graph, pages: pages, into: &results)
@@ -283,7 +298,7 @@ public enum FormInventory {
     default: kind = .unknown
     }
     var options: [FormField.FormChoiceOption] = []
-    if case .array(let rawOptions)? = field[PDFName("Opt")] {
+    if case .array(let rawOptions)? = opt {
       for option in rawOptions {
         switch option {
         case .string(let data):
@@ -300,23 +315,17 @@ public enum FormInventory {
       }
     }
     var selectedIndexes: [Int] = []
-    if case .array(let rawIndexes)? = field[PDFName("I")] {
+    if case .array(let rawIndexes)? = selected {
       selectedIndexes = rawIndexes.compactMap { value in
         if case .integer(let raw) = value { return Int(raw) }
         return nil
       }
     }
-    var maxLength: Int?
-    if case .integer(let raw)? = field[PDFName("MaxLen")], raw > 0,
-      let length = Int(exactly: raw)
-    {
-      maxLength = length
-    }
     results.append(
       FormField(
         fieldID: resolvedObjectID(value), name: name, kind: kind, flags: ff, value: v,
         defaultValue: dv, widgets: widgets, options: options, selectedIndexes: selectedIndexes,
-        maxLength: maxLength))
+        maxLength: maxLen))
   }
 
   static func makeWidget(

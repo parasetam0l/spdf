@@ -335,6 +335,87 @@ struct FormTests {
     }
   }
 
+  @Test func inheritedMaxLenAppliesToChildField() throws {
+    let (base, pageIDs) = try formFixture()
+    var graph = base
+    guard case .dictionary(var acro)? = graph.objects[PDFObjectID(101)],
+      case .array(var fields)? = acro[PDFName("Fields")]
+    else {
+      Issue.record("AcroForm missing")
+      return
+    }
+    fields = fields.map { value in
+      if case .reference(let id) = value, id == PDFObjectID(110) {
+        return .reference(PDFObjectID(220))
+      }
+      return value
+    }
+    acro[PDFName("Fields")] = .array(fields)
+    graph.objects[PDFObjectID(101)] = .dictionary(acro)
+    graph.objects[PDFObjectID(220)] = .dictionary([
+      PDFName("FT"): .name(PDFName("Tx")),
+      PDFName("T"): .string(Data("group".utf8)),
+      PDFName("MaxLen"): .integer(4),
+      PDFName("Kids"): .array([.reference(PDFObjectID(110))]),
+    ])
+    let fieldsAfter = try FormInventory.fields(in: graph, pageIDs: pageIDs)
+    let child = try #require(fieldsAfter.first { $0.name == "group.name" })
+    #expect(child.maxLength == 4)
+    #expect(throws: PDFError.self) {
+      _ = try PDFEditingEngine.commit(
+        PDFTransaction([SetFormTextCommand(fieldName: "group.name", text: "ABCDE")]),
+        to: graph)
+    }
+    let filled = try PDFEditingEngine.commit(
+      PDFTransaction([SetFormTextCommand(fieldName: "group.name", text: "ABCD")]),
+      to: graph)
+    let reopened = try FormInventory.fields(in: filled, pageIDs: pageIDs)
+    #expect(reopened.first { $0.name == "group.name" }?.stringValue == "ABCD")
+  }
+
+  @Test func repeatedWidgetsAllReceiveTheAppearance() throws {
+    let (base, pageIDs) = try formFixture()
+    var graph = base
+    guard case .dictionary(var page)? = graph.objects[PDFObjectID(3)] else {
+      Issue.record("page missing")
+      return
+    }
+    var annots: [PDFValue] = []
+    if case .array(let existing)? = page[PDFName("Annots")] { annots = existing }
+    annots.append(.reference(PDFObjectID(123)))
+    page[PDFName("Annots")] = .array(annots)
+    graph.objects[PDFObjectID(3)] = .dictionary(page)
+    graph.objects[PDFObjectID(123)] = .dictionary([
+      PDFName("Subtype"): .name(PDFName("Widget")),
+      PDFName("Parent"): .reference(PDFObjectID(120)),
+      PDFName("Rect"): .array([.integer(320), .integer(520), .integer(480), .integer(560)]),
+      PDFName("P"): .reference(PDFObjectID(3)),
+      PDFName("AP"): .dictionary([PDFName("N"): .reference(PDFObjectID(124))]),
+    ])
+    graph.objects[PDFObjectID(124)] = .stream(PDFStream(bytes: Data()))
+    guard case .dictionary(var notes)? = graph.objects[PDFObjectID(120)],
+      case .array(var kids)? = notes[PDFName("Kids")]
+    else {
+      Issue.record("notes field missing")
+      return
+    }
+    kids.append(.reference(PDFObjectID(123)))
+    notes[PDFName("Kids")] = .array(kids)
+    graph.objects[PDFObjectID(120)] = .dictionary(notes)
+    let fields = try FormInventory.fields(in: graph, pageIDs: pageIDs)
+    #expect(fields.first { $0.name == "notes" }?.widgets.count == 2)
+
+    let filled = try PDFEditingEngine.commit(
+      PDFTransaction([SetFormTextCommand(fieldName: "notes", text: "updated")]), to: graph)
+    for streamID in [PDFObjectID(122), PDFObjectID(124)] {
+      guard case .stream(let stream)? = filled.objects[streamID] else {
+        Issue.record("widget appearance missing")
+        return
+      }
+      #expect(String(decoding: stream.bytes, as: UTF8.self).contains("updated"))
+    }
+  }
+
   @Test func multilineFieldWrapsLongTextAtWidgetWidth() throws {
     let (graph, _) = try formFixture()
     let text = Array(repeating: "word", count: 40).joined(separator: " ")
