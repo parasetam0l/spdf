@@ -406,6 +406,9 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
   @objc private func removeBookmark(_ sender: Any?) {
     currentDocument?.presentRemoveBookmark()
   }
+  @objc private func editBookmark(_ sender: Any?) {
+    currentDocument?.presentEditBookmark()
+  }
   @objc private func splitDocument(_ sender: Any?) {
     currentDocument?.presentSplitDocument()
   }
@@ -864,7 +867,7 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
           || document.editSession.canRedo)
     case #selector(rotateLeft), #selector(rotateRight), #selector(insertBlankPage),
       #selector(cropPages), #selector(addPageMark), #selector(removePageMark),
-      #selector(addBookmark), #selector(removeBookmark):
+      #selector(addBookmark), #selector(editBookmark), #selector(removeBookmark):
       return document.canEditContent && (document.viewer?.pageCount ?? 0) > 0
     case #selector(movePageUp):
       return document.canEditContent && (document.viewer?.pageNumber ?? 1) > 1
@@ -1090,6 +1093,7 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
     add("Remove Page Mark…", #selector(removePageMark), target: self, to: page)
     page.addItem(.separator())
     add("Add Bookmark…", #selector(addBookmark), target: self, to: page)
+    add("Edit Bookmark…", #selector(editBookmark), target: self, to: page)
     add("Remove Bookmark…", #selector(removeBookmark), target: self, to: page)
     add("Split Document…", #selector(splitDocument), target: self, to: page)
     add("Combine Documents…", #selector(combineDocuments), target: self, to: page)

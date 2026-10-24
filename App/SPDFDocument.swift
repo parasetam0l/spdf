@@ -3902,6 +3902,79 @@ final class SPDFDocument: NSDocument {
     }
   }
 
+  /// PAG-09: change a bookmark's title and page target.
+  func presentEditBookmark() {
+    guard canEditContent, let graph = editSession.currentGraph else { return }
+    var flat: [(title: String, depth: Int, objectID: PDFObjectID, pageIndex: Int?)] = []
+    func walk(_ items: [PDFOutlineItem], depth: Int) {
+      for item in items {
+        if let id = item.objectID {
+          flat.append((item.title, depth, id, item.pageIndex))
+        }
+        walk(item.children, depth: depth + 1)
+      }
+    }
+    walk(
+      PDFOutlineInventory.items(in: graph, pageIDs: editSession.pageIDs), depth: 0)
+    guard !flat.isEmpty else {
+      let alert = NSAlert()
+      alert.messageText = "No Bookmarks"
+      alert.informativeText = "This document has no bookmarks to edit."
+      alert.addButton(withTitle: "OK")
+      alert.runModal()
+      return
+    }
+    let popup = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 360, height: 24))
+    popup.addItems(withTitles: flat.map {
+      String(repeating: "  ", count: $0.depth) + $0.title
+    })
+    let choose = NSAlert()
+    choose.messageText = "Edit Bookmark"
+    choose.informativeText = "Choose the bookmark to edit."
+    choose.accessoryView = popup
+    choose.addButton(withTitle: "Continue")
+    choose.addButton(withTitle: "Cancel")
+    guard choose.runModal() == .alertFirstButtonReturn else { return }
+    let item = flat[max(0, popup.indexOfSelectedItem)]
+    let titleField = NSTextField(frame: NSRect(x: 0, y: 0, width: 280, height: 22))
+    titleField.stringValue = item.title
+    let pageField = NSTextField(frame: NSRect(x: 0, y: 0, width: 70, height: 22))
+    pageField.stringValue = "\((item.pageIndex ?? max(0, (viewer?.pageNumber ?? 1) - 1)) + 1)"
+    let grid = NSGridView(views: [
+      [NSTextField(labelWithString: "Title:"), titleField],
+      [NSTextField(labelWithString: "Page:"), pageField],
+    ])
+    grid.column(at: 0).xPlacement = .trailing
+    grid.frame = NSRect(x: 0, y: 0, width: 380, height: 60)
+    let edit = NSAlert()
+    edit.messageText = "Edit Bookmark"
+    edit.informativeText = "The bookmark destination is updated to the chosen page."
+    edit.accessoryView = grid
+    edit.addButton(withTitle: "Apply")
+    edit.addButton(withTitle: "Cancel")
+    guard edit.runModal() == .alertFirstButtonReturn else { return }
+    let title = titleField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard let page = Int(pageField.stringValue),
+      page >= 1, page <= editSession.pageIDs.count, !title.isEmpty
+    else {
+      NSSound.beep()
+      return
+    }
+    do {
+      try editSession.apply(
+        PDFTransaction([
+          EditBookmarkCommand(
+            objectID: item.objectID, title: title,
+            pageID: editSession.pageIDs[page - 1])
+        ]))
+    } catch {
+      presentError(error)
+      return
+    }
+    noteUserEdit()
+    refreshViewer(preservingPage: viewer?.pageNumber ?? 1)
+  }
+
   /// PAG-09: add a top-level bookmark at the current page.
   func presentAddBookmark() {
     guard canEditContent, let viewer, viewer.pageNumber > 0,

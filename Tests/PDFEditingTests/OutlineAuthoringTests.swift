@@ -47,6 +47,27 @@ struct OutlineAuthoringTests {
         == ["One"])
   }
 
+  @Test func bookmarkTitleAndDestinationCanBeEdited() throws {
+    let parsed = try PDFParser.parse(PDFFixtures.threePages())
+    let added = try PDFEditingEngine.commit(
+      PDFTransaction([
+        AddBookmarkCommand(title: "Old", pageID: parsed.pageIDs[0])
+      ]), to: parsed.graph)
+    let item = try #require(
+      PDFOutlineInventory.items(in: added, pageIDs: parsed.pageIDs).first)
+    let objectID = try #require(item.objectID)
+    let edited = try PDFEditingEngine.commit(
+      PDFTransaction([
+        EditBookmarkCommand(
+          objectID: objectID, title: "New", pageID: parsed.pageIDs[2])
+      ]), to: added)
+    let reopened = try PDFParser.parse(try PDFWriter.write(edited))
+    let updated = PDFOutlineInventory.items(in: reopened.graph, pageIDs: reopened.pageIDs)
+    #expect(updated.count == 1)
+    #expect(updated[0].title == "New")
+    #expect(updated[0].pageIndex == 2)
+  }
+
   @Test func invalidPageAndMissingBookmarkAreRefused() throws {
     let parsed = try PDFParser.parse(PDFFixtures.onePage())
     #expect(throws: PDFError.self) {

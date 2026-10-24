@@ -82,6 +82,48 @@ public struct AddBookmarkCommand: PDFEditCommand, Equatable, Sendable {
   }
 }
 
+/// PAG-09: edit a bookmark's title and page destination in place.
+public struct EditBookmarkCommand: PDFEditCommand, Equatable, Sendable {
+  public let objectID: PDFObjectID
+  public let title: String
+  public let pageID: PDFObjectID
+
+  public init(objectID: PDFObjectID, title: String, pageID: PDFObjectID) {
+    self.objectID = objectID
+    self.title = title
+    self.pageID = pageID
+  }
+
+  public var name: String { "Edit Bookmark" }
+  public func affectedPageIDs(in graph: PDFGraph) -> [PDFObjectID] { [] }
+
+  public func validate(in graph: PDFGraph) throws {
+    guard case .dictionary(let item)? = graph.objects[objectID],
+      item[PDFName("Title")] != nil
+    else {
+      throw PDFError(.malformed, "The bookmark is missing")
+    }
+    guard !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+      throw PDFError(.malformed, "A bookmark needs a title")
+    }
+    try AnnotationSupport.validatePage(pageID, in: graph)
+  }
+
+  public func apply(to graph: PDFGraph) throws -> PDFGraph {
+    var graph = graph
+    guard case .dictionary(var item)? = graph.objects[objectID] else {
+      throw PDFError(.malformed, "The bookmark is missing")
+    }
+    item[PDFName("Title")] = .string(AnnotationText.encode(title))
+    item[PDFName("Dest")] = .array([
+      .reference(pageID), .name(PDFName("XYZ")), .null, .null, .null,
+    ])
+    item[PDFName("A")] = nil
+    graph.objects[objectID] = .dictionary(item)
+    return graph
+  }
+}
+
 /// PAG-09: remove one bookmark and its descendants. Sibling links are
 /// repaired; other bookmarks are untouched.
 public struct RemoveBookmarkCommand: PDFEditCommand, Equatable, Sendable {
