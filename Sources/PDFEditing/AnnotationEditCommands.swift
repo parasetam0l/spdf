@@ -108,7 +108,7 @@ public struct SetAnnotationStyleCommand: PDFEditCommand, Equatable, Sendable {
 
   static let supportedSubtypes: Set<PDFName> = [
     PDFName("Highlight"), PDFName("Underline"), PDFName("StrikeOut"), PDFName("Square"),
-    PDFName("Circle"), PDFName("Line"),
+    PDFName("Circle"), PDFName("Line"), PDFName("Ink"),
   ]
 
   public func validate(in graph: PDFGraph) throws {
@@ -183,6 +183,14 @@ public struct SetAnnotationStyleCommand: PDFEditCommand, Equatable, Sendable {
         borderWidth: width, opacity: newOpacity)
       dictionary[PDFName("Rect")] = .array(geometry.rect.map { .real($0) })
       dictionary[PDFName("IC")] = .array(newColor.map { .real($0) })
+    case PDFName("Ink"):
+      guard let strokes = Self.inkStrokes(of: dictionary) else {
+        throw PDFError(.malformed, "Ink annotation has no strokes")
+      }
+      let width = AnnotationSupport.borderWidth(of: dictionary)
+      stream = AddInkCommand.appearance(
+        strokes: strokes, rect: rect, color: newColor,
+        borderWidth: width > 0 ? width : 2, opacity: newOpacity)
     default:
       throw PDFError(.unsupported, "Style editing is not supported for this annotation type yet")
     }
@@ -232,6 +240,20 @@ public struct SetAnnotationStyleCommand: PDFEditCommand, Equatable, Sendable {
     return numbers.count == 4 ? numbers : nil
   }
 
+  static func inkStrokes(of dictionary: [PDFName: PDFValue]) -> [[Double]]? {
+    guard case .array(let strokes)? = dictionary[PDFName("InkList")] else { return nil }
+    var result: [[Double]] = []
+    for stroke in strokes {
+      guard case .array(let values) = stroke else { return nil }
+      let numbers = values.compactMap(Annotation.number)
+      guard numbers.count == values.count, numbers.count >= 4, numbers.count % 2 == 0 else {
+        return nil
+      }
+      result.append(numbers)
+    }
+    return result.isEmpty ? nil : result
+  }
+
   static func lineEndings(of dictionary: [PDFName: PDFValue]) -> (LineEnding, LineEnding)? {
     guard case .array(let values)? = dictionary[PDFName("LE")] else { return (.none, .none) }
     guard values.count == 2 else { return nil }
@@ -263,6 +285,10 @@ public struct SetAnnotationStyleCommand: PDFEditCommand, Equatable, Sendable {
       }
       guard lineEndings(of: dictionary) != nil else {
         throw PDFError(.unsupported, "Unsupported line ending style")
+      }
+    case PDFName("Ink"):
+      guard inkStrokes(of: dictionary) != nil else {
+        throw PDFError(.malformed, "Ink annotation has no strokes")
       }
     default:
       break

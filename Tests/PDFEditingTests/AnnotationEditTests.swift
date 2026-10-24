@@ -121,6 +121,29 @@ struct AnnotationEditTests {
     #expect(squareContent.contains("0 0.5 0 RG"))
     #expect(squareContent.contains("1 1 0 rg"))
     #expect(squareContent.contains("2 w"))
+
+    // Ink style edits preserve strokes and rewrite color/opacity.
+    let inked = try PDFEditingEngine.commit(
+      PDFTransaction([
+        AddInkCommand(
+          pageID: shapePageID, strokes: [[10, 10, 40, 40, 80, 20]],
+          color: [0, 0, 0], borderWidth: 3)
+      ]), to: parsed.graph)
+    let inkStyled = try PDFEditingEngine.commit(
+      PDFTransaction([
+        SetAnnotationStyleCommand(
+          pageID: shapePageID, annotationIndex: 0, color: [0.8, 0.1, 0.2], opacity: 0.6)
+      ]), to: inked)
+    let ink = try #require(
+      try AnnotationInventory.annotations(in: inkStyled, pageID: shapePageID).first)
+    #expect(ink.dictionary[PDFName("C")] == .array([.real(0.8), .real(0.1), .real(0.2)]))
+    #expect(ink.dictionary[PDFName("CA")] == .real(0.6))
+    let inkContent = try appearanceContent(of: ink, in: inkStyled)
+    #expect(inkContent.contains("0.8 0.1 0.2 RG"))
+    #expect(inkContent.contains("3 w"))
+    let inkReparsed = try PDFParser.parse(PDFWriter.write(inkStyled))
+    #expect(inkReparsed.graph == inkStyled)
+
     let reparsed = try PDFParser.parse(PDFWriter.write(shapeStyled))
     #expect(reparsed.graph == shapeStyled)
 
