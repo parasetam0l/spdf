@@ -119,6 +119,21 @@ public enum FormInventory {
 
   /// P24-004: widgets on pages whose parent chain never reaches a canonical
   /// field, reported separately instead of being duplicated as fields.
+  /// FRM-05/PAG-02: field names that collided across independent documents.
+  /// The combine review uses this before choosing automatic renaming.
+  public static func duplicateNames(across graphs: [PDFGraph]) throws -> [String] {
+    var seen = Set<String>()
+    var duplicates = Set<String>()
+    for graph in graphs {
+      let pages = try PageTreeView(graph: graph).pages
+      for field in try fields(in: graph, pageIDs: pages)
+      where !seen.insert(field.name).inserted {
+        duplicates.insert(field.name)
+      }
+    }
+    return duplicates.sorted()
+  }
+
   public static func orphanedWidgets(
     in graph: PDFGraph, pageIDs: [PDFObjectID]
   ) -> [FormWidget] {

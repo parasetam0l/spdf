@@ -13,7 +13,9 @@ final class CombineDocumentsModel: ObservableObject {
   }
 
   @Published var files: [File]
-  var onCombine: (([URL]) -> Void)?
+  @Published var allowFieldRenames = true
+  @Published var keepBookmarks = true
+  var onCombine: (([URL], Bool, Bool) -> Void)?
   var onCancel: (() -> Void)?
 
   init(files: [File]) {
@@ -71,6 +73,11 @@ struct CombineDocumentsPanel: View {
         }
       }
       .frame(minHeight: 220)
+      VStack(alignment: .leading, spacing: 4) {
+        Toggle("Rename duplicate field names", isOn: $model.allowFieldRenames)
+        Toggle("Keep bookmarks from the first document", isOn: $model.keepBookmarks)
+      }
+      .font(.caption)
       HStack {
         Button("Move Up") {
           if let selection { model.moveUp(selection) }
@@ -90,7 +97,8 @@ struct CombineDocumentsPanel: View {
         Spacer()
         Button("Cancel") { model.onCancel?() }
         Button("Review…") {
-          model.onCombine?(model.files.map(\.url))
+          model.onCombine?(
+            model.files.map(\.url), model.allowFieldRenames, model.keepBookmarks)
         }
         .keyboardShortcut(.defaultAction)
         .disabled(model.files.isEmpty)

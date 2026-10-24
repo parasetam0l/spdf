@@ -349,6 +349,15 @@ struct FormTests {
     #expect(content.contains("word word"))
   }
 
+  @Test func duplicateFieldNamesAcrossDocumentsAreDetected() throws {
+    let form = try PDFParser.parse(PDFFixtures.formPages()).graph
+    let names = try FormInventory.duplicateNames(across: [form, form])
+    #expect(names.contains("name"))
+    #expect(!names.isEmpty)
+    let plain = try PDFParser.parse(PDFFixtures.onePage()).graph
+    #expect(try FormInventory.duplicateNames(across: [form, plain]).isEmpty)
+  }
+
   @Test func resetRestoresDocumentedDefaultValues() throws {
     let (graph, pageIDs) = try formFixture()
     let filled = try PDFEditingEngine.commit(

@@ -3751,7 +3751,9 @@ final class SPDFDocument: NSDocument {
 
   /// PAG-02: assemble selected PDFs in memory so order and conflicts can be
   /// inspected before any output is written.
-  private func prepareCombinedDocument(from urls: [URL]) throws -> PreparedCombination {
+  private func prepareCombinedDocument(
+    from urls: [URL], allowFieldRenames: Bool = true, keepBookmarks: Bool = true
+  ) throws -> PreparedCombination {
     guard !urls.isEmpty else {
       throw PDFError(.malformed, "Choose at least one PDF to combine")
     }
@@ -3764,8 +3766,18 @@ final class SPDFDocument: NSDocument {
       sources.append((graph: parsed.graph, pageIDs: parsed.pageIDs))
       summaries.append((file.lastPathComponent, parsed.pageCount))
     }
+    if !allowFieldRenames {
+      let duplicates = try FormInventory.duplicateNames(across: sources.map(\.graph))
+      if !duplicates.isEmpty {
+        throw PDFError(
+          .unsupported,
+          "Duplicate field names need renaming or removal: "
+            + duplicates.prefix(8).joined(separator: ", "))
+      }
+    }
     let merged = try DocumentAssembly.merge(
-      sources, labels: .preserve, catalogData: .firstDocument)
+      sources, labels: .preserve,
+      catalogData: keepBookmarks ? .firstDocument : .none)
     return PreparedCombination(
       graph: merged.graph, sourceURLs: urls, summaries: summaries, report: merged.report)
   }
@@ -3826,11 +3838,12 @@ final class SPDFDocument: NSDocument {
         self?.combineModel = nil
         self?.combineWindow = nil
       }
-      model.onCombine = { [weak self, weak window] urls in
+      model.onCombine = { [weak self, weak window] urls, allowFieldRenames, keepBookmarks in
         window?.close()
         self?.combineModel = nil
         self?.combineWindow = nil
-        self?.reviewCombination(urls)
+        self?.reviewCombination(
+          urls, allowFieldRenames: allowFieldRenames, keepBookmarks: keepBookmarks)
       }
       self.combineModel = model
       self.combineWindow = window
@@ -3840,10 +3853,14 @@ final class SPDFDocument: NSDocument {
 
   /// PAG-02: assemble the ordered files in memory and show conflicts before
   /// asking for a destination.
-  private func reviewCombination(_ urls: [URL]) {
+  private func reviewCombination(
+    _ urls: [URL], allowFieldRenames: Bool = true, keepBookmarks: Bool = true
+  ) {
     let prepared: PreparedCombination
     do {
-      prepared = try prepareCombinedDocument(from: urls)
+      prepared = try prepareCombinedDocument(
+        from: urls, allowFieldRenames: allowFieldRenames,
+        keepBookmarks: keepBookmarks)
     } catch {
       presentError(error)
       return
@@ -3853,7 +3870,11 @@ final class SPDFDocument: NSDocument {
         + ($0.element.pages == 1 ? "" : "s")
     }.joined(separator: "\n")
     detail += "\n\nCombined result: \(prepared.pageCount) page"
-      + (prepared.pageCount == 1 ? "" : "s") + "\n\n"
+      + (prepared.pageCount == 1 ? "" : "s") + "\n"
+    detail += "Duplicate fields: "
+      + (allowFieldRenames ? "renamed automatically" : "refused") + "\n"
+    detail += "Bookmarks: "
+      + (keepBookmarks ? "kept from the first document" : "discarded") + "\n\n"
     detail += prepared.report.report()
     let review = NSAlert()
     review.messageText = "Combine Documents"
