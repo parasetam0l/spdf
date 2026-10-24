@@ -1199,6 +1199,21 @@
           guard first.undoEdit(), try first.data(ofType: "com.adobe.pdf") == original else {
             throw PDFError(.malformed, "Page mark undo did not restore the original bytes")
           }
+          // PAG-09: metadata editing round-trips and undoes.
+          try first.editSession.apply(
+            PDFTransaction([
+              SetDocumentMetadataCommand(
+                metadata: DocumentMetadata(title: "Smoke Metadata", author: "sPDF"))
+            ]))
+          let metadataPDF = try PDFParser.parse(try first.data(ofType: "com.adobe.pdf"))
+          let metadataFacts = PDFDocumentInventory.documentFacts(
+            in: metadataPDF.graph, pageCount: metadataPDF.pageCount)
+          guard metadataFacts.metadata.title == "Smoke Metadata",
+            metadataFacts.metadata.author == "sPDF"
+          else { throw PDFError(.malformed, "Document metadata did not round-trip") }
+          guard first.undoEdit(), try first.data(ofType: "com.adobe.pdf") == original else {
+            throw PDFError(.malformed, "Metadata undo did not restore the original bytes")
+          }
           // PAG-03: split writes predictable verified parts and leaves the
           // source session untouched.
           let splitDirectory = output.appendingPathComponent("split", isDirectory: true)

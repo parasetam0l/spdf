@@ -276,6 +276,10 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
     currentDocument?.rotateCurrentPage(byDegrees: 90)
   }
 
+  @objc private func documentMetadata(_ sender: Any?) {
+    currentDocument?.presentDocumentMetadata()
+  }
+
   @objc private func createPDFFromText(_ sender: Any?) {
     let textView = NSTextView(frame: NSRect(x: 0, y: 0, width: 440, height: 220))
     textView.isRichText = false
@@ -727,6 +731,9 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
     if menuItem.action == #selector(createPDFFromText) {
       return true
     }
+    if menuItem.action == #selector(documentMetadata) {
+      return currentDocument?.canEditContent == true
+    }
     guard let document = currentDocument else { return false }
     switch menuItem.action {
     case #selector(togglePageTextBold), #selector(togglePageTextItalic):
@@ -929,10 +936,12 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
     add(
       "New PDF", #selector(NSDocumentController.newDocument(_:)), key: "n",
       target: documents, to: file)
+    let create = submenu("Create PDF", in: file)
     add(
-      "Create PDF from Images…", #selector(createPDFFromImages), target: self, to: file)
+      "From Images…", #selector(createPDFFromImages), target: self, to: create)
     add(
-      "Create PDF from Text…", #selector(createPDFFromText), target: self, to: file)
+      "From Text…", #selector(createPDFFromText), target: self, to: create)
+    add("Document Metadata…", #selector(documentMetadata), target: self, to: file)
     add(
       "Open…", #selector(NSDocumentController.openDocument(_:)), key: "o", target: documents,
       to: file)

@@ -3902,6 +3902,52 @@ final class SPDFDocument: NSDocument {
     }
   }
 
+  /// PAG-09: edit the document information dictionary.
+  func presentDocumentMetadata() {
+    guard canEditContent, let graph = editSession.currentGraph else { return }
+    let facts = PDFDocumentInventory.documentFacts(
+      in: graph, pageCount: editSession.pageIDs.count)
+    let labels = ["Title", "Author", "Subject", "Keywords", "Creator", "Producer"]
+    let values = [
+      facts.metadata.title, facts.metadata.author, facts.metadata.subject,
+      facts.metadata.keywords, facts.metadata.creator, facts.metadata.producer,
+    ]
+    let fields = zip(labels, values).map { _, value -> NSTextField in
+      let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 300, height: 22))
+      field.stringValue = value ?? ""
+      return field
+    }
+    let grid = NSGridView(views: zip(labels, fields).map { label, field in
+      [NSTextField(labelWithString: "\(label):"), field] as [NSView]
+    })
+    grid.column(at: 0).xPlacement = .trailing
+    grid.frame = NSRect(x: 0, y: 0, width: 400, height: 190)
+    let alert = NSAlert()
+    alert.messageText = "Document Metadata"
+    alert.informativeText =
+      "Updates the document information dictionary. XMP metadata, if present, is not rewritten."
+    alert.accessoryView = grid
+    alert.addButton(withTitle: "Apply")
+    alert.addButton(withTitle: "Cancel")
+    guard alert.runModal() == .alertFirstButtonReturn else { return }
+    func value(_ index: Int) -> String? {
+      let text = fields[index].stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+      return text.isEmpty ? nil : text
+    }
+    let metadata = DocumentMetadata(
+      title: value(0), author: value(1), subject: value(2), keywords: value(3),
+      creator: value(4), producer: value(5))
+    do {
+      try editSession.apply(
+        PDFTransaction([SetDocumentMetadataCommand(metadata: metadata)]))
+    } catch {
+      presentError(error)
+      return
+    }
+    noteUserEdit()
+    refreshViewer(preservingPage: viewer?.pageNumber ?? 1)
+  }
+
   /// PAG-06: remove one applied sPDF mark set without touching other content.
   func presentRemovePageMark() {
     guard canEditContent, let graph = editSession.currentGraph else { return }
