@@ -108,6 +108,11 @@ struct CommentsPanel: View {
     return [comment]
   }
 
+  private func parentComment(of comment: Comment) -> Comment? {
+    guard let parentID = comment.replyTo else { return nil }
+    return comments.first { $0.annotation.objectID == parentID }
+  }
+
   var body: some View {
     VStack(spacing: 0) {
       if !comments.isEmpty {
@@ -224,6 +229,10 @@ struct CommentsPanel: View {
             CommentRow(comment: row.comment, isReply: row.depth > 0)
               .tag(row.id)
               .contextMenu {
+                if let parent = parentComment(of: row.comment) {
+                  Button("Go to Parent Comment") { onSelect(parent) }
+                  Divider()
+                }
                 Button("Reply…") { onReply(row.comment) }
                   .disabled(!canEditContent)
                   .help(editingRestrictionNotice ?? "Reply to this comment")
