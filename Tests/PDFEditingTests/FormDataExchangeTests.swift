@@ -66,6 +66,52 @@ struct FormDataExchangeTests {
     }
   }
 
+  @Test func independentlyWrittenXFDFImports() throws {
+    let parsed = try PDFParser.parse(PDFFixtures.formPages())
+    let xml = """
+      <?xml version="1.0" encoding="UTF-8"?>
+      <xfdf xmlns="http://ns.adobe.com/xfdf/">
+      <fields>
+      <field name="name"><value>Independent XFDF</value></field>
+      <field name="agree"><value>Yes</value></field>
+      </fields>
+      </xfdf>
+      """
+    let raw = try FormDataExchange.parse(Data(xml.utf8), format: .xfdf)
+    let (commands, skipped, _) = try FormDataExchange.commands(
+      forRawValues: raw, in: parsed.graph, pageIDs: parsed.pageIDs)
+    #expect(skipped.isEmpty)
+    let imported = try PDFEditingEngine.commit(PDFTransaction(commands), to: parsed.graph)
+    let fields = try FormInventory.fields(in: imported, pageIDs: parsed.pageIDs)
+    #expect(fields.first { $0.name == "name" }?.stringValue == "Independent XFDF")
+    #expect(fields.first { $0.name == "agree" }?.buttonState == PDFName("Yes"))
+  }
+
+  @Test func independentlyWrittenFDFImports() throws {
+    let parsed = try PDFParser.parse(PDFFixtures.formPages())
+    let fdf = """
+      %FDF-1.2
+      1 0 obj
+      << /FDF << /Fields [
+      << /T (name) /V (Independent FDF) >>
+      << /T (agree) /V /Yes >>
+      ] >> >>
+      endobj
+      trailer
+      << /Root 1 0 R >>
+      %%EOF
+
+      """
+    let raw = try FormDataExchange.parse(Data(fdf.utf8), format: .fdf)
+    let (commands, skipped, _) = try FormDataExchange.commands(
+      forRawValues: raw, in: parsed.graph, pageIDs: parsed.pageIDs)
+    #expect(skipped.isEmpty)
+    let imported = try PDFEditingEngine.commit(PDFTransaction(commands), to: parsed.graph)
+    let fields = try FormInventory.fields(in: imported, pageIDs: parsed.pageIDs)
+    #expect(fields.first { $0.name == "name" }?.stringValue == "Independent FDF")
+    #expect(fields.first { $0.name == "agree" }?.buttonState == PDFName("Yes"))
+  }
+
   @Test func unknownFieldsAreReportedNotGuessed() throws {
     let (filled, pageIDs) = try filledForm()
     let (commands, skipped, _) = try FormDataExchange.commands(
