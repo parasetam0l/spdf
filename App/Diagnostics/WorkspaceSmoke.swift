@@ -1823,6 +1823,14 @@
         file.items.filter({ !$0.isSeparatorItem }).count <= 10,
         KeyboardAudit.find("Check for Updates…") != nil
       else { throw PDFError(.malformed, "Settings/menu structure regression") }
+      let capabilityAudit = CapabilityContractAudit.run(menu: NSApp.mainMenu)
+      guard capabilityAudit.issues.isEmpty, capabilityAudit.contracts.count >= 50 else {
+        throw PDFError(
+          .malformed,
+          "Capability contract audit failed: \(capabilityAudit.issues.joined(separator: "; "))")
+      }
+      try Data(capabilityAudit.text.utf8).write(
+        to: output.appendingPathComponent("capability-contracts.txt"), options: .atomic)
       settings.close()
       checkpoint("workspace sizing and settings passed")
       try await checkGraphicWorkflow(output: output)
@@ -1854,6 +1862,7 @@
         "auxiliaryClosure": "3 organizers and signature closed with retained objects valid",
         "settings": "one reusable Settings window; Command-comma",
         "fileMenu": "New PDF/Command-N; at most 10 root commands; grouped exports",
+        "capabilityContracts": "\(capabilityAudit.contracts.count) document tools audited with menu selector, limits, output and evidence",
       ]
     }
   }
