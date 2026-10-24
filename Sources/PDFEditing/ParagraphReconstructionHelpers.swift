@@ -243,7 +243,14 @@ public enum ParagraphListReconstruction {
           style.kind == .bullet || style.format == parsed.style.format
         let similarIndent = abs((current.last?.candidate.bounds[0] ?? 0) - candidate.bounds[0])
           <= 12
-        guard sameKind, sameFormat, similarIndent else {
+        let previousTop = current.last?.candidate.bounds[3] ?? candidate.bounds[3]
+        let verticalGap = previousTop - candidate.bounds[3]
+        let maximumGap = max(
+          12,
+          1.8 * max(
+            current.last?.candidate.lineSpacing ?? candidate.lineSpacing,
+            candidate.lineSpacing))
+        guard sameKind, sameFormat, similarIndent, verticalGap <= maximumGap else {
           flush()
           // Reconsider this candidate as the start of a new list below.
           if let parsed = marker(in: candidate.text) {

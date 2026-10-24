@@ -559,6 +559,7 @@ final class SPDFDocument: NSDocument {
         onUndo: { NSApp.sendAction(NSSelectorFromString("undoEdit:"), to: NSApp.delegate, from: nil) },
         onRedo: { NSApp.sendAction(NSSelectorFromString("redoEdit:"), to: NSApp.delegate, from: nil) },
         onOpenDroppedFile: { [weak self] url in self?.openDroppedFile(url) },
+        onEditList: { [weak self] in self?.presentParagraphListEditor() },
         comments: commentsModel, forms: formsModel,
         signatures: signaturesModel, structure: structureModel,
         onSelectComment: { [weak self] comment in self?.navigate(to: comment) },
@@ -2580,6 +2581,92 @@ final class SPDFDocument: NSDocument {
     noteUserEdit()
     refreshViewer(preservingPage: viewer?.pageNumber ?? 1)
     return true
+  }
+
+  /// TXT-05: edit a bullet or numbered list on the current page. All marker,
+  /// body, insertion and removal changes are committed as one transaction.
+  func presentParagraphListEditor() {
+    guard canEditContent, let graph = editSession.currentGraph,
+      let viewer, viewer.pageCount > 0
+    else { return }
+    let pageIndex = max(0, min(viewer.pageNumber - 1, editSession.pageIDs.count - 1))
+    guard editSession.pageIDs.indices.contains(pageIndex) else { return }
+    let pageID = editSession.pageIDs[pageIndex]
+    let candidates =
+      (try? ParagraphReconstruction.candidatesForEditing(pageID: pageID, in: graph)) ?? []
+    let lists = ParagraphListReconstruction.lists(from: candidates)
+    guard !lists.isEmpty else {
+      let alert = NSAlert()
+      alert.messageText = "No Lists Detected"
+      alert.informativeText =
+        "No supported bullet or numbered list was found on this page. List markers must be visible horizontal text."
+      alert.addButton(withTitle: "OK")
+      alert.runModal()
+      return
+    }
+    var choices: [(list: TextListCandidate, itemIndex: Int)] = []
+    for list in lists {
+      for itemIndex in list.items.indices {
+        choices.append((list, itemIndex))
+      }
+    }
+    let itemPopup = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 440, height: 24))
+    itemPopup.addItems(withTitles: choices.enumerated().map { index, choice in
+      let item = choice.list.items[choice.itemIndex]
+      return "Item \(index + 1): \(item.marker) \(String(item.text.prefix(48)))"
+    })
+    let operationPopup = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 260, height: 24))
+    operationPopup.addItems(withTitles: [
+      "Switch to bullets", "Switch to numbers", "Restart numbering here",
+      "Continue numbering", "Indent item", "Outdent item",
+      "Add item after", "Remove selected item",
+    ])
+    let startField = NSTextField(string: "1")
+    startField.frame = NSRect(x: 0, y: 0, width: 80, height: 22)
+    let grid = NSGridView(views: [
+      [NSTextField(labelWithString: "List item:"), itemPopup],
+      [NSTextField(labelWithString: "Operation:"), operationPopup],
+      [NSTextField(labelWithString: "Start at:"), startField],
+    ])
+    grid.column(at: 0).xPlacement = .trailing
+    grid.frame = NSRect(x: 0, y: 0, width: 560, height: 92)
+    let selection = viewer.view.currentSelection?.string ?? ""
+    if let selected = choices.firstIndex(where: {
+      selection.contains($0.list.items[$0.itemIndex].text)
+    }) {
+      itemPopup.selectItem(at: selected)
+    }
+    let alert = NSAlert()
+    alert.messageText = "Edit List"
+    alert.informativeText =
+      "Marker and body changes are one undoable transaction. Add and Remove move the following items to keep the list spacing."
+    alert.accessoryView = grid
+    alert.addButton(withTitle: "Apply")
+    alert.addButton(withTitle: "Cancel")
+    guard alert.runModal() == .alertFirstButtonReturn else { return }
+    let choiceIndex = max(0, min(itemPopup.indexOfSelectedItem, choices.count - 1))
+    let choice = choices[choiceIndex]
+    let operation: ParagraphListOperation
+    switch operationPopup.indexOfSelectedItem {
+    case 0: operation = .switchToBullet
+    case 1: operation = .switchToNumbered
+    case 2: operation = .restartNumbering(start: max(1, Int(startField.stringValue) ?? 1))
+    case 3: operation = .continueNumbering
+    case 4: operation = .indent
+    case 5: operation = .outdent
+    case 6: operation = .addItemAfter
+    default: operation = .removeItem
+    }
+    do {
+      let commands = try ParagraphListEditing.commands(
+        pageID: pageID, list: choice.list, itemIndex: choice.itemIndex,
+        operation: operation, in: graph)
+      try editSession.apply(PDFTransaction(commands))
+      noteUserEdit()
+      refreshViewer(preservingPage: viewer.pageNumber)
+    } catch {
+      presentError(error)
+    }
   }
 
   // MARK: - P25 form authoring (menu-driven with default placement)

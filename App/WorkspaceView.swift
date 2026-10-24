@@ -11,6 +11,8 @@ struct WorkspaceView: View {
   var onUndo: () -> Void
   var onRedo: () -> Void
   var onOpenDroppedFile: ((URL) -> Void)?
+  /// TXT-05: open the list editor for the current page.
+  var onEditList: (() -> Void)?
   @ObservedObject var comments: CommentsModel
   @ObservedObject var forms: FormsModel
   @ObservedObject var signatures: SignaturesModel
@@ -136,6 +138,14 @@ struct WorkspaceView: View {
       Divider().frame(height: 18)
       iconButton("Find", symbol: "magnifyingglass") { viewer.showSearch() }
         .help("Find in document (⌘F)")
+      if let onEditList {
+        iconButton("Lists", symbol: "list.bullet", action: onEditList)
+          .disabled(!canEdit)
+          .help(
+            canEdit
+              ? "Edit bullet and numbered list items on this page"
+              : "Editing unavailable: \(viewer.editingRestrictionNotice ?? "this document is view-only.")")
+      }
       if usesProperties {
         iconButton(inspectorTitle, symbol: "sidebar.right") {
           if wide { inspectorVisible.toggle() } else { inspectorPopover.toggle() }

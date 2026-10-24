@@ -80,6 +80,22 @@ struct ParagraphHelperTests {
       ParagraphListStyle(kind: .ordered, format: .lowerAlpha, separator: ".", start: 27))
     #expect(letters == ["aa. Alpha", "ab. Beta", "ac. Gamma"])
 
+    // Renumber every item in reverse document order so earlier source runs
+    // keep their indices while the list is rewritten.
+    let renumberedItems = ordered.items.enumerated().map { index, item in
+      "\(ParagraphListStyle(kind: .ordered, format: .upperRoman, separator: ")", start: 4).marker(for: index))) \(item.text)"
+    }
+    let commands = ordered.items.enumerated().reversed().map { index, item in
+      ReflowParagraphCommand(
+        pageID: pageID, candidate: item.candidate, replacement: renumberedItems[index],
+        options: ParagraphReflowOptions(allowLowConfidence: true))
+    }
+    let renumberedGraph = try PDFEditingEngine.commit(PDFTransaction(commands), to: graph)
+    let renumberedText = try pageText(renumberedGraph, pageID)
+    #expect(renumberedText.contains("IV) Alpha"))
+    #expect(renumberedText.contains("V) Beta"))
+    #expect(renumberedText.contains("VI) Gamma"))
+
     // Marker parsing covers the supported styles.
     #expect(ParagraphListReconstruction.marker(in: "- dash item")?.style.kind == .bullet)
     #expect(ParagraphListReconstruction.marker(in: "iv. roman")?.style.format == .lowerRoman)
@@ -100,6 +116,81 @@ struct ParagraphHelperTests {
     #expect(itemText.contains("Alpha"))
     #expect(itemText.contains("2. Beta"))
 
+  }
+
+  @Test func structuredListOperationsCommitAsOneTransaction() throws {
+    let graph = fixture(lines: [
+      ("- First item", 72, 660, 12),
+      ("- Second item", 72, 640, 12),
+      ("- Third item", 72, 620, 12),
+      ("1. Alpha", 72, 560, 12),
+      ("2. Beta", 72, 540, 12),
+      ("3. Gamma", 72, 520, 12),
+    ])
+    let pageID = try PDFPageTree.pageIDs(in: graph)[0]
+    let candidates = try ParagraphReconstruction.candidates(pageID: pageID, in: graph)
+    let lists = ParagraphListReconstruction.lists(from: candidates)
+    let bullets = try #require(lists.first { $0.style.kind == .bullet })
+    let ordered = try #require(lists.first { $0.style.kind == .ordered })
+
+    // Switch a complete bullet list to numbered markers in one transaction.
+    let numbered = try PDFEditingEngine.commit(
+      PDFTransaction(try ParagraphListEditing.commands(
+        pageID: pageID, list: bullets, itemIndex: 0,
+        operation: .switchToNumbered, in: graph)), to: graph)
+    let numberedText = try pageText(numbered, pageID)
+    #expect(numberedText.contains("1. First item"))
+    #expect(numberedText.contains("2. Second item"), "\(numberedText)")
+    #expect(numberedText.contains("3. Third item"))
+    #expect(numberedText.contains("1. Alpha"))
+
+    // Restart and continue numbering from a selected item.
+    let restarted = try PDFEditingEngine.commit(
+      PDFTransaction(try ParagraphListEditing.commands(
+        pageID: pageID, list: ordered, itemIndex: 1,
+        operation: .restartNumbering(start: 7), in: graph)), to: graph)
+    let restartedText = try pageText(restarted, pageID)
+    #expect(restartedText.contains("1. Alpha"))
+    #expect(restartedText.contains("7. Beta"))
+    #expect(restartedText.contains("8. Gamma"))
+    let continued = try PDFEditingEngine.commit(
+      PDFTransaction(try ParagraphListEditing.commands(
+        pageID: pageID, list: ordered, itemIndex: 2,
+        operation: .continueNumbering, in: graph)), to: graph)
+    #expect(try pageText(continued, pageID).contains("3. Gamma"))
+
+    // Indent one item; its marker and body move together.
+    let indented = try PDFEditingEngine.commit(
+      PDFTransaction(try ParagraphListEditing.commands(
+        pageID: pageID, list: bullets, itemIndex: 1,
+        operation: .indent, in: graph)), to: graph)
+    let layout = try PageTextLayout.build(pageID: pageID, in: indented)
+    let second = layout.clusters.first { $0.text == "S" && abs($0.origin[1] - 640) < 1 }
+    #expect(second.map { abs($0.origin[0] - 90) < 0.2 } == true)
+
+    // Add and remove items as single transactions.
+    let added = try PDFEditingEngine.commit(
+      PDFTransaction(try ParagraphListEditing.commands(
+        pageID: pageID, list: bullets, itemIndex: 0,
+        operation: .addItemAfter, in: graph)), to: graph)
+    let addedCandidates = try ParagraphReconstruction.candidates(
+      pageID: pageID, in: added)
+    let addedLists = ParagraphListReconstruction.lists(from: addedCandidates)
+    let addedBullets = try #require(addedLists.first { $0.style.kind == .bullet })
+    let addedText = try pageText(added, pageID)
+    #expect(
+      addedBullets.items.count == 4,
+      "\(addedText) items=\(addedBullets.items.map(\.text)) lists=\(addedLists.map { $0.items.map(\.text) })")
+    #expect(addedText.contains("New item"))
+
+    let removed = try PDFEditingEngine.commit(
+      PDFTransaction(try ParagraphListEditing.commands(
+        pageID: pageID, list: bullets, itemIndex: 1,
+        operation: .removeItem, in: graph)), to: graph)
+    let removedText = try pageText(removed, pageID)
+    #expect(!removedText.contains("Second item"))
+    #expect(removedText.contains("First item"))
+    #expect(removedText.contains("Third item"))
   }
 
   @Test func tableCellsFormAGridAndEditIndependently() throws {
