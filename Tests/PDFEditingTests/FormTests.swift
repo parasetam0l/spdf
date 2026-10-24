@@ -335,6 +335,20 @@ struct FormTests {
     }
   }
 
+  @Test func multilineFieldWrapsLongTextAtWidgetWidth() throws {
+    let (graph, _) = try formFixture()
+    let text = Array(repeating: "word", count: 40).joined(separator: " ")
+    let filled = try PDFEditingEngine.commit(
+      PDFTransaction([SetFormTextCommand(fieldName: "notes", text: text)]), to: graph)
+    guard case .stream(let appearance)? = filled.objects[PDFObjectID(122)] else {
+      Issue.record("multiline appearance missing")
+      return
+    }
+    let content = String(decoding: appearance.bytes, as: UTF8.self)
+    #expect(content.components(separatedBy: " Tm ").count - 1 > 1)
+    #expect(content.contains("word word"))
+  }
+
   @Test func resetRestoresDocumentedDefaultValues() throws {
     let (graph, pageIDs) = try formFixture()
     let filled = try PDFEditingEngine.commit(

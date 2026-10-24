@@ -136,6 +136,28 @@ public struct SetFormTextCommand: PDFEditCommand, Equatable, Sendable {
     return (max(4, min(size, 96)), color)
   }
 
+  /// FRM-05: wrap a multiline field's text at the widget width using the same
+  /// conservative Helvetica estimate as the alignment path.
+  static func wrappedLines(_ text: String, width: Double, size: Double) -> [String] {
+    let available = max(4, width - 4)
+    var lines: [String] = []
+    for paragraph in text.components(separatedBy: .newlines) {
+      var line = ""
+      for word in paragraph.split(separator: " ", omittingEmptySubsequences: false) {
+        let fragment = String(word)
+        let candidate = line.isEmpty ? fragment : line + " " + fragment
+        if !line.isEmpty, Double(candidate.count) * size * 0.5 > available {
+          lines.append(line)
+          line = fragment
+        } else {
+          line = candidate
+        }
+      }
+      lines.append(line)
+    }
+    return lines
+  }
+
   static func textAppearance(
     text: String, rect: [Double], multiline: Bool, da: (size: Double, color: [Double]),
     fontID: PDFObjectID, alignment: Int = 0, comb: Bool = false, maxLength: Int? = nil
@@ -164,7 +186,10 @@ public struct SetFormTextCommand: PDFEditCommand, Equatable, Sendable {
           + "\(escaped) Tj\n"
       }
     } else {
-      for (index, line) in text.components(separatedBy: .newlines).enumerated() {
+      let lines = multiline
+        ? wrappedLines(text, width: width, size: size)
+        : text.components(separatedBy: .newlines)
+      for (index, line) in lines.enumerated() {
         guard let escaped = AnnotationSupport.escapedLiteral(line) else { continue }
         let y: Double
         if multiline {
