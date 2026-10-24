@@ -60,6 +60,8 @@ final class SPDFDocument: NSDocument {
   /// P23-023: the page organizer window and its model stay alive while open.
   private var pageOrganizerModel: PageOrganizerModel?
   private var pageOrganizerWindow: NSWindow?
+  private var combineModel: CombineDocumentsModel?
+  private var combineWindow: NSWindow?
   private var signatureWindow: NSWindow?
   private var warnedXFA = false
   /// Test hook: where provisioned fonts are installed (defaults to
@@ -3783,47 +3785,85 @@ final class SPDFDocument: NSDocument {
     let open = NSOpenPanel()
     open.allowedContentTypes = [.pdf]
     open.allowsMultipleSelection = true
-    open.message = "Choose PDFs in the order they should appear."
+    open.message = "Choose PDFs, then reorder them in the combine window."
     open.prompt = "Choose"
     open.begin { [weak self] response in
       guard response == .OK, !open.urls.isEmpty, let self else { return }
-      let prepared: PreparedCombination
-      do {
-        prepared = try self.prepareCombinedDocument(from: open.urls)
-      } catch {
-        self.presentError(error)
+      var files: [CombineDocumentsModel.File] = []
+      for url in open.urls {
+        guard let data = try? Data(contentsOf: url),
+          let parsed = try? PDFParser.parse(
+            data, limits: SPDFDocumentResourcePolicy.parsingLimits)
+        else { continue }
+        files.append(CombineDocumentsModel.File(url: url, pageCount: parsed.pageCount))
+      }
+      guard !files.isEmpty else {
+        self.presentError(PDFError(.malformed, "None of the selected PDFs could be read"))
         return
       }
-      var detail = prepared.summaries.enumerated().map {
-        "\($0.offset + 1). \($0.element.name) — \($0.element.pages) page"
-          + ($0.element.pages == 1 ? "" : "s")
-      }.joined(separator: "\n")
-      detail += "\n\nCombined result: \(prepared.pageCount) page"
-        + (prepared.pageCount == 1 ? "" : "s") + "\n\n"
-      detail += prepared.report.report()
-      let review = NSAlert()
-      review.messageText = "Combine Documents"
-      review.informativeText = detail
-      review.addButton(withTitle: "Choose Destination…")
-      review.addButton(withTitle: "Cancel")
-      guard review.runModal() == .alertFirstButtonReturn else { return }
-      let save = NSSavePanel()
-      save.allowedContentTypes = [.pdf]
-      let base = self.editSession.pageIDs.isEmpty
-        ? "Combined" : (self.fileURL?.deletingPathExtension().lastPathComponent ?? "Combined")
-      save.nameFieldStringValue = "\(base)-combined.pdf"
-      save.begin { [weak self] saveResponse in
-        guard saveResponse == .OK, let url = save.url, let self else { return }
-        do {
-          try self.writeCombinedDocument(prepared, to: url)
-          let alert = NSAlert()
-          alert.messageText = "Documents Combined"
-          alert.informativeText = prepared.report.report()
-          alert.addButton(withTitle: "OK")
-          alert.runModal()
-        } catch {
-          self.presentError(error)
-        }
+      let model = CombineDocumentsModel(files: files)
+      let window = NSWindow(
+        contentRect: NSRect(x: 0, y: 0, width: 560, height: 420),
+        styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
+      window.title = "Combine Documents"
+      window.isReleasedWhenClosed = false
+      window.contentView = NSHostingView(rootView: CombineDocumentsPanel(model: model))
+      model.onCancel = { [weak self, weak window] in
+        window?.close()
+        self?.combineModel = nil
+        self?.combineWindow = nil
+      }
+      model.onCombine = { [weak self, weak window] urls in
+        window?.close()
+        self?.combineModel = nil
+        self?.combineWindow = nil
+        self?.reviewCombination(urls)
+      }
+      self.combineModel = model
+      self.combineWindow = window
+      window.makeKeyAndOrderFront(nil)
+    }
+  }
+
+  /// PAG-02: assemble the ordered files in memory and show conflicts before
+  /// asking for a destination.
+  private func reviewCombination(_ urls: [URL]) {
+    let prepared: PreparedCombination
+    do {
+      prepared = try prepareCombinedDocument(from: urls)
+    } catch {
+      presentError(error)
+      return
+    }
+    var detail = prepared.summaries.enumerated().map {
+      "\($0.offset + 1). \($0.element.name) — \($0.element.pages) page"
+        + ($0.element.pages == 1 ? "" : "s")
+    }.joined(separator: "\n")
+    detail += "\n\nCombined result: \(prepared.pageCount) page"
+      + (prepared.pageCount == 1 ? "" : "s") + "\n\n"
+    detail += prepared.report.report()
+    let review = NSAlert()
+    review.messageText = "Combine Documents"
+    review.informativeText = detail
+    review.addButton(withTitle: "Choose Destination…")
+    review.addButton(withTitle: "Cancel")
+    guard review.runModal() == .alertFirstButtonReturn else { return }
+    let save = NSSavePanel()
+    save.allowedContentTypes = [.pdf]
+    let base = editSession.pageIDs.isEmpty
+      ? "Combined" : (fileURL?.deletingPathExtension().lastPathComponent ?? "Combined")
+    save.nameFieldStringValue = "\(base)-combined.pdf"
+    save.begin { [weak self] saveResponse in
+      guard saveResponse == .OK, let url = save.url, let self else { return }
+      do {
+        try self.writeCombinedDocument(prepared, to: url)
+        let alert = NSAlert()
+        alert.messageText = "Documents Combined"
+        alert.informativeText = prepared.report.report()
+        alert.addButton(withTitle: "OK")
+        alert.runModal()
+      } catch {
+        self.presentError(error)
       }
     }
   }
@@ -5825,6 +5865,9 @@ final class SPDFDocument: NSDocument {
     pageOrganizerWindow?.close()
     pageOrganizerWindow = nil
     pageOrganizerModel = nil
+    combineWindow?.close()
+    combineWindow = nil
+    combineModel = nil
     signatureWindow?.close()
     signatureWindow = nil
     for window in tableReviewWindows { window.close() }
