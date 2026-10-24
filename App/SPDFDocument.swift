@@ -600,6 +600,19 @@ final class SPDFDocument: NSDocument {
         onOrganizePages: { [weak self] in self?.organizePages() },
         onInsertBlankPage: { [weak self] in self?.insertBlankPageAfterCurrent() },
         onRotateRight: { [weak self] in self?.rotateCurrentPage(byDegrees: 90) },
+        onImageGeometry: { [weak self] page, placement, x, y, width, height in
+          _ = self?.setImageGeometry(
+            pageIndex: page, placementIndex: placement, x: x, y: y,
+            width: width, height: height)
+        },
+        onImageFlip: { [weak self] page, placement, horizontal in
+          _ = self?.flipImage(
+            pageIndex: page, placementIndex: placement, horizontal: horizontal)
+        },
+        onImageRotate: { [weak self] page, placement, degrees in
+          _ = self?.rotateImage(
+            pageIndex: page, placementIndex: placement, degrees: degrees)
+        },
         onHighlight: { [weak self] in self?.addAnnotationFromSelection(.highlight) },
         onNote: { [weak self] in self?.addAnnotationFromSelection(.note) }))
     // A plain AppKit content view owns the workspace dimensions. Keep the

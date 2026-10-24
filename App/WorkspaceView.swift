@@ -40,6 +40,9 @@ struct WorkspaceView: View {
   var onOrganizePages: () -> Void
   var onInsertBlankPage: () -> Void
   var onRotateRight: () -> Void
+  var onImageGeometry: ((Int, Int, Double, Double, Double, Double) -> Void)? = nil
+  var onImageFlip: ((Int, Int, Bool) -> Void)? = nil
+  var onImageRotate: ((Int, Int, Int) -> Void)? = nil
   var onHighlight: () -> Void
   var onNote: () -> Void
   @State private var pageEntry = "1"
@@ -484,7 +487,9 @@ struct WorkspaceView: View {
       case .fonts:
         FontsPanel(model: fonts, onProvision: onProvisionFont)
       case .inspector:
-        SelectionInspectorPanel(viewer: viewer)
+        SelectionInspectorPanel(
+          viewer: viewer, onImageGeometry: onImageGeometry,
+          onImageFlip: onImageFlip, onImageRotate: onImageRotate)
       case .info:
         DocumentInfoPanel(viewer: viewer)
       case .structure:
