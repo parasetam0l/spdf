@@ -128,6 +128,30 @@ struct OutlineAuthoringTests {
     }
   }
 
+  @Test func nestedBookmarksResolveAfterPageReorder() throws {
+    let parsed = try PDFParser.parse(PDFFixtures.threePages())
+    let added = try PDFEditingEngine.commit(
+      PDFTransaction([
+        AddBookmarkCommand(title: "Chapter", pageID: parsed.pageIDs[0]),
+        AddBookmarkCommand(title: "Section", pageID: parsed.pageIDs[1]),
+      ]), to: parsed.graph)
+    let items = PDFOutlineInventory.items(in: added, pageIDs: parsed.pageIDs)
+    let sectionID = try #require(items[1].objectID)
+    let nested = try PDFEditingEngine.commit(
+      PDFTransaction([NestBookmarkCommand(objectID: sectionID)]), to: added)
+    let reordered = try PDFEditingEngine.commit(
+      PDFTransaction([ReorderPagesCommand(pageID: parsed.pageIDs[0], toIndex: 2)]), to: nested)
+    let reopened = try PDFParser.parse(try PDFWriter.write(reordered))
+    let outline = PDFOutlineInventory.items(
+      in: reopened.graph, pageIDs: reopened.pageIDs)
+    #expect(outline.count == 1)
+    #expect(outline[0].title == "Chapter")
+    #expect(outline[0].pageIndex == 2)
+    #expect(outline[0].children.count == 1)
+    #expect(outline[0].children[0].title == "Section")
+    #expect(outline[0].children[0].pageIndex == 0)
+  }
+
   @Test func invalidPageAndMissingBookmarkAreRefused() throws {
     let parsed = try PDFParser.parse(PDFFixtures.onePage())
     #expect(throws: PDFError.self) {
