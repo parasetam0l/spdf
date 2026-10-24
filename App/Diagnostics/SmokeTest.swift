@@ -8,6 +8,19 @@
   import PDFKit
   import Security
 
+  /// SAF-04: deterministic recognizer for the document OCR service probe.
+  private struct CapabilityOCRStub: TextRecognizing {
+    func recognize(
+      image: CGImage, languages: [String], level: OCRRecognitionLevel
+    ) throws -> [OCRObservation] {
+      [
+        OCRObservation(
+          text: "Capability OCR", confidence: 0.9,
+          boundingBox: CGRect(x: 0.1, y: 0.1, width: 0.6, height: 0.1))
+      ]
+    }
+  }
+
   /// SAF-01: seeds metadata, a JavaScript action, and unreachable objects on
   /// the session graph so the native sanitized-copy route must remove them.
   private struct SeedHiddenDataForSanitizeCheck: PDFEditCommand {
@@ -2605,6 +2618,163 @@
 
         let workspaceRepairs = try await WorkspaceSmoke.checks(output: output)
         checkpoint("workspace repair smoke passed")
+
+        // SAF-04: execute the remaining document/service contracts through the
+        // same entry points used by their menu commands.
+        guard let appDelegate = NSApp.delegate as? ApplicationDelegate,
+          let attachmentPageID = attachmentDocument.editSession.pageIDs.first
+        else { throw PDFError(.malformed, "Capability service setup failed") }
+        checkpoint("capability services setup passed")
+        guard formDocument.addAuthoredCheckbox(name: "CapabilityCheckbox") else {
+          throw PDFError(.malformed, "Capability checkbox service failed")
+        }
+        checkpoint("capability checkbox passed")
+        guard formDocument.addAuthoredRadioGroup(name: "CapabilityRadio") else {
+          throw PDFError(.malformed, "Capability radio service failed")
+        }
+        checkpoint("capability radio passed")
+        guard formDocument.addAuthoredChoiceField(name: "CapabilityChoice") else {
+          throw PDFError(.malformed, "Capability choice service failed")
+        }
+        checkpoint("capability choice passed")
+        guard formDocument.addAuthoredPushButton(name: "CapabilityButton") else {
+          throw PDFError(.malformed, "Capability push-button service failed")
+        }
+        checkpoint("capability push button passed")
+        guard formDocument.addAuthoredSignatureField(name: "CapabilitySignature") else {
+          throw PDFError(.malformed, "Capability signature-field service failed")
+        }
+        checkpoint("capability signature field passed")
+        guard formDocument.recalculateAuthoredForm() else {
+          throw PDFError(.malformed, "Capability recalculation service failed")
+        }
+        checkpoint("capability recalculation passed")
+        let capabilityFields = formDocument.formFieldNames()
+        checkpoint("capability fields enumerated")
+        guard capabilityFields.contains("CapabilityCheckbox"),
+          capabilityFields.contains("CapabilityRadio"),
+          capabilityFields.contains("CapabilityChoice"),
+          capabilityFields.contains("CapabilityButton"),
+          capabilityFields.contains("CapabilitySignature")
+        else { throw PDFError(.malformed, "Capability fields are missing") }
+        checkpoint("capability fields verified")
+        guard formDocument.distributeAuthoredFields(
+          Array(capabilityFields.filter { !$0.hasPrefix("Capability") }.prefix(3)),
+          axis: .horizontal)
+        else { throw PDFError(.malformed, "Capability field distribution failed") }
+        checkpoint("capability form services passed")
+
+        guard
+          attachmentDocument.setDocumentMetadata(
+            DocumentMetadata(
+              title: "Capability contract", author: "sPDF", subject: "SAF-04",
+              keywords: "capability", creator: "sPDF", producer: "sPDF")),
+          PDFDocumentInventory.documentFacts(
+            in: attachmentDocument.editSession.currentGraph!,
+            pageCount: attachmentDocument.editSession.pageIDs.count
+          ).metadata.title == "Capability contract"
+        else { throw PDFError(.malformed, "Capability metadata service failed") }
+
+        guard
+          attachmentDocument.setPageBox(
+            kind: .crop, pageIndices: [0], margins: [4, 4, 4, 4], unitFactor: 1),
+          let markPlan = attachmentDocument.addPageMark(
+            .header(text: "Capability", style: AddedTextStyle(size: 10)),
+            pageIDs: [attachmentPageID]),
+          let markGroup = RepeatedMarkInventory.groups(
+            in: attachmentDocument.editSession.currentGraph!,
+            pageIDs: attachmentDocument.editSession.pageIDs
+          ).first,
+          attachmentDocument.removePageMark(
+            groupID: markGroup.groupID, pageIDs: markGroup.pageIDs)
+        else { throw PDFError(.malformed, "Capability page mark service failed") }
+        _ = markPlan
+        checkpoint("capability page services passed")
+
+        try attachmentDocument.editSession.apply(
+          PDFTransaction([
+            AddNoteCommand(
+              pageID: attachmentPageID, at: [24, 24],
+              contents: "Capability comment")
+          ]))
+        let capabilityCommentData = try attachmentDocument.commentExchangeData()
+        let capabilityMerge = try attachmentDocument.mergeComments(
+          data: capabilityCommentData.data)
+        guard capabilityMerge.unchanged >= 1 else {
+          throw PDFError(.malformed, "Capability comment merge service failed")
+        }
+
+        if let viewer = attachmentDocument.viewer,
+          let page = viewer.view.document?.page(at: 0),
+          let selection = page.selection(for: page.bounds(for: .mediaBox))
+        {
+          viewer.view.setCurrentSelection(selection, animate: false)
+          guard attachmentDocument.addAnnotationFromSelection(.underline) else {
+            throw PDFError(.malformed, "Capability underline service failed")
+          }
+          checkpoint("capability underline passed")
+          guard let strikePage = viewer.view.document?.page(at: 0),
+            let strikeSelection = strikePage.selection(
+              for: strikePage.bounds(for: .mediaBox))
+          else { throw PDFError(.malformed, "Capability strikeout selection failed") }
+          viewer.view.setCurrentSelection(strikeSelection, animate: false)
+          guard attachmentDocument.addAnnotationFromSelection(.strikeout) else {
+            throw PDFError(.malformed, "Capability strikeout service failed")
+          }
+          checkpoint("capability strikeout passed")
+          guard let notePage = viewer.view.document?.page(at: 0),
+            let noteSelection = notePage.selection(
+              for: notePage.bounds(for: .mediaBox))
+          else { throw PDFError(.malformed, "Capability note selection failed") }
+          viewer.view.setCurrentSelection(noteSelection, animate: false)
+          guard attachmentDocument.addAnnotationFromSelection(.note) else {
+            throw PDFError(.malformed, "Capability note service failed")
+          }
+          checkpoint("capability note passed")
+          guard attachmentDocument.applyFlattenAnnotations(pageIDs: [attachmentPageID])
+          else { throw PDFError(.malformed, "Capability flatten-annotations service failed") }
+          attachmentDocument.showFind()
+          viewer.searchText = "page"
+          viewer.runSearch()
+          attachmentDocument.findNext()
+          attachmentDocument.findPrevious()
+          attachmentDocument.toggleSelectedTextBold()
+          attachmentDocument.toggleSelectedTextItalic()
+        } else {
+          throw PDFError(.malformed, "Capability annotation selection was unavailable")
+        }
+        checkpoint("capability annotation services passed")
+
+        try await third.performOCR(
+          pageIndexes: [0], recognizer: CapabilityOCRStub())
+        try await third.performOCR(
+          pageIndexes: Array(third.editSession.pageIDs.indices),
+          replacing: Set(third.editSession.pageIDs.indices),
+          recognizer: CapabilityOCRStub())
+        checkpoint("capability OCR services passed")
+        guard
+          let createdText = try? appDelegate.createPDFDocument(
+            fromText: "Capability PDF", layout: .letter, fontSize: 12),
+          let createdImage = try? appDelegate.createPDFDocument(
+            fromImages: [
+              ImagePDFCreation.Source(
+                width: 2, height: 2, rgb8: Data(repeating: 128, count: 12))
+            ], layout: .letter)
+        else { throw PDFError(.malformed, "Capability PDF creation service failed") }
+        createdText.close()
+        createdImage.close()
+        checkpoint("capability creation services passed")
+
+        guard first.repairCurrentDocument()?.report != nil,
+          first.docxPreviewText() != nil
+        else { throw PDFError(.malformed, "Capability repair or DOCX preview service failed") }
+        _ = first.tableReviewModelForCurrentDocument()
+        let archivalURL = output.appendingPathComponent("capability-archival.pdf")
+        _ = try third.writeArchivalCopy(to: archivalURL)
+        let colorURL = output.appendingPathComponent("capability-color.pdf")
+        _ = try third.writeColorConvertedCopy(to: colorURL, target: .gray)
+        checkpoint("capability service execution passed")
+
         let report: [String: Any] = [
           "workspaceRepairs": workspaceRepairs,
           "status": "passed", "app": "sPDF Editor", "windows": controller.documents.count,

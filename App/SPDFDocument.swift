@@ -695,10 +695,50 @@ final class SPDFDocument: NSDocument {
     refreshViewer(preservingPage: viewer.pageNumber)
   }
 
+  /// Testable service entry point for Page → Crop Pages. Margins are in the
+  /// chosen unit; the method maps each page's MediaBox and commits one box.
+  @discardableResult
+  func setPageBox(
+    kind: DocumentAssembly.PageBox, pageIndices: [Int], margins: [Double],
+    unitFactor: Double
+  ) -> Bool {
+    guard canEditContent, margins.count == 4,
+      margins.allSatisfy({ $0.isFinite && $0 >= 0 }), unitFactor > 0
+    else { return false }
+    let selected = pageIndices.filter { editSession.pageIDs.indices.contains($0) }
+    guard !selected.isEmpty, let graph = editSession.currentGraph else { return false }
+    let inventory = PrintPreflightInventory.inventory(
+      graph, pageIDs: editSession.pageIDs)
+    var boxes: [PDFObjectID: [Double]] = [:]
+    for index in selected {
+      guard let boxesForPage = inventory.pages.first(where: { $0.pageIndex == index })
+      else { continue }
+      let media = boxesForPage.mediaBox
+      let left = media[0] + margins[0] * unitFactor
+      let bottom = media[1] + margins[1] * unitFactor
+      let right = media[2] - margins[2] * unitFactor
+      let top = media[3] - margins[3] * unitFactor
+      let box = [left, bottom, right, top]
+      guard box[2] > box[0], box[3] > box[1] else { return false }
+      boxes[editSession.pageIDs[index]] = box
+    }
+    guard !boxes.isEmpty else { return false }
+    do {
+      try editSession.apply(
+        PDFTransaction([DocumentAssembly.SetPageBoxCommand(boxes: boxes, kind: kind)]))
+    } catch {
+      presentError(error)
+      return false
+    }
+    noteUserEdit()
+    refreshViewer(preservingPage: viewer?.pageNumber ?? 1)
+    return true
+  }
+
   /// PAG-05: crop pages non-destructively by margins from each page's own
   /// MediaBox. Units are converted to points before the single transaction.
   func presentCropPages() {
-    guard canEditContent, let graph = editSession.currentGraph,
+    guard canEditContent, editSession.currentGraph != nil,
       let viewer, viewer.pageCount > 0
     else { return }
     let unit = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 120, height: 24))
@@ -746,31 +786,8 @@ final class SPDFDocument: NSDocument {
       NSSound.beep()
       return
     }
-    let inventory = PrintPreflightInventory.inventory(graph, pageIDs: editSession.pageIDs)
-    var boxes: [PDFObjectID: [Double]] = [:]
-    for index in indices {
-      guard let boxesForPage = inventory.pages.first(where: { $0.pageIndex == index })
-      else { continue }
-      let media = boxesForPage.mediaBox
-      let box = [
-        media[0] + values[0] * factor, media[1] + values[1] * factor,
-        media[2] - values[2] * factor, media[3] - values[3] * factor,
-      ]
-      guard box[2] > box[0], box[3] > box[1] else {
-        NSSound.beep()
-        return
-      }
-      boxes[editSession.pageIDs[index]] = box
-    }
-    do {
-      try editSession.apply(
-        PDFTransaction([DocumentAssembly.SetPageBoxCommand(boxes: boxes, kind: kind)]))
-    } catch {
-      presentError(error)
-      return
-    }
-    noteUserEdit()
-    refreshViewer(preservingPage: viewer.pageNumber)
+    _ = setPageBox(
+      kind: kind, pageIndices: indices, margins: values, unitFactor: factor)
   }
 
   /// PAG-06: add a watermark, header, footer, page number or Bates mark to
@@ -1090,15 +1107,16 @@ final class SPDFDocument: NSDocument {
     return viewer.view.currentSelection != nil
   }
 
-  func addAnnotationFromSelection(_ kind: AnnotationKind) {
+  @discardableResult
+  func addAnnotationFromSelection(_ kind: AnnotationKind) -> Bool {
     guard canEditContent, let viewer, let document = viewer.view.document,
       let selection = viewer.view.currentSelection,
       let page = selection.pages.first
-    else { return }
+    else { return false }
     let index = document.index(for: page)
-    guard index >= 0, index < editSession.pageIDs.count else { return }
+    guard index >= 0, index < editSession.pageIDs.count else { return false }
     let bounds = selection.bounds(for: page)
-    guard bounds.width > 0.5, bounds.height > 0.5 else { return }
+    guard bounds.width > 0.5, bounds.height > 0.5 else { return false }
     let pageID = editSession.pageIDs[index]
     let quads = AddHighlightCommand.quads(forClusterBounds: [
       [
@@ -1128,10 +1146,11 @@ final class SPDFDocument: NSDocument {
       try editSession.apply(PDFTransaction([command]))
     } catch {
       presentError(error)
-      return
+      return false
     }
     noteUserEdit()
     refreshViewer(preservingPage: viewer.pageNumber)
+    return true
   }
 
   // MARK: - Protected documents (P28-020–P28-024)
@@ -1494,6 +1513,28 @@ final class SPDFDocument: NSDocument {
     guard alert.runModal() == .alertFirstButtonReturn else { return }
     guard applyImageTransaction(commands) else { return }
     viewer.view.setCurrentSelection(nil, animate: false)
+  }
+
+  func showFind() { viewer?.showSearch() }
+  func findNext() { viewer?.searchNext() }
+  func findPrevious() { viewer?.searchPrevious() }
+
+  /// Text Format → Bold/Italic service entry point. The menu handlers call
+  /// these same methods.
+  func toggleSelectedTextBold() {
+    guard let viewer,
+      let face = StandardTextFont(rawValue: viewer.pageTextStyle.fontFamily)
+    else { return }
+    viewer.pageTextFormattingApplier?(
+      .bold(viewer.pageTextMixedFormatting.contains("bold") || !face.isBold))
+  }
+
+  func toggleSelectedTextItalic() {
+    guard let viewer,
+      let face = StandardTextFont(rawValue: viewer.pageTextStyle.fontFamily)
+    else { return }
+    viewer.pageTextFormattingApplier?(
+      .italic(viewer.pageTextMixedFormatting.contains("italic") || !face.isItalic))
   }
 
   /// Applies region redaction to explicit page-space regions. Shared by the
@@ -3077,6 +3118,83 @@ final class SPDFDocument: NSDocument {
         pageID: pageID, rect: rect, name: name, required: required, defaultValue: defaultValue))
   }
 
+  @discardableResult
+  func addAuthoredCheckbox(name: String, checkedByDefault: Bool = false) -> Bool {
+    guard let pageID = editSession.currentGraph.flatMap(currentPageID(in:)),
+      let rect = defaultRect(width: 20, height: 20)
+    else { return false }
+    return applyFormAuthoring(
+      AddCheckboxCommand(
+        pageID: pageID, rect: rect, name: name, checkedByDefault: checkedByDefault))
+  }
+
+  @discardableResult
+  func addAuthoredRadioGroup(name: String, exportValues: [String] = ["Option 1", "Option 2"])
+    -> Bool
+  {
+    guard let pageID = editSession.currentGraph.flatMap(currentPageID(in:)),
+      let rect = defaultRect(width: 20, height: 20)
+    else { return false }
+    let rects = exportValues.indices.map { index in
+      [rect[0] + Double(index) * 28, rect[1], rect[0] + Double(index) * 28 + 20, rect[3]]
+    }
+    return applyFormAuthoring(
+      AddRadioGroupCommand(
+        pageID: pageID, rects: rects, name: name, exportValues: exportValues))
+  }
+
+  @discardableResult
+  func addAuthoredChoiceField(
+    name: String, options: [AuthoredChoiceOption] = [
+      AuthoredChoiceOption(exportValue: "Option 1"),
+      AuthoredChoiceOption(exportValue: "Option 2"),
+    ], combo: Bool = true
+  ) -> Bool {
+    guard let pageID = editSession.currentGraph.flatMap(currentPageID(in:)),
+      let rect = defaultRect()
+    else { return false }
+    return applyFormAuthoring(
+      AddChoiceFieldCommand(
+        pageID: pageID, rect: rect, name: name, options: options, combo: combo))
+  }
+
+  @discardableResult
+  func addAuthoredPushButton(
+    name: String, caption: String = "Button", uri: String? = nil
+  ) -> Bool {
+    guard let pageID = editSession.currentGraph.flatMap(currentPageID(in:)),
+      let rect = defaultRect()
+    else { return false }
+    return applyFormAuthoring(
+      AddPushButtonCommand(
+        pageID: pageID, rect: rect, name: name, caption: caption, uri: uri))
+  }
+
+  @discardableResult
+  func addAuthoredSignatureField(name: String) -> Bool {
+    guard let pageID = editSession.currentGraph.flatMap(currentPageID(in:)),
+      let rect = defaultRect()
+    else { return false }
+    return applyFormAuthoring(
+      AddSignatureFieldCommand(pageID: pageID, rect: rect, name: name))
+  }
+
+  /// Testable metadata service entry point used by File → Document Metadata.
+  @discardableResult
+  func setDocumentMetadata(_ metadata: DocumentMetadata) -> Bool {
+    guard canEditContent else { return false }
+    do {
+      try editSession.apply(
+        PDFTransaction([SetDocumentMetadataCommand(metadata: metadata)]))
+    } catch {
+      presentError(error)
+      return false
+    }
+    noteUserEdit()
+    refreshViewer(preservingPage: viewer?.pageNumber ?? 1)
+    return true
+  }
+
   func formFieldProperties(for name: String) -> FormFieldProperties? {
     guard let graph = editSession.currentGraph else { return nil }
     return FormFieldPropertiesReader.properties(forFieldNamed: name, in: graph)
@@ -3535,24 +3653,29 @@ final class SPDFDocument: NSDocument {
 
   /// P35-022: review the reconstruction before exporting. Ambiguous reading
   /// order (low-confidence blocks) is flagged in the preview.
-  func previewDOCX() {
-    guard let graph = editSession.currentGraph, !editSession.pageIDs.isEmpty else { return }
+  /// Testable service output for Tools → Preview DOCX Reconstruction.
+  func docxPreviewText() -> String? {
+    guard let graph = editSession.currentGraph, !editSession.pageIDs.isEmpty else { return nil }
     guard
       let reconstruction = try? DOCXReconstructionBuilder.reconstruct(
         pageIDs: editSession.pageIDs, in: graph)
-    else { return }
+    else { return nil }
     let preview = DOCXPreview.build(reconstruction: reconstruction)
+    return "\(preview.totalCount) blocks, \(preview.ambiguousCount) ambiguous\n\n" + preview.text()
+  }
+
+  func previewDOCX() {
+    guard let text = docxPreviewText() else { return }
     let alert = NSAlert()
     alert.messageText = "DOCX Reconstruction Preview"
     alert.informativeText =
-      "\(preview.totalCount) block\(preview.totalCount == 1 ? "" : "s"), "
-      + "\(preview.ambiguousCount) ambiguous. Ambiguous blocks are guesses from the visual analysis; export them as appearance images to keep their exact look."
+      "This preview reflects the current reconstruction. Ambiguous blocks are guesses from the visual analysis; export them as appearance images to keep their exact look."
     let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 560, height: 320))
     scroll.hasVerticalScroller = true
     let textView = NSTextView(frame: scroll.bounds)
     textView.isEditable = false
     textView.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
-    textView.string = preview.text()
+    textView.string = text
     scroll.documentView = textView
     alert.accessoryView = scroll
     alert.addButton(withTitle: "Close")
@@ -3636,6 +3759,25 @@ final class SPDFDocument: NSDocument {
     alert.runModal()
   }
 
+  /// Testable service entry point for Tools → Create Archival Copy.
+  @discardableResult
+  func writeArchivalCopy(to url: URL) throws -> String {
+    let graph = try prepareDerivative(to: url)
+    let plan = ArchivalDerivative.plan(graph, pageIDs: editSession.pageIDs)
+    let staged = try ArchivalDerivative.stage(graph, plan: plan, applying: plan.safeKinds)
+    let data = try PDFWriter.write(staged.graph)
+    try VerifiedFileWriter.write(data, to: url) { written in
+      let reparsed = try PDFParser.parse(
+        written, limits: SPDFDocumentResourcePolicy.parsingLimits)
+      guard reparsed.pageCount == self.editSession.pageIDs.count else {
+        throw PDFError(.malformed, "Archival copy failed page verification")
+      }
+    }
+    let validation = ArchivalDerivative.validate(data)
+    return validation?.report()
+      ?? "No independent validator is available on this system; nothing is claimed."
+  }
+
   /// P37-012/P37-013/P37-014: create a staged archival copy (safe
   /// transformations only), then validate it with an independent validator
   /// when one is available. No PDF/A identifier is ever written.
@@ -3659,26 +3801,10 @@ final class SPDFDocument: NSDocument {
     panel.begin { [weak self] response in
       guard response == .OK, let url = panel.url, let self else { return }
       do {
-        let graph = try self.prepareDerivative(to: url)
-        let plan = ArchivalDerivative.plan(graph, pageIDs: self.editSession.pageIDs)
-        let staged = try ArchivalDerivative.stage(
-          graph, plan: plan, applying: plan.safeKinds)
-        let data = try PDFWriter.write(staged.graph)
-        try VerifiedFileWriter.write(data, to: url) { written in
-          let reparsed = try PDFParser.parse(
-            written, limits: SPDFDocumentResourcePolicy.parsingLimits)
-          guard reparsed.pageCount == self.editSession.pageIDs.count else {
-            throw PDFError(.malformed, "Archival copy failed page verification")
-          }
-        }
-        let validation = ArchivalDerivative.validate(data)
-        let validationText =
-          validation?.report()
-          ?? "No independent validator is available on this system; nothing is claimed."
+        let validationText = try self.writeArchivalCopy(to: url)
         let result = NSAlert()
         result.messageText = "Archival Copy Written"
-        result.informativeText =
-          "Applied: \(staged.applied.map(\.rawValue).joined(separator: ", ")).\n\n\(validationText)"
+        result.informativeText = validationText
         let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 560, height: 240))
         scroll.hasVerticalScroller = true
         let textView = NSTextView(frame: scroll.bounds)
@@ -3693,6 +3819,28 @@ final class SPDFDocument: NSDocument {
         self.presentError(error)
       }
     }
+  }
+
+  /// Testable service entry point for Tools → Convert Colors.
+  @discardableResult
+  func writeColorConvertedCopy(to url: URL, target: ColorConversion.Target) throws
+    -> ColorConversionReport
+  {
+    let graph = try prepareDerivative(to: url)
+    let fresh = try ColorConversion.convert(
+      graph, pageIDs: editSession.pageIDs, to: target)
+    guard fresh.report.convertedImages > 0 else {
+      throw PDFError(.unsupported, "Nothing remained to convert")
+    }
+    let data = try PDFWriter.write(fresh.graph)
+    try VerifiedFileWriter.write(data, to: url) { written in
+      let reparsed = try PDFParser.parse(
+        written, limits: SPDFDocumentResourcePolicy.parsingLimits)
+      guard reparsed.pageCount == self.editSession.pageIDs.count else {
+        throw PDFError(.malformed, "Converted copy failed page verification")
+      }
+    }
+    return fresh.report
   }
 
   /// P37-024: explicit color conversion with before/after previews. Only
@@ -3770,20 +3918,7 @@ final class SPDFDocument: NSDocument {
     panel.begin { [weak self] response in
       guard response == .OK, let url = panel.url, let self else { return }
       do {
-        let graph = try self.prepareDerivative(to: url)
-        let fresh = try ColorConversion.convert(
-          graph, pageIDs: self.editSession.pageIDs, to: target)
-        guard fresh.report.convertedImages > 0 else {
-          throw PDFError(.unsupported, "Nothing remained to convert")
-        }
-        let data = try PDFWriter.write(fresh.graph)
-        try VerifiedFileWriter.write(data, to: url) { written in
-          let reparsed = try PDFParser.parse(
-            written, limits: SPDFDocumentResourcePolicy.parsingLimits)
-          guard reparsed.pageCount == self.editSession.pageIDs.count else {
-            throw PDFError(.malformed, "Converted copy failed page verification")
-          }
-        }
+        _ = try self.writeColorConvertedCopy(to: url, target: target)
       } catch {
         self.presentError(error)
       }
@@ -3808,18 +3943,24 @@ final class SPDFDocument: NSDocument {
     return [0, 0, 612, 792]
   }
 
-  /// P38-019/P38-021: repair a damaged document into a separate copy. The
-  /// source file is never overwritten; the repaired copy opens with its edit
-  /// gate set from the repair report.
-  func repairDocument() {
+  /// Testable service entry point for Tools → Repair Document.
+  func repairCurrentDocument() -> (data: Data?, report: PDFRepairReport)? {
     let sourceData: Data?
     if let fileURL, let data = try? Data(contentsOf: fileURL) {
       sourceData = data
     } else {
       sourceData = try? data(ofType: "com.adobe.pdf")
     }
-    guard let sourceData else { return }
+    guard let sourceData else { return nil }
     let repaired = PDFRepair.repair(sourceData)
+    return (repaired.data, repaired.report)
+  }
+
+  /// P38-019/P38-021: repair a damaged document into a separate copy. The
+  /// source file is never overwritten; the repaired copy opens with its edit
+  /// gate set from the repair report.
+  func repairDocument() {
+    guard let repaired = repairCurrentDocument() else { return }
     guard let repairedData = repaired.data else {
       let alert = NSAlert()
       alert.messageText = "Repair Refused"
@@ -4574,15 +4715,25 @@ final class SPDFDocument: NSDocument {
     let metadata = DocumentMetadata(
       title: value(0), author: value(1), subject: value(2), keywords: value(3),
       creator: value(4), producer: value(5))
+    _ = setDocumentMetadata(metadata)
+  }
+
+  /// Testable service entry point for Page → Remove Page Mark.
+  @discardableResult
+  func removePageMark(groupID: String, pageIDs: [PDFObjectID]) -> Bool {
+    guard canEditContent, !pageIDs.isEmpty else { return false }
     do {
       try editSession.apply(
-        PDFTransaction([SetDocumentMetadataCommand(metadata: metadata)]))
+        PDFTransaction([
+          RemoveRepeatedMarkCommand(groupID: groupID, pageIDs: pageIDs)
+        ]))
     } catch {
       presentError(error)
-      return
+      return false
     }
     noteUserEdit()
     refreshViewer(preservingPage: viewer?.pageNumber ?? 1)
+    return true
   }
 
   /// PAG-06: remove one applied sPDF mark set without touching other content.
@@ -4613,17 +4764,7 @@ final class SPDFDocument: NSDocument {
     alert.addButton(withTitle: "Cancel")
     guard alert.runModal() == .alertFirstButtonReturn else { return }
     let group = groups[max(0, popup.indexOfSelectedItem)]
-    do {
-      try editSession.apply(
-        PDFTransaction([
-          RemoveRepeatedMarkCommand(groupID: group.groupID, pageIDs: group.pageIDs)
-        ]))
-    } catch {
-      presentError(error)
-      return
-    }
-    noteUserEdit()
-    refreshViewer(preservingPage: viewer?.pageNumber ?? 1)
+    _ = removePageMark(groupID: group.groupID, pageIDs: group.pageIDs)
   }
 
   func organizePages() {
@@ -4738,10 +4879,16 @@ final class SPDFDocument: NSDocument {
   }
 
   /// P36-009: review detected tables in a native grid before exporting.
-  func reviewTables() {
-    guard let graph = editSession.currentGraph, !editSession.pageIDs.isEmpty else { return }
+  /// Testable service output for Tools → Review Tables.
+  func tableReviewModelForCurrentDocument() -> TableReviewModel? {
+    guard let graph = editSession.currentGraph, !editSession.pageIDs.isEmpty else { return nil }
     let tables = (try? TableExtraction.tables(pageIDs: editSession.pageIDs, in: graph)) ?? []
-    guard !tables.isEmpty else {
+    guard !tables.isEmpty else { return nil }
+    return TableReviewModel(reviews: tables.map { TableReview(table: $0) })
+  }
+
+  func reviewTables() {
+    guard let model = tableReviewModelForCurrentDocument() else {
       let alert = NSAlert()
       alert.messageText = "No Tables Detected"
       alert.informativeText =
@@ -4750,7 +4897,6 @@ final class SPDFDocument: NSDocument {
       alert.runModal()
       return
     }
-    let model = TableReviewModel(reviews: tables.map { TableReview(table: $0) })
     tableReviewModel = model
     let window = NSWindow(
       contentRect: NSRect(x: 0, y: 0, width: 680, height: 480),
@@ -5360,28 +5506,31 @@ final class SPDFDocument: NSDocument {
     switch alert.runModal() {
     case .alertFirstButtonReturn:
       guard currentIndex < editSession.pageIDs.count else { return }
-      applyFlatten(pageIDs: [editSession.pageIDs[currentIndex]])
+      applyFlattenAnnotations(pageIDs: [editSession.pageIDs[currentIndex]])
     case .alertSecondButtonReturn:
-      applyFlatten(pageIDs: flattenable)
+      applyFlattenAnnotations(pageIDs: flattenable)
     default:
       return
     }
   }
 
-  private func applyFlatten(pageIDs: [PDFObjectID]) {
-    guard canEditContent else { return }
+  /// Testable service entry point for Annotate → Flatten Annotations.
+  @discardableResult
+  func applyFlattenAnnotations(pageIDs: [PDFObjectID]) -> Bool {
+    guard canEditContent else { return false }
     let flattenable = Set(editSession.flattenablePageIDs())
     let targets = pageIDs.filter { flattenable.contains($0) }
-    guard !targets.isEmpty else { return }
+    guard !targets.isEmpty else { return false }
     do {
       try editSession.apply(
         PDFTransaction(targets.map { FlattenAnnotationsCommand(pageID: $0) }))
     } catch {
       presentError(error)
-      return
+      return false
     }
     noteUserEdit()
     refreshViewer(preservingPage: viewer?.pageNumber ?? 0)
+    return true
   }
 
   // MARK: - Image edits (P12-015, P20-008–P20-012)
@@ -6199,12 +6348,37 @@ final class SPDFDocument: NSDocument {
   var canExportComments: Bool { !editSession.comments().isEmpty }
   var canImportComments: Bool { canEditContent }
 
-  func exportComments() {
+  /// Testable service entry point for Annotate → Export Comments.
+  func commentExchangeData() throws -> CommentExportResult {
     let comments = editSession.comments()
-    guard !comments.isEmpty else { return }
+    guard !comments.isEmpty else {
+      throw PDFError(.malformed, "This document has no comments to export")
+    }
+    return try CommentExchange.export(comments: comments)
+  }
+
+  /// Testable service entry point for Annotate → Import Comments.
+  @discardableResult
+  func mergeComments(data: Data) throws -> CommentMergePlan {
+    guard canEditContent, let graph = editSession.currentGraph else {
+      throw PDFError(.unsupported, "This document cannot accept imported comments")
+    }
+    let parsed = try CommentExchange.parse(data)
+    let plan = try CommentExchange.plan(
+      entries: parsed.entries, issues: parsed.issues, into: graph,
+      pageIDs: editSession.pageIDs)
+    if !plan.commands.isEmpty {
+      try editSession.apply(PDFTransaction(plan.commands))
+      noteUserEdit()
+      refreshViewer(preservingPage: viewer?.pageNumber ?? 1)
+    }
+    return plan
+  }
+
+  func exportComments() {
     let result: CommentExportResult
     do {
-      result = try CommentExchange.export(comments: comments)
+      result = try commentExchangeData()
     } catch {
       presentError(error)
       return
@@ -6238,20 +6412,11 @@ final class SPDFDocument: NSDocument {
     panel.allowsMultipleSelection = false
     panel.message = "Choose an XFDF comment file to merge into this document."
     panel.begin { [weak self] response in
-      guard response == .OK, let url = panel.url, let self, self.canEditContent,
-        let graph = self.editSession.currentGraph
+      guard response == .OK, let url = panel.url, let self, self.canEditContent
       else { return }
       do {
         let data = try Data(contentsOf: url)
-        let parsed = try CommentExchange.parse(data)
-        let plan = try CommentExchange.plan(
-          entries: parsed.entries, issues: parsed.issues, into: graph,
-          pageIDs: self.editSession.pageIDs)
-        if !plan.commands.isEmpty {
-          try self.editSession.apply(PDFTransaction(plan.commands))
-          self.noteUserEdit()
-          self.refreshViewer(preservingPage: self.viewer?.pageNumber ?? 1)
-        }
+        let plan = try self.mergeComments(data: data)
         var lines = [
           "Imported \(plan.added) new comment\(plan.added == 1 ? "" : "s"), updated \(plan.updated), moved \(plan.moved), unchanged \(plan.unchanged)."
         ]

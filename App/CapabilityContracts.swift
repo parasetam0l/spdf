@@ -287,21 +287,18 @@ enum CapabilityContractAudit {
     "selectPreviousPageObject:", "highlightSelection:", "exportReviewSummary:",
     "showCompatibilityReport:", "exportFormValues:", "importFormValues:",
     "addBookmark:", "editBookmark:", "removeBookmark:", "exportOutline:",
-  ]
-
-  /// Selectors whose operation is covered by an owned-core suite, while the
-  /// document dialog itself is not driven end-to-end by a native test.
-  private static let coreSelectors: Set<String> = [
     "noteSelection:", "underlineSelection:", "strikeoutSelection:", "flattenAnnotations:",
     "runOCR:", "runOCRAllPages:", "findNext:", "findPrevious:", "togglePageTextBold:",
     "togglePageTextItalic:", "createPDFFromImages:", "createPDFFromText:",
-    "documentMetadata:",
-    "addTextField:", "addCheckbox:", "addRadioGroup:", "addChoiceField:", "addPushButton:",
-    "addSignatureField:", "editFormFieldProperties:", "recalculateForm:",
-    "distributeFormFields:", "cropPages:", "removePageMark:", "repairDocument:", "reviewTables:",
-    "previewDOCX:", "convertColors:", "createArchivalCopy:",
-    "exportComments:", "importComments:",
+    "documentMetadata:", "addTextField:", "addCheckbox:", "addRadioGroup:",
+    "addChoiceField:", "addPushButton:", "addSignatureField:", "editFormFieldProperties:",
+    "recalculateForm:", "distributeFormFields:", "cropPages:", "removePageMark:",
+    "repairDocument:", "reviewTables:", "previewDOCX:", "convertColors:",
+    "createArchivalCopy:", "exportComments:", "importComments:",
   ]
+
+  /// Selectors whose operation is covered only by an owned-core suite.
+  private static let coreSelectors: Set<String> = []
 
   private static let menuSelectors: Set<String> = [
     "printDocument:",

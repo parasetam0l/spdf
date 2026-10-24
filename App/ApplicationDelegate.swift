@@ -322,12 +322,7 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
       max(0, layoutPopup.indexOfSelectedItem)]
     let fontSize = Double(sizeField.stringValue) ?? 12
     do {
-      let data = try TextPDFCreation.make(
-        text: textView.string, layout: layout, fontSize: fontSize)
-      guard let controller = documents as? DocumentController else {
-        throw PDFError(.malformed, "The document controller is unavailable")
-      }
-      try controller.newDocument(fromPDFData: data)
+      _ = try createPDFDocument(fromText: textView.string, layout: layout, fontSize: fontSize)
     } catch {
       documents.presentError(error)
     }
@@ -374,11 +369,7 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
         return
       }
       do {
-        let pdf = try ImagePDFCreation.make(sources: sources, layout: layout)
-        guard let controller = self.documents as? DocumentController else {
-          throw PDFError(.malformed, "The document controller is unavailable")
-        }
-        try controller.newDocument(fromPDFData: pdf)
+        _ = try self.createPDFDocument(fromImages: sources, layout: layout)
         if !skipped.isEmpty {
           let notice = NSAlert()
           notice.messageText = "Some images were skipped"
@@ -390,6 +381,28 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
         self.documents.presentError(error)
       }
     }
+  }
+
+  @discardableResult
+  func createPDFDocument(
+    fromText text: String, layout: TextPDFCreation.PageLayout, fontSize: Double
+  ) throws -> SPDFDocument {
+    let data = try TextPDFCreation.make(text: text, layout: layout, fontSize: fontSize)
+    guard let controller = documents as? DocumentController else {
+      throw PDFError(.malformed, "The document controller is unavailable")
+    }
+    return try controller.newDocument(fromPDFData: data)
+  }
+
+  @discardableResult
+  func createPDFDocument(
+    fromImages sources: [ImagePDFCreation.Source], layout: ImagePDFCreation.PageLayout
+  ) throws -> SPDFDocument {
+    let pdf = try ImagePDFCreation.make(sources: sources, layout: layout)
+    guard let controller = documents as? DocumentController else {
+      throw PDFError(.malformed, "The document controller is unavailable")
+    }
+    return try controller.newDocument(fromPDFData: pdf)
   }
   @objc private func cropPages(_ sender: Any?) {
     currentDocument?.presentCropPages()
@@ -442,9 +455,9 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
       currentDocument?.redoEdit()
     }
   }
-  @objc private func showFind(_ sender: Any?) { currentDocument?.viewer?.showSearch() }
-  @objc private func findNext(_ sender: Any?) { currentDocument?.viewer?.searchNext() }
-  @objc private func findPrevious(_ sender: Any?) { currentDocument?.viewer?.searchPrevious() }
+  @objc private func showFind(_ sender: Any?) { currentDocument?.showFind() }
+  @objc private func findNext(_ sender: Any?) { currentDocument?.findNext() }
+  @objc private func findPrevious(_ sender: Any?) { currentDocument?.findPrevious() }
   @objc private func showPagesSidebar(_ sender: Any?) { currentDocument?.viewer?.showPages() }
   @objc private func showCommentsSidebar(_ sender: Any?) { currentDocument?.viewer?.showComments() }
   @objc private func showFormsSidebar(_ sender: Any?) { currentDocument?.viewer?.showForms() }
@@ -725,15 +738,11 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
   }
 
   @objc private func togglePageTextBold(_ sender: Any?) {
-    guard let viewer = currentDocument?.viewer,
-      let face = StandardTextFont(rawValue: viewer.pageTextStyle.fontFamily) else { return }
-    viewer.pageTextFormattingApplier?(.bold(viewer.pageTextMixedFormatting.contains("bold") || !face.isBold))
+    currentDocument?.toggleSelectedTextBold()
   }
 
   @objc private func togglePageTextItalic(_ sender: Any?) {
-    guard let viewer = currentDocument?.viewer,
-      let face = StandardTextFont(rawValue: viewer.pageTextStyle.fontFamily) else { return }
-    viewer.pageTextFormattingApplier?(.italic(viewer.pageTextMixedFormatting.contains("italic") || !face.isItalic))
+    currentDocument?.toggleSelectedTextItalic()
   }
 
   func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
