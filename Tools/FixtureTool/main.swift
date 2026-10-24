@@ -24,6 +24,7 @@ do {
     ("tagged-pages.pdf", try PDFFixtures.taggedPages()),
     ("attachment-pages.pdf", try PDFFixtures.attachmentPages()),
     ("font-embedded.pdf", try PDFFixtures.fontEmbeddedPages()),
+    ("multilingual-pages.pdf", try PDFFixtures.multilingualPages()),
     ("imported-paragraph.pdf", try PDFFixtures.importedParagraphPages()),
     ("font-subset.pdf", try PDFFixtures.fontSubsetPages()),
     ("redaction-pages.pdf", try PDFFixtures.redactionPages()),

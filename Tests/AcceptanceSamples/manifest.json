@@ -1,0 +1,102 @@
+{
+  "version": 1,
+  "privateCorpus": {
+    "manifest": "Work/Corpus/manifest.json",
+    "files": 17,
+    "distinctContents": 16,
+    "changed": false,
+    "note": "The owner-supplied corpus and its recorded parser refusals are unchanged. These licensed samples add no private-corpus credit and do not reopen owner acceptance."
+  },
+  "samples": [
+    {
+      "id": "forms-value-appearance",
+      "workflow": "forms",
+      "path": "../Fixtures/form-pages.pdf",
+      "sha256": "e4e19f1c18bf18c30e38acbe714343bb48dc68221fe1f34b859637a61147f60a",
+      "license": "MIT (sPDF-generated synthetic fixture; Tests/Fixtures/Manifest.md)",
+      "task": "Fill a text field, select a choice option, check a checkbox, save, and reopen.",
+      "expected": "The text value, choice value and checked state persist; generated widget appearances contain the new values; the page count is unchanged.",
+      "evidence": [
+        "AcceptanceSampleTests.formsValueAppearanceRoundTrip",
+        "Work/PrivateDocs/Docs/Acceptance-Samples-2026-10-24.md"
+      ],
+      "unsupportedBoundary": "XFA is never authored, unsupported field kinds are refused, and orphaned widgets are reported rather than repurposed.",
+      "test": "formsValueAppearanceRoundTrip"
+    },
+    {
+      "id": "encrypted-session-save",
+      "workflow": "encryption",
+      "path": "../Fixtures/Encrypted/aes-256-r6.pdf",
+      "sha256": "d7fd95e016b7d43bc9eed1041b0cdd6ee00e3dd902e50d0307b0a428782c543c",
+      "license": "Apache-2.0 (mozilla/pdf.js test corpus; Tests/Fixtures/Manifest.md)",
+      "task": "Authenticate with the published password, rotate the page, save, and reopen with the same password.",
+      "expected": "The session is protected and editable, the saved file still requires its password, the AES-256 profile is retained, and the page rotation is 90 degrees.",
+      "evidence": [
+        "AcceptanceSampleTests.encryptedSessionSaveRoundTrip",
+        "Work/PrivateDocs/Docs/Acceptance-Samples-2026-10-24.md"
+      ],
+      "unsupportedBoundary": "Only the supported AES profiles are covered; there is no password recovery, permission bypass, or owner-password substitution.",
+      "test": "encryptedSessionSaveRoundTrip"
+    },
+    {
+      "id": "signed-validation-refusal",
+      "workflow": "signatures",
+      "path": "../Fixtures/Signed/signed-one-page.pdf",
+      "sha256": "aa3b3f4e291c6c246d8dc61846d4cc48d999fafa3b3b4118f28b7ccf906ddbd7",
+      "license": "MIT (project-generated test signature; independent CMS from openssl; Tests/Fixtures/Manifest.md)",
+      "task": "Validate the detached signature and attempt a normal content rewrite.",
+      "expected": "The signature is cryptographically valid with unsigned changes absent, and the writer refuses the rewrite instead of invalidating the signed document.",
+      "evidence": [
+        "AcceptanceSampleTests.signedValidationAndRewriteRefusal",
+        "Work/PrivateDocs/Docs/Acceptance-Samples-2026-10-24.md"
+      ],
+      "unsupportedBoundary": "Trust is unknown without an explicit owner anchor, revocation is not checked, and signed documents are not re-signed after content edits.",
+      "test": "signedValidationAndRewriteRefusal"
+    },
+    {
+      "id": "ocr-layer-search",
+      "workflow": "ocr",
+      "path": "../Fixtures/scanned-page.pdf",
+      "sha256": "3e7b4529b9cc4f1ca76f03d394a218ff52dece916b575ff73318e14c5956021f",
+      "license": "MIT (sPDF-generated synthetic fixture; Tests/Fixtures/Manifest.md)",
+      "task": "Apply the documented transcription as a searchable layer, save, reopen, and search it.",
+      "expected": "The reopened page has a generated layer, the documented text is searchable with recognized-text provenance, and the original image bytes are unchanged.",
+      "evidence": [
+        "AcceptanceSampleTests.ocrLayerSearchRoundTrip",
+        "Work/PrivateDocs/Docs/Acceptance-Samples-2026-10-24.md"
+      ],
+      "unsupportedBoundary": "Recognition is supplied, not executed; Vision quality remains environment-dependent and this sample does not qualify OCR accuracy.",
+      "test": "ocrLayerSearchRoundTrip"
+    },
+    {
+      "id": "multilingual-extraction",
+      "workflow": "complex-scripts",
+      "path": "../Fixtures/multilingual-pages.pdf",
+      "sha256": "97bff5de7509d63107e026c49acd3f0ab61b0b70bd4e9cd510fcf889162d01ee",
+      "license": "Bitstream Vera/DejaVu (licensed font subset; Tests/Fixtures/DejaVu-LICENSE.txt)",
+      "task": "Extract Greek, Cyrillic and Hebrew lines, save, reopen, and extract them again.",
+      "expected": "The same three lines and character order survive the write/reopen cycle, including the visual-order Hebrew line.",
+      "evidence": [
+        "AcceptanceSampleTests.multilingualExtractionRoundTrip",
+        "Work/PrivateDocs/Docs/Acceptance-Samples-2026-10-24.md"
+      ],
+      "unsupportedBoundary": "The owned layout does not apply bidirectional reordering or claim full complex-script editing; this sample qualifies extraction and preservation only.",
+      "test": "multilingualExtractionRoundTrip"
+    },
+    {
+      "id": "tagged-accessibility-audit",
+      "workflow": "accessibility",
+      "path": "../Fixtures/tagged-pages.pdf",
+      "sha256": "69283daa4f97bd701ebf986252675c52feac20a7d4937f75b7377c598fbb7aa8",
+      "license": "MIT (sPDF-generated synthetic fixture; Tests/Fixtures/Manifest.md)",
+      "task": "Run the PDF/UA-oriented machine audit, save, reopen, and audit again.",
+      "expected": "No machine-checkable errors remain, the figure carries alternate text, the seven human-review requirements remain explicit, and the audit is unchanged after reopening.",
+      "evidence": [
+        "AcceptanceSampleTests.taggedAccessibilityAuditRoundTrip",
+        "Work/PrivateDocs/Docs/Acceptance-Samples-2026-10-24.md"
+      ],
+      "unsupportedBoundary": "This is not a PDF/UA conformance claim; all seven human-review requirements, rendering and assistive-technology use remain outside the machine audit.",
+      "test": "taggedAccessibilityAuditRoundTrip"
+    }
+  ]
+}
