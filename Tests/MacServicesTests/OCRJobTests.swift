@@ -1,7 +1,9 @@
+import AppKit
 import CoreGraphics
 import Foundation
 import MacServices
 import PDFCore
+import PDFEditing
 import PDFFixtures
 import PDFKit
 import Testing
@@ -266,6 +268,81 @@ struct OCRJobTests {
       // must be the explicit unsupported error, never silent success.
       #expect(error.kind == .unsupported)
     }
+  }
+
+  private func rasterTextImage() throws -> (width: Int, height: Int, rgb8: Data) {
+    let width = 900
+    let height = 240
+    let bytesPerRow = width * 4
+    let context = try #require(
+      CGContext(
+        data: nil, width: width, height: height, bitsPerComponent: 8,
+        bytesPerRow: bytesPerRow, space: CGColorSpaceCreateDeviceRGB(),
+        bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+    context.setFillColor(CGColor(red: 1, green: 1, blue: 1, alpha: 1))
+    context.fill(CGRect(x: 0, y: 0, width: width, height: height))
+    let graphics = NSGraphicsContext(cgContext: context, flipped: false)
+    NSGraphicsContext.saveGraphicsState()
+    NSGraphicsContext.current = graphics
+    ("Hello OCR 12345" as NSString).draw(
+      at: NSPoint(x: 30, y: 80),
+      withAttributes: [
+        .font: NSFont.systemFont(ofSize: 80),
+        .foregroundColor: NSColor.black,
+      ])
+    NSGraphicsContext.restoreGraphicsState()
+    let raw = try #require(context.data)
+    let rgba = Data(bytes: raw, count: width * height * 4)
+    var rgb = Data(capacity: width * height * 3)
+    for index in stride(from: 0, to: rgba.count, by: 4) {
+      rgb.append(rgba[index])
+      rgb.append(rgba[index + 1])
+      rgb.append(rgba[index + 2])
+    }
+    return (width, height, rgb)
+  }
+
+  @Test func realVisionRecognitionSavesSearchablePDF() throws {
+    let raster = try rasterTextImage()
+    var graph = try PDFParser.parse(BlankPDF.data(format: .letter)).graph
+    let pageID = try PDFPageTree.pageIDs(in: graph)[0]
+    graph = try PDFEditingEngine.commit(
+      PDFTransaction([
+        PlaceImageCommand(
+          pageID: pageID, rect: [42, 500, 570, 641],
+          width: raster.width, height: raster.height, rgb8: raster.rgb8)
+      ]), to: graph)
+    let data = try PDFWriter.write(graph)
+    let document = try #require(PDFDocument(data: data))
+    let results: [OCRPageResult]
+    do {
+      results = try OCRJob.run(
+        document: document, pageIndexes: [0], languages: ["en-US"], level: .accurate)
+    } catch let error as PDFError {
+      #expect(error.kind == .unsupported)
+      return
+    }
+    let recognized = results.flatMap(\.lines).map(\.text).joined(separator: " ")
+    #expect(recognized.uppercased().contains("HELLO"))
+
+    let parsed = try PDFParser.parse(data)
+    var commands: [any PDFEditCommand] = []
+    for result in results where result.pageIndex < parsed.pageIDs.count {
+      commands.append(
+        AddSearchableTextLayerCommand(
+          pageID: parsed.pageIDs[result.pageIndex],
+          lines: result.lines.map {
+            SearchableTextLine(text: $0.text, rect: $0.rect, confidence: $0.confidence)
+          }))
+    }
+    let withLayer = try PDFEditingEngine.commit(
+      PDFTransaction(commands), to: parsed.graph)
+    let reopened = try PDFParser.parse(try PDFWriter.write(withLayer))
+    #expect(OCRLayer.hasGeneratedLayer(in: reopened.graph, pageID: reopened.pageIDs[0]))
+    let layout = try PageTextLayout.build(
+      pageID: reopened.pageIDs[0], in: reopened.graph)
+    let savedText = layout.lines.map { layout.text(in: $0) }.joined(separator: " ")
+    #expect(savedText.uppercased().contains("HELLO"))
   }
 
   @Test func visionLanguagesAndTolerantRecognition() throws {
