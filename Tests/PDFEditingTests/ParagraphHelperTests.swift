@@ -158,6 +158,11 @@ struct ParagraphHelperTests {
         pageID: pageID, list: ordered, itemIndex: 2,
         operation: .continueNumbering, in: graph)), to: graph)
     #expect(try pageText(continued, pageID).contains("3. Gamma"))
+    let bulleted = try PDFEditingEngine.commit(
+      PDFTransaction(try ParagraphListEditing.commands(
+        pageID: pageID, list: ordered, itemIndex: 0,
+        operation: .switchToBullet, in: graph)), to: graph)
+    #expect(try pageText(bulleted, pageID).contains("- Alpha"))
 
     // Indent one item; its marker and body move together.
     let indented = try PDFEditingEngine.commit(
@@ -167,6 +172,15 @@ struct ParagraphHelperTests {
     let layout = try PageTextLayout.build(pageID: pageID, in: indented)
     let second = layout.clusters.first { $0.text == "S" && abs($0.origin[1] - 640) < 1 }
     #expect(second.map { abs($0.origin[0] - 90) < 0.2 } == true)
+    let outdented = try PDFEditingEngine.commit(
+      PDFTransaction(try ParagraphListEditing.commands(
+        pageID: pageID, list: bullets, itemIndex: 1,
+        operation: .outdent, in: graph)), to: graph)
+    let outdentedLayout = try PageTextLayout.build(pageID: pageID, in: outdented)
+    let outdentedSecond = outdentedLayout.clusters.first {
+      $0.text == "S" && abs($0.origin[1] - 640) < 1
+    }
+    #expect(outdentedSecond.map { abs($0.origin[0] - 54) < 0.2 } == true)
 
     // Add and remove items as single transactions.
     let added = try PDFEditingEngine.commit(
