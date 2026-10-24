@@ -141,6 +141,31 @@ public enum RepeatedMark: Sendable, Equatable {
       return prefix + String(format: "%0\(max(1, digits))d", number)
     }
   }
+
+  /// Human-readable label stored with an applied mark for later removal.
+  public var label: String {
+    let name: String
+    let sample: String
+    switch self {
+    case .watermark(let text, _, _):
+      name = "Watermark"
+      sample = text
+    case .header(let text, _):
+      name = "Header"
+      sample = text
+    case .footer(let text, _):
+      name = "Footer"
+      sample = text
+    case .pageNumber(let text, _, _):
+      name = "Page number"
+      sample = text
+    case .bates(let prefix, _, _, _):
+      name = "Bates numbering"
+      sample = prefix
+    }
+    let trimmed = sample.trimmingCharacters(in: .whitespacesAndNewlines)
+    return trimmed.isEmpty ? name : "\(name): \(trimmed.prefix(48))"
+  }
 }
 
 /// P21-020: a preview of a repeated-mark operation before it is committed.
@@ -520,7 +545,8 @@ public enum AddedContent {
 
   /// Appends a content block (or inserts it at the back).
   static func append(
-    _ content: String, pageID: PDFObjectID, toFront: Bool, in graph: inout PDFGraph
+    _ content: String, pageID: PDFObjectID, toFront: Bool, in graph: inout PDFGraph,
+    markGroup: String? = nil, markLabel: String? = nil
   ) throws {
     let bytes = Data(content.utf8)
     let streamID = nextObjectID(in: graph)
@@ -528,12 +554,18 @@ public enum AddedContent {
     // graphics. Native document streams can share the same operators, so
     // the marker — not operator shape — decides selectability and mutation.
     // Readers ignore the unknown key; the writer round-trips it.
+    var dictionary: [PDFName: PDFValue] = [
+      PDFName("Length"): .integer(Int64(bytes.count)),
+      PDFName("SPDFAdded"): .boolean(true),
+    ]
+    if let markGroup {
+      dictionary[PDFName("SPDFMark")] = .string(Data(markGroup.utf8))
+    }
+    if let markLabel {
+      dictionary[PDFName("SPDFMarkLabel")] = .string(Data(markLabel.utf8))
+    }
     graph.objects[streamID] = .stream(
-      PDFStream(
-        dictionary: [
-          PDFName("Length"): .integer(Int64(bytes.count)),
-          PDFName("SPDFAdded"): .boolean(true),
-        ], bytes: bytes))
+      PDFStream(dictionary: dictionary, bytes: bytes))
     guard case .dictionary(var page)? = graph.objects[pageID] else {
       throw PDFError(.malformed, "Page is missing")
     }
@@ -922,15 +954,18 @@ public struct AddRepeatedMarkCommand: PDFEditCommand, Equatable, Sendable {
   /// P15-007: an optional caller-supplied font program, embedded as a
   /// tagged subset (nil keeps the standard-14 profile).
   public let customFont: CustomTextFont?
+  /// Identifies all streams written by this application for later removal.
+  public let groupID: String
 
   public init(
     pageIDs: [PDFObjectID], mark: RepeatedMark, margin: Double = 36,
-    customFont: CustomTextFont? = nil
+    customFont: CustomTextFont? = nil, groupID: String = UUID().uuidString
   ) {
     self.pageIDs = pageIDs
     self.mark = mark
     self.margin = margin
     self.customFont = customFont
+    self.groupID = groupID
   }
 
   /// P17-012: the pages this command changes.
@@ -1015,7 +1050,9 @@ public struct AddRepeatedMarkCommand: PDFEditCommand, Equatable, Sendable {
         lines: lines, origin: [rect[0], rect[3] - mark.style.size * 0.8], width: rect[2] - rect[0],
         fontName: fontName, font: font, style: mark.style, opacityName: opacityName)
       content += "Q\n"
-      try AddedContent.append(content, pageID: pageID, toFront: true, in: &graph)
+      try AddedContent.append(
+        content, pageID: pageID, toFront: true, in: &graph,
+        markGroup: groupID, markLabel: mark.label)
       _ = plan
     }
     return graph

@@ -3902,6 +3902,47 @@ final class SPDFDocument: NSDocument {
     }
   }
 
+  /// PAG-06: remove one applied sPDF mark set without touching other content.
+  func presentRemovePageMark() {
+    guard canEditContent, let graph = editSession.currentGraph else { return }
+    let groups = RepeatedMarkInventory.groups(
+      in: graph, pageIDs: editSession.pageIDs)
+    guard !groups.isEmpty else {
+      let alert = NSAlert()
+      alert.messageText = "No Page Marks"
+      alert.informativeText = "This document has no removable sPDF-authored page marks."
+      alert.addButton(withTitle: "OK")
+      alert.runModal()
+      return
+    }
+    let popup = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 360, height: 24))
+    popup.addItems(withTitles: groups.map {
+      "\($0.label) — \($0.pageIDs.count) page"
+        + ($0.pageIDs.count == 1 ? "" : "s")
+    })
+    let alert = NSAlert()
+    alert.messageText = "Remove Page Mark"
+    alert.informativeText =
+      "The selected mark set is removed from its pages as one undo step. "
+      + "Other content and other mark sets are left intact."
+    alert.accessoryView = popup
+    alert.addButton(withTitle: "Remove")
+    alert.addButton(withTitle: "Cancel")
+    guard alert.runModal() == .alertFirstButtonReturn else { return }
+    let group = groups[max(0, popup.indexOfSelectedItem)]
+    do {
+      try editSession.apply(
+        PDFTransaction([
+          RemoveRepeatedMarkCommand(groupID: group.groupID, pageIDs: group.pageIDs)
+        ]))
+    } catch {
+      presentError(error)
+      return
+    }
+    noteUserEdit()
+    refreshViewer(preservingPage: viewer?.pageNumber ?? 1)
+  }
+
   func organizePages() {
     guard canEditContent, editSession.currentGraph != nil else { return }
     let model = PageOrganizerModel()

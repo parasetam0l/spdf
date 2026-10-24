@@ -1177,6 +1177,25 @@
           }), !thirdLayout.lines.contains(where: {
             thirdLayout.text(in: $0).contains("Smoke Header")
           }) else { throw PDFError(.malformed, "Page mark landed on the wrong pages") }
+          let markGroups = RepeatedMarkInventory.groups(
+            in: markedGraph, pageIDs: markedPDF.pageIDs)
+          guard let markGroup = markGroups.first else {
+            throw PDFError(.malformed, "Applied page mark was not discoverable")
+          }
+          try first.editSession.apply(
+            PDFTransaction([
+              RemoveRepeatedMarkCommand(
+                groupID: markGroup.groupID, pageIDs: markGroup.pageIDs)
+            ]))
+          let removedPDF = try PDFParser.parse(try first.data(ofType: "com.adobe.pdf"))
+          let removedLayout = try PageTextLayout.build(
+            pageID: removedPDF.pageIDs[0], in: removedPDF.graph)
+          guard !removedLayout.lines.contains(where: {
+            removedLayout.text(in: $0).contains("Smoke Header")
+          }) else { throw PDFError(.malformed, "Page mark removal left the mark") }
+          guard first.undoEdit() else {
+            throw PDFError(.malformed, "Page mark removal did not undo")
+          }
           guard first.undoEdit(), try first.data(ofType: "com.adobe.pdf") == original else {
             throw PDFError(.malformed, "Page mark undo did not restore the original bytes")
           }
