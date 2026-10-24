@@ -46,6 +46,8 @@ public struct FormField: Sendable, Equatable {
   public var isMultiline: Bool { kind == .text && flags & 4096 != 0 }
   /// FRM-05: comb text flag (bit 25) spreads characters across cells.
   public var isComb: Bool { kind == .text && flags & 16_777_216 != 0 }
+  /// FRM-05: rich text flag (bit 26); /RV is authoritative when present.
+  public var isRichText: Bool { kind == .text && flags & 33_554_432 != 0 }
   /// P24-010: push buttons are modeled but their actions never run.
   public var isPushButton: Bool { kind == .button && flags & 65536 != 0 }
   /// P24-008: radio groups use bit 16.

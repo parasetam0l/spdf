@@ -40,6 +40,13 @@ public struct SetFormTextCommand: PDFEditCommand, Equatable, Sendable {
       throw PDFError(.malformed, "The field dictionary is missing")
     }
     fieldDictionary[PDFName("V")] = .string(AnnotationText.encode(context.displayText))
+    if context.field.isRichText || fieldDictionary[PDFName("RV")] != nil {
+      fieldDictionary[PDFName("RV")] = .string(
+        Data(
+          RichTextValue.plainText(
+            context.displayText, fontSize: context.da.size, color: context.da.color
+          ).utf8))
+    }
     graph.objects[fieldID] = .dictionary(fieldDictionary)
 
     for widget in context.field.widgets {
@@ -566,5 +573,64 @@ public struct ResetFormCommand: PDFEditCommand, Equatable, Sendable {
       }
     }
     return graph
+  }
+}
+
+/// FRM-05: build a portable rich-text value that matches the plain text the
+/// app just wrote. The field's generated appearance remains authoritative for
+/// rendering; this keeps /RV coherent for Acrobat and other readers instead
+/// of leaving an older rich value next to a newer /V.
+enum RichTextValue {
+  static func plainText(_ text: String, fontSize: Double, color: [Double]) -> String {
+    let size = Int((fontSize * 2).rounded())
+    let halfPoints = min(max(size, 2), 32_767)
+    let rgb: [Int]
+    switch color.count {
+    case 1:
+      let value = Int((min(max(color[0], 0), 1) * 255).rounded())
+      rgb = [value, value, value]
+    case 3:
+      rgb = color.map { Int((min(max($0, 0), 1) * 255).rounded()) }
+    default:
+      rgb = [0, 0, 0]
+    }
+    let body = escape(text.replacingOccurrences(of: "\r\n", with: "\n"))
+    return "{\\rtf1\\ansi\\deff0{\\fonttbl{\\f0 Helvetica;}}"
+      + "{\\colortbl;\\red\(rgb[0])\\green\(rgb[1])\\blue\(rgb[2]);}"
+      + "\\f0\\fs\(halfPoints)\\cf1 \(body)}"
+  }
+
+  static func escape(_ text: String) -> String {
+    var result = ""
+    for scalar in text.unicodeScalars {
+      switch scalar {
+      case "\\":
+        result += "\\\\"
+      case "{":
+        result += "\\{"
+      case "}":
+        result += "\\}"
+      case "\n":
+        result += "\\line "
+      case "\r":
+        result += "\\line "
+      case "\t":
+        result += "\\tab "
+      default:
+        if (32...126).contains(scalar.value) {
+          result.append(Character(scalar))
+        } else if scalar.value <= 0xFFFF {
+          let unit = UInt16(scalar.value)
+          result += "\\u\(Int(Int16(bitPattern: unit)))?"
+        } else {
+          let value = scalar.value - 0x10000
+          let high = UInt16(0xD800 + (value >> 10))
+          let low = UInt16(0xDC00 + (value & 0x3FF))
+          result += "\\u\(Int(Int16(bitPattern: high)))?"
+          result += "\\u\(Int(Int16(bitPattern: low)))?"
+        }
+      }
+    }
+    return result
   }
 }

@@ -150,6 +150,58 @@ struct FormTests {
     refuse(SetFormTextCommand(fieldName: "name", text: "hello 🙂"))
   }
 
+  @Test func richTextFieldValueStaysCoherent() throws {
+    let (fixture, pageIDs) = try formFixture()
+    var graph = fixture
+    guard case .dictionary(var field)? = graph.objects[PDFObjectID(110)] else {
+      Issue.record("Rich text field is missing")
+      return
+    }
+    field[PDFName("Ff")] = .integer(33_554_432)
+    field[PDFName("RV")] = .string(Data(#"{\rtf1\ansi OLD}"#.utf8))
+    graph.objects[PDFObjectID(110)] = .dictionary(field)
+    let fields = try FormInventory.fields(in: graph, pageIDs: pageIDs)
+    #expect(fields.first { $0.name == "name" }?.isRichText == true)
+
+    let filled = try PDFEditingEngine.commit(
+      PDFTransaction([
+        SetFormTextCommand(fieldName: "name", text: #"A {rich} \ café"#)
+      ]), to: graph)
+    guard case .dictionary(let updated)? = filled.objects[PDFObjectID(110)],
+      case .string(let value)? = updated[PDFName("V")],
+      case .string(let richValue)? = updated[PDFName("RV")]
+    else {
+      Issue.record("Rich text fill did not write /V and /RV")
+      return
+    }
+    let rich = String(decoding: richValue, as: UTF8.self)
+    #expect(AnnotationText.decode(value) == #"A {rich} \ café"#)
+    #expect(rich.hasPrefix("{\\rtf1"))
+    #expect(rich.contains(#"A \{rich\} \\"#))
+    #expect(rich.contains("\\u233?"))
+    #expect(!rich.contains("OLD"))
+    #expect(rich.contains("\\fs"))
+
+    let reopened = try PDFParser.parse(try PDFWriter.write(filled))
+    #expect(reopened.graph == filled)
+    guard case .dictionary(let reopenedField)? = reopened.graph.objects[PDFObjectID(110)],
+      case .string(let reopenedRV)? = reopenedField[PDFName("RV")]
+    else {
+      Issue.record("Rich text /RV did not survive reopening")
+      return
+    }
+    #expect(String(decoding: reopenedRV, as: UTF8.self).contains(#"A \{rich\} \\"#))
+
+    // Plain fields do not gain a rich value merely because they were filled.
+    let plain = try PDFEditingEngine.commit(
+      PDFTransaction([SetFormTextCommand(fieldName: "notes", text: "plain")]), to: fixture)
+    guard case .dictionary(let plainField)? = plain.objects[PDFObjectID(120)] else {
+      Issue.record("Plain field is missing")
+      return
+    }
+    #expect(plainField[PDFName("RV")] == nil)
+  }
+
   @Test func buttonStateUpdatesValueAndAppearance() throws {
     let (graph, pageIDs) = try formFixture()
     let checked = try PDFEditingEngine.commit(
