@@ -113,6 +113,30 @@ struct DocumentAssemblyTests {
     }
   }
 
+  @Test func trimBoxUsesTheSharedPageBoxTransaction() throws {
+    let graph = try graph()
+    let pageID = try PDFPageTree.pageIDs(in: graph)[0]
+    let attributes = PDFDocumentInventory.pageAttributes(pageIDs: [pageID], in: graph)
+    let media = attributes[0].mediaBox
+    let box = [media[0] + 5, media[1] + 5, media[2] - 5, media[3] - 5]
+    let edited = try PDFEditingEngine.commit(
+      PDFTransaction([
+        DocumentAssembly.SetPageBoxCommand(boxes: [pageID: box], kind: .trim)
+      ]), to: graph)
+    let changed = PDFDocumentInventory.pageAttributes(pageIDs: [pageID], in: edited)
+    #expect(changed[0].trimBox == box)
+    // The visible crop box is untouched.
+    #expect(changed[0].cropBox == attributes[0].cropBox)
+    #expect(throws: PDFError.self) {
+      _ = try PDFEditingEngine.commit(
+        PDFTransaction([
+          DocumentAssembly.SetPageBoxCommand(
+            boxes: [pageID: [media[0] - 20, media[1], media[2], media[3]]],
+            kind: .bleed)
+        ]), to: graph)
+    }
+  }
+
   // MARK: - P23-008/P23-009/P23-014/P23-015/P23-017
 
   @Test func extractionKeepsSelectedPagesAndDropsForeignTargets() throws {

@@ -665,6 +665,9 @@ final class SPDFDocument: NSDocument {
     else { return }
     let unit = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 120, height: 24))
     unit.addItems(withTitles: ["Points", "Millimeters", "Inches"])
+    let boxPopup = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 150, height: 24))
+    boxPopup.addItems(withTitles: DocumentAssembly.PageBox.allCases.map(\.title))
+    boxPopup.selectItem(at: 0)
     let margins = ["Left", "Bottom", "Right", "Top"].map { _ in
       let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 70, height: 22))
       field.stringValue = "0"
@@ -672,24 +675,29 @@ final class SPDFDocument: NSDocument {
     }
     let pageField = NSTextField(frame: NSRect(x: 0, y: 0, width: 120, height: 22))
     pageField.stringValue = "\(viewer.pageNumber)"
-    var rows: [[NSView]] = [[NSTextField(labelWithString: "Units:"), unit]]
+    var rows: [[NSView]] = [
+      [NSTextField(labelWithString: "Box:"), boxPopup],
+      [NSTextField(labelWithString: "Units:"), unit],
+    ]
     for (label, field) in zip(["Left", "Bottom", "Right", "Top"], margins) {
       rows.append([NSTextField(labelWithString: "\(label) margin:"), field])
     }
     rows.append([NSTextField(labelWithString: "Pages:"), pageField])
     let grid = NSGridView(views: rows)
     grid.column(at: 0).xPlacement = .trailing
-    grid.frame = NSRect(x: 0, y: 0, width: 300, height: 170)
+    grid.frame = NSRect(x: 0, y: 0, width: 300, height: 200)
     let alert = NSAlert()
-    alert.messageText = "Crop Pages"
+    alert.messageText = "Page Boxes"
     alert.informativeText =
-      "Margins are measured from each page's MediaBox. Cropping changes the visible page box; "
-      + "it does not remove hidden content or image pixels. Use pages such as 1, 3-5. The change is one undo step."
+      "Margins are measured from each page's MediaBox. Crop changes the visible page box; "
+      + "Trim, Bleed and Art are production boxes. No hidden content or image pixels are removed. "
+      + "Use pages such as 1, 3-5. The change is one undo step."
     alert.accessoryView = grid
-    alert.addButton(withTitle: "Crop")
+    alert.addButton(withTitle: "Set Box")
     alert.addButton(withTitle: "Cancel")
     guard alert.runModal() == .alertFirstButtonReturn else { return }
     let factor: Double = [1.0, 72.0 / 25.4, 72.0][max(0, unit.indexOfSelectedItem)]
+    let kind = DocumentAssembly.PageBox.allCases[max(0, boxPopup.indexOfSelectedItem)]
     let values = margins.compactMap { Double($0.stringValue) }
     guard values.count == 4, values.allSatisfy({ $0.isFinite && $0 >= 0 }) else {
       NSSound.beep()
@@ -718,7 +726,7 @@ final class SPDFDocument: NSDocument {
     }
     do {
       try editSession.apply(
-        PDFTransaction([DocumentAssembly.SetCropBoxCommand(boxes: boxes)]))
+        PDFTransaction([DocumentAssembly.SetPageBoxCommand(boxes: boxes, kind: kind)]))
     } catch {
       presentError(error)
       return

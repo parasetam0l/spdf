@@ -1142,6 +1142,22 @@
           guard first.undoEdit(), try first.data(ofType: "com.adobe.pdf") == original else {
             throw PDFError(.malformed, "Page crop undo did not restore the original bytes")
           }
+          // PAG-05: the same transaction sets a Trim box without changing the
+          // visible crop box.
+          try first.editSession.apply(
+            PDFTransaction([
+              DocumentAssembly.SetPageBoxCommand(
+                boxes: [pageID: box], kind: .trim)
+            ]))
+          let trimmed = try PDFParser.parse(try first.data(ofType: "com.adobe.pdf"))
+          let trimmedAttributes = PDFDocumentInventory.pageAttributes(
+            pageIDs: [trimmed.pageIDs[0]], in: trimmed.graph)
+          guard trimmedAttributes[0].trimBox == box,
+            trimmedAttributes[0].cropBox == attributes[0].cropBox
+          else { throw PDFError(.malformed, "Trim box did not round-trip") }
+          guard first.undoEdit(), try first.data(ofType: "com.adobe.pdf") == original else {
+            throw PDFError(.malformed, "Trim box undo did not restore the original bytes")
+          }
         }
 
         // Owned-core edit pipeline: rotate page 1, verify the edited bytes,

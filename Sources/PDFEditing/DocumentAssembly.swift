@@ -143,31 +143,89 @@ public enum DocumentAssembly {
     return (graph, newPageID)
   }
 
+  /// PAG-05: editable page boxes. Crop is the visible box; Trim/Bleed/Art are
+  /// production boxes that do not change what the viewer displays.
+  public enum PageBox: String, CaseIterable, Sendable, Equatable {
+    case crop = "CropBox"
+    case trim = "TrimBox"
+    case bleed = "BleedBox"
+    case art = "ArtBox"
+
+    public var title: String {
+      switch self {
+      case .crop: return "Crop box"
+      case .trim: return "Trim box"
+      case .bleed: return "Bleed box"
+      case .art: return "Art box"
+      }
+    }
+  }
+
   /// P23-006/P23-007: set the CropBox (non-destructive; content and pixels are
   /// untouched — this is not redaction).
   public static func setCropBox(
     _ box: [Double], pageID: PDFObjectID, in graph: PDFGraph
   ) throws -> PDFGraph {
+    try setPageBox(box, kind: .crop, pageID: pageID, in: graph)
+  }
+
+  /// Set one page box without touching content. Every box stays inside the
+  /// page's MediaBox; the source graph is not mutated.
+  public static func setPageBox(
+    _ box: [Double], kind: PageBox, pageID: PDFObjectID, in graph: PDFGraph
+  ) throws -> PDFGraph {
     var graph = graph
     guard case .dictionary(var page)? = graph.objects[pageID] else {
       throw PDFError(.malformed, "Page is missing")
     }
-    guard box.count == 4, box[2] > box[0], box[3] > box[1] else {
-      throw PDFError(.malformed, "The crop box is empty")
+    guard box.count == 4, box.allSatisfy(\.isFinite), box[2] > box[0], box[3] > box[1] else {
+      throw PDFError(.malformed, "The \(kind.title.lowercased()) is empty")
     }
     let media = DocumentInventoryBox.mediaBox(of: page, in: graph)
     guard box[0] >= media[0] - 0.5, box[1] >= media[1] - 0.5,
       box[2] <= media[2] + 0.5, box[3] <= media[3] + 0.5
     else {
-      throw PDFError(.malformed, "The crop box must stay inside the MediaBox")
+      throw PDFError(.malformed, "The \(kind.title.lowercased()) must stay inside the MediaBox")
     }
-    page[PDFName("CropBox")] = .array(box.map { .real($0) })
+    page[PDFName(kind.rawValue)] = .array(box.map { .real($0) })
     graph.objects[pageID] = .dictionary(page)
     return graph
   }
 
-  /// PAG-05: set one CropBox per page in one undoable transaction. Each box is
-  /// validated against that page's own MediaBox, so mixed-size documents work.
+  /// PAG-05: set one page box per page in one undoable transaction. Each box
+  /// is validated against that page's own MediaBox, so mixed-size documents
+  /// work.
+  public struct SetPageBoxCommand: PDFEditCommand, Equatable, Sendable {
+    public let boxes: [PDFObjectID: [Double]]
+    public let kind: PageBox
+
+    public init(boxes: [PDFObjectID: [Double]], kind: PageBox) {
+      self.boxes = boxes
+      self.kind = kind
+    }
+
+    public var name: String { "Set \(kind.title)" }
+    public func affectedPageIDs(in graph: PDFGraph) -> [PDFObjectID] { boxes.keys.sorted() }
+
+    public func validate(in graph: PDFGraph) throws {
+      guard !boxes.isEmpty else {
+        throw PDFError(.malformed, "Choose at least one page")
+      }
+      for (pageID, box) in boxes {
+        _ = try DocumentAssembly.setPageBox(box, kind: kind, pageID: pageID, in: graph)
+      }
+    }
+
+    public func apply(to graph: PDFGraph) throws -> PDFGraph {
+      var graph = graph
+      for (pageID, box) in boxes.sorted(by: { $0.key < $1.key }) {
+        graph = try DocumentAssembly.setPageBox(box, kind: kind, pageID: pageID, in: graph)
+      }
+      return graph
+    }
+  }
+
+  /// P23-006 compatibility wrapper for the crop-only command.
   public struct SetCropBoxCommand: PDFEditCommand, Equatable, Sendable {
     public let boxes: [PDFObjectID: [Double]]
 
@@ -179,20 +237,11 @@ public enum DocumentAssembly {
     public func affectedPageIDs(in graph: PDFGraph) -> [PDFObjectID] { boxes.keys.sorted() }
 
     public func validate(in graph: PDFGraph) throws {
-      guard !boxes.isEmpty else {
-        throw PDFError(.malformed, "Choose at least one page to crop")
-      }
-      for (pageID, box) in boxes {
-        _ = try DocumentAssembly.setCropBox(box, pageID: pageID, in: graph)
-      }
+      try SetPageBoxCommand(boxes: boxes, kind: .crop).validate(in: graph)
     }
 
     public func apply(to graph: PDFGraph) throws -> PDFGraph {
-      var graph = graph
-      for (pageID, box) in boxes.sorted(by: { $0.key < $1.key }) {
-        graph = try DocumentAssembly.setCropBox(box, pageID: pageID, in: graph)
-      }
-      return graph
+      try SetPageBoxCommand(boxes: boxes, kind: .crop).apply(to: graph)
     }
   }
 
