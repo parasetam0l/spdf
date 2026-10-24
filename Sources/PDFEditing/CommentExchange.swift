@@ -23,6 +23,11 @@ public struct CommentExchangeEntry: Sendable, Equatable {
   public let inReplyTo: String?
   public let borderWidth: Double?
   public let inkStrokes: [[Double]]?
+  public let defaultAppearance: String?
+  public let lineStart: [Double]?
+  public let lineEnd: [Double]?
+  public let startEnding: PDFName?
+  public let endEnding: PDFName?
 
   public init(
     identity: String, pageIndex: Int, subtype: PDFName, rect: [Double],
@@ -30,7 +35,9 @@ public struct CommentExchangeEntry: Sendable, Equatable {
     modified: String? = nil, creationDate: String? = nil, subject: String? = nil,
     state: PDFName? = nil, stateModel: PDFName? = nil, color: [Double]? = nil,
     opacity: Double? = nil, flags: Int? = nil, iconName: PDFName? = nil,
-    inReplyTo: String? = nil, borderWidth: Double? = nil, inkStrokes: [[Double]]? = nil
+    inReplyTo: String? = nil, borderWidth: Double? = nil, inkStrokes: [[Double]]? = nil,
+    defaultAppearance: String? = nil, lineStart: [Double]? = nil, lineEnd: [Double]? = nil,
+    startEnding: PDFName? = nil, endEnding: PDFName? = nil
   ) {
     self.identity = identity
     self.pageIndex = pageIndex
@@ -51,6 +58,11 @@ public struct CommentExchangeEntry: Sendable, Equatable {
     self.inReplyTo = inReplyTo
     self.borderWidth = borderWidth
     self.inkStrokes = inkStrokes
+    self.defaultAppearance = defaultAppearance
+    self.lineStart = lineStart
+    self.lineEnd = lineEnd
+    self.startEnding = startEnding
+    self.endEnding = endEnding
   }
 }
 
@@ -104,6 +116,7 @@ public enum CommentExchange {
   public static let supportedSubtypes: Set<PDFName> = [
     PDFName("Text"), PDFName("Highlight"), PDFName("Underline"), PDFName("StrikeOut"),
     PDFName("Squiggly"), PDFName("Square"), PDFName("Circle"), PDFName("Ink"),
+    PDFName("FreeText"), PDFName("Stamp"), PDFName("Line"),
   ]
 
   /// Identity used in XFDF. Generated annotations carry /NM; older comments
@@ -162,7 +175,11 @@ public enum CommentExchange {
       {
         attributes.append(("creationdate", creation))
       }
-      if let color = comment.annotation.color {
+      if let color = comment.annotation.color
+        ?? (subtype == PDFName("FreeText")
+          ? freeTextColor(from: text(comment.annotation.dictionary[PDFName("DA")]))
+          : nil)
+      {
         attributes.append(("color", hexColor(color)))
       }
       if let opacity = comment.annotation.opacity {
@@ -191,8 +208,21 @@ public enum CommentExchange {
       }
       if let strokes = inkStrokes(comment.annotation), !strokes.isEmpty {
         attributes.append(("width", number(borderWidth(comment.annotation) ?? 2)))
-      } else if subtype == PDFName("Square") || subtype == PDFName("Circle") {
+      } else if subtype == PDFName("Square") || subtype == PDFName("Circle")
+        || subtype == PDFName("Line")
+      {
         attributes.append(("width", number(borderWidth(comment.annotation) ?? 1)))
+      }
+      if subtype == PDFName("Line") {
+        guard let points = linePoints(comment.annotation), points.count == 4 else {
+          skipped.append("Page \(comment.pageIndex + 1): Line has no endpoints.")
+          continue
+        }
+        attributes.append(("start", numbers([points[0], points[1]])))
+        attributes.append(("end", numbers([points[2], points[3]])))
+        let endings = lineEndings(comment.annotation)
+        attributes.append(("head", endings.0))
+        attributes.append(("tail", endings.1))
       }
       if subtype == PDFName("Ink"), inkStrokes(comment.annotation)?.isEmpty ?? true {
         skipped.append("Page \(comment.pageIndex + 1): Ink has no stroke data.")
@@ -206,6 +236,11 @@ public enum CommentExchange {
       xml += ">"
       if let contents = comment.contents {
         xml += "<contents>\(escapeXML(contents))</contents>"
+      }
+      if let appearance = text(comment.annotation.dictionary[PDFName("DA")]),
+        !appearance.isEmpty
+      {
+        xml += "<defaultappearance>\(escapeXML(appearance))</defaultappearance>"
       }
       if subtype == PDFName("Ink"), let strokes = inkStrokes(comment.annotation) {
         xml += "<inklist>"
@@ -232,6 +267,8 @@ public enum CommentExchange {
       var current: Pending?
       var contents = ""
       var inContents = false
+      var defaultAppearance = ""
+      var inDefaultAppearance = false
       var gesture = ""
       var inGesture = false
 
@@ -252,6 +289,8 @@ public enum CommentExchange {
               uniquingKeysWith: { first, _ in first }))
           contents = ""
           inContents = false
+          defaultAppearance = ""
+          inDefaultAppearance = false
           gesture = ""
           inGesture = false
           return
@@ -260,6 +299,9 @@ public enum CommentExchange {
         if name == "contents" {
           inContents = true
           contents = ""
+        } else if name == "defaultappearance" {
+          inDefaultAppearance = true
+          defaultAppearance = ""
         } else if name == "gesture" {
           inGesture = true
           gesture = ""
@@ -268,6 +310,7 @@ public enum CommentExchange {
 
       func parser(_ parser: XMLParser, foundCharacters string: String) {
         if inContents { contents += string }
+        if inDefaultAppearance { defaultAppearance += string }
         if inGesture { gesture += string }
       }
 
@@ -276,6 +319,7 @@ public enum CommentExchange {
       ) {
         let string = String(decoding: CDATABlock, as: UTF8.self)
         if inContents { contents += string }
+        if inDefaultAppearance { defaultAppearance += string }
         if inGesture { gesture += string }
       }
 
@@ -287,6 +331,7 @@ public enum CommentExchange {
           elementName.lowercased().split(separator: ":").last.map(String.init)
           ?? elementName.lowercased()
         if name == "contents" { inContents = false }
+        if name == "defaultappearance" { inDefaultAppearance = false }
         if name == "gesture" {
           if let points = CommentExchange.parseNumbers(gesture), points.count >= 4,
             points.count % 2 == 0
@@ -298,7 +343,10 @@ public enum CommentExchange {
         }
         guard let pending = current else { return }
         if let tag = CommentExchange.tagName(for: pending.subtype), name == tag {
-          if let entry = pending.entry(contents: contents.isEmpty ? nil : contents) {
+          if let entry = pending.entry(
+            contents: contents.isEmpty ? nil : contents,
+            defaultAppearance: defaultAppearance.isEmpty ? nil : defaultAppearance)
+          {
             entries.append(entry)
           } else {
             issues.append("Page \(pending.attributes["page"] ?? "?"): invalid geometry.")
@@ -306,6 +354,8 @@ public enum CommentExchange {
           current = nil
           contents = ""
           inContents = false
+          defaultAppearance = ""
+          inDefaultAppearance = false
         }
       }
 
@@ -373,6 +423,10 @@ public enum CommentExchange {
           unchanged += 1
           continue
         }
+        if entry.subtype == PDFName("FreeText"), let issue = newEntryIssue(entry) {
+          skipped.append("Page \(entry.pageIndex + 1): \(issue)")
+          continue
+        }
         if let command = updateCommand(
           for: comment, entry: entry, identity: id, pageID: comment.pageID)
         {
@@ -424,7 +478,10 @@ public enum CommentExchange {
             creationDate: entry.creationDate, subject: entry.subject, state: entry.state,
             stateModel: entry.stateModel, color: entry.color, opacity: entry.opacity,
             flags: entry.flags, iconName: entry.iconName, inReplyTo: nil,
-            borderWidth: entry.borderWidth, inkStrokes: entry.inkStrokes))
+            borderWidth: entry.borderWidth, inkStrokes: entry.inkStrokes,
+            defaultAppearance: entry.defaultAppearance, lineStart: entry.lineStart,
+            lineEnd: entry.lineEnd, startEnding: entry.startEnding,
+            endEnding: entry.endEnding))
       }
     }
     if !resolved.isEmpty {
@@ -487,6 +544,76 @@ public enum CommentExchange {
     return String(decoding: subtype.bytes, as: UTF8.self)
   }
 
+  static func freeTextColor(from defaultAppearance: String?) -> [Double]? {
+    guard let defaultAppearance else { return nil }
+    let tokens = defaultAppearance.split(whereSeparator: \.isWhitespace)
+    for (index, token) in tokens.enumerated() where token == "rg" && index >= 3 {
+      let values = tokens[(index - 3)..<index].compactMap { Double($0) }
+      guard values.count == 3, values.allSatisfy({ $0.isFinite && $0 >= 0 && $0 <= 1 })
+      else { continue }
+      return values
+    }
+    return nil
+  }
+
+  static func freeTextFontSize(_ defaultAppearance: String?) -> Double {
+    guard let defaultAppearance else { return 12 }
+    let tokens = defaultAppearance.split(whereSeparator: \.isWhitespace)
+    for (index, token) in tokens.enumerated() where token == "Tf" && index > 0 {
+      if let size = Double(tokens[index - 1]), size.isFinite, size >= 6, size <= 72 {
+        return size
+      }
+    }
+    return 12
+  }
+
+  static func stampLabel(_ name: PDFName?) -> String {
+    let raw = name.map { String(decoding: $0.bytes, as: UTF8.self) } ?? "Draft"
+    switch raw {
+    case "Approved": return "Approved"
+    case "NotApproved": return "Not Approved"
+    case "Draft": return "Draft"
+    case "Confidential": return "Confidential"
+    case "Final": return "Final"
+    case "Experimental": return "Experimental"
+    case "Expired": return "Expired"
+    case "AsIs": return "As Is"
+    case "ForComment": return "For Comment"
+    case "ForPublicRelease": return "For Public Release"
+    default:
+      var label = ""
+      for scalar in raw.unicodeScalars {
+        if CharacterSet.uppercaseLetters.contains(scalar), !label.isEmpty {
+          label.append(" ")
+        }
+        label.append(Character(scalar))
+      }
+      return label.isEmpty ? "Stamp" : label
+    }
+  }
+
+  static func colorsEqual(_ lhs: [Double], _ rhs: [Double]?) -> Bool {
+    guard let rhs, lhs.count == 3, rhs.count == 3 else { return false }
+    return zip(lhs, rhs).allSatisfy { left, right in
+      guard left.isFinite, right.isFinite else { return false }
+      let a = Int((min(max(left, 0), 1) * 255).rounded())
+      let b = Int((min(max(right, 0), 1) * 255).rounded())
+      return a == b
+    }
+  }
+
+  static func appearancesEqual(_ lhs: String?, _ rhs: String?) -> Bool {
+    if lhs == rhs { return true }
+    guard let lhs, let rhs else { return false }
+    guard freeTextFontSize(lhs) == freeTextFontSize(rhs) else { return false }
+    let leftColor = freeTextColor(from: lhs)
+    let rightColor = freeTextColor(from: rhs)
+    if let leftColor, let rightColor {
+      return colorsEqual(leftColor, rightColor)
+    }
+    return lhs == rhs
+  }
+
   static func text(_ value: PDFValue?) -> String? {
     guard case .string(let data)? = value else { return nil }
     return AnnotationText.decode(data)
@@ -506,6 +633,23 @@ public enum CommentExchange {
       result.append(points)
     }
     return result
+  }
+
+  static func linePoints(_ annotation: Annotation) -> [Double]? {
+    guard case .array(let values)? = annotation.dictionary[PDFName("L")] else { return nil }
+    let points = values.compactMap(numberValue)
+    guard points.count == 4, points.allSatisfy(\.isFinite) else { return nil }
+    return points
+  }
+
+  static func lineEndings(_ annotation: Annotation) -> (String, String) {
+    guard case .array(let values)? = annotation.dictionary[PDFName("LE")], values.count >= 2
+    else { return ("None", "None") }
+    func name(_ value: PDFValue) -> String {
+      guard case .name(let name) = value else { return "None" }
+      return String(decoding: name.bytes, as: UTF8.self)
+    }
+    return (name(values[0]), name(values[1]))
   }
 
   static func borderWidth(_ annotation: Annotation) -> Double? {
@@ -605,6 +749,33 @@ public enum CommentExchange {
         }
       }
     }
+    if entry.subtype == PDFName("FreeText") {
+      guard let text = entry.contents,
+        !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+      else { return "free text has no text." }
+      guard AnnotationSupport.escapedLiteral(text) != nil else {
+        return "free text is outside the supported WinAnsi character set."
+      }
+    }
+    if entry.subtype == PDFName("Stamp") {
+      let width = entry.borderWidth ?? 2
+      guard width > 0,
+        width <= min(entry.rect[2] - entry.rect[0], entry.rect[3] - entry.rect[1]) / 2
+      else { return "stamp border is too wide for its rectangle." }
+    }
+    if entry.subtype == PDFName("Line") {
+      guard let start = entry.lineStart, let end = entry.lineEnd,
+        start.count == 2, end.count == 2, start.allSatisfy(\.isFinite),
+        end.allSatisfy(\.isFinite), start != end
+      else { return "line endpoints are invalid." }
+      let supported: Set<PDFName> = [PDFName("None"), PDFName("ClosedArrow")]
+      if let head = entry.startEnding, !supported.contains(head) {
+        return "line start ending \(typeName(head)) is unsupported."
+      }
+      if let tail = entry.endEnding, !supported.contains(tail) {
+        return "line end ending \(typeName(tail)) is unsupported."
+      }
+    }
     if let color = entry.color {
       guard color.count == 3, color.allSatisfy({ $0.isFinite && $0 >= 0 && $0 <= 1 }) else {
         return "color is invalid."
@@ -637,11 +808,24 @@ public enum CommentExchange {
     if let subject = entry.subject, subject != (comment.subject ?? "") { changed = true }
     if entry.state != nil, incomingState != existingState { changed = true }
     if comment.annotation.name == nil { changed = true }
+    let existingAppearance = text(comment.annotation.dictionary[PDFName("DA")])
+    if comment.subtype == PDFName("FreeText") {
+      if let appearance = entry.defaultAppearance,
+        !appearancesEqual(appearance, existingAppearance)
+      {
+        changed = true
+      }
+      let existingColor =
+        comment.annotation.color ?? freeTextColor(from: existingAppearance)
+      if let color = entry.color, !colorsEqual(color, existingColor) { changed = true }
+    }
     guard changed else { return nil }
     return UpdateCommentCommand(
       pageID: pageID, annotationIndex: comment.annotation.index, contents: entry.contents,
       author: entry.author, modified: entry.modified, subject: entry.subject,
-      state: entry.state, stateModel: entry.stateModel, identity: identity)
+      state: entry.state, stateModel: entry.stateModel, identity: identity,
+      color: comment.subtype == PDFName("FreeText") ? entry.color : nil,
+      defaultAppearance: comment.subtype == PDFName("FreeText") ? entry.defaultAppearance : nil)
   }
 
   static func normalized(_ entry: CommentExchangeEntry, identity: String) -> CommentExchangeEntry {
@@ -662,7 +846,9 @@ public enum CommentExchange {
       state: entry.state, stateModel: entry.stateModel, color: entry.color,
       opacity: entry.opacity, flags: entry.flags, iconName: entry.iconName,
       inReplyTo: entry.inReplyTo, borderWidth: entry.borderWidth,
-      inkStrokes: entry.inkStrokes)
+      inkStrokes: entry.inkStrokes, defaultAppearance: entry.defaultAppearance,
+      lineStart: entry.lineStart, lineEnd: entry.lineEnd,
+      startEnding: entry.startEnding, endEnding: entry.endEnding)
   }
 
   static func quadPoints(from rect: [Double]) -> [Double] {
@@ -676,7 +862,8 @@ public enum CommentExchange {
     let seed = [
       String(entry.pageIndex), typeName(entry.subtype), numbers(entry.rect),
       numbers(entry.quadPoints ?? []), entry.contents ?? "", entry.author ?? "",
-      entry.modified ?? "",
+      entry.modified ?? "", entry.defaultAppearance ?? "",
+      numbers(entry.lineStart ?? []), numbers(entry.lineEnd ?? []),
     ].joined(separator: "|")
     var hash: UInt64 = 14_695_981_039_346_656_037
     for byte in seed.utf8 {
@@ -706,7 +893,7 @@ private final class Pending {
     self.attributes = attributes
   }
 
-  func entry(contents: String?) -> CommentExchangeEntry? {
+  func entry(contents: String?, defaultAppearance: String?) -> CommentExchangeEntry? {
     guard let page = Int(attributes["page"] ?? ""), page >= 0,
       let rect = CommentExchange.parseNumbers(attributes["rect"] ?? "")
     else { return nil }
@@ -728,6 +915,12 @@ private final class Pending {
     }
     let identity = (attributes["name"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
     let parent = (attributes["inreplyto"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+    let lineStart = attributes["start"].flatMap(CommentExchange.parseNumbers).flatMap {
+      $0.count == 2 ? $0 : nil
+    }
+    let lineEnd = attributes["end"].flatMap(CommentExchange.parseNumbers).flatMap {
+      $0.count == 2 ? $0 : nil
+    }
     let result = CommentExchangeEntry(
       identity: identity, pageIndex: page, subtype: subtype, rect: normalizedRect,
       quadPoints: coords, contents: contents, author: nonEmpty(attributes["title"]),
@@ -737,7 +930,10 @@ private final class Pending {
       color: color, opacity: opacity, flags: flags,
       iconName: nonEmpty(attributes["icon"]).map { PDFName($0) },
       inReplyTo: parent.isEmpty ? nil : parent, borderWidth: width,
-      inkStrokes: inkStrokes.isEmpty ? nil : inkStrokes)
+      inkStrokes: inkStrokes.isEmpty ? nil : inkStrokes,
+      defaultAppearance: nonEmpty(defaultAppearance), lineStart: lineStart,
+      lineEnd: lineEnd, startEnding: nonEmpty(attributes["head"]).map { PDFName($0) },
+      endEnding: nonEmpty(attributes["tail"]).map { PDFName($0) })
     return result.identity.isEmpty
       ? CommentExchangeEntry(
         identity: CommentExchange.derivedIdentity(result), pageIndex: result.pageIndex,
@@ -746,7 +942,10 @@ private final class Pending {
         creationDate: result.creationDate, subject: result.subject, state: result.state,
         stateModel: result.stateModel, color: result.color, opacity: result.opacity,
         flags: result.flags, iconName: result.iconName, inReplyTo: result.inReplyTo,
-        borderWidth: result.borderWidth, inkStrokes: result.inkStrokes)
+        borderWidth: result.borderWidth, inkStrokes: result.inkStrokes,
+        defaultAppearance: result.defaultAppearance, lineStart: result.lineStart,
+        lineEnd: result.lineEnd, startEnding: result.startEnding,
+        endEnding: result.endEnding)
       : result
   }
 
@@ -823,6 +1022,21 @@ public struct ImportCommentsCommand: PDFEditCommand, Sendable {
           }
         }
       }
+      if entry.subtype == PDFName("Line") {
+        guard let start = entry.lineStart, let end = entry.lineEnd,
+          start.count == 2, end.count == 2, start.allSatisfy(\.isFinite),
+          end.allSatisfy(\.isFinite), start != end
+        else {
+          throw PDFError(.malformed, "An imported line has invalid endpoints")
+        }
+        let supported: Set<PDFName> = [PDFName("None"), PDFName("ClosedArrow")]
+        if let head = entry.startEnding, !supported.contains(head) {
+          throw PDFError(.unsupported, "An imported line has an unsupported start ending")
+        }
+        if let tail = entry.endEnding, !supported.contains(tail) {
+          throw PDFError(.unsupported, "An imported line has an unsupported end ending")
+        }
+      }
       if let color = entry.color {
         guard color.count == 3, color.allSatisfy({ $0.isFinite && $0 >= 0 && $0 <= 1 }) else {
           throw PDFError(.malformed, "An imported comment color is invalid")
@@ -846,7 +1060,10 @@ public struct ImportCommentsCommand: PDFEditCommand, Sendable {
       }
     }
     let base = graph.objects.keys.map(\.number).max() ?? 0
-    guard base + entries.count * 2 <= 100_000_000 else {
+    let needsFont = entries.contains {
+      $0.subtype == PDFName("FreeText") || $0.subtype == PDFName("Stamp")
+    }
+    guard base + entries.count * 2 + (needsFont ? 1 : 0) <= 100_000_000 else {
       throw PDFError(.limitExceeded, "No room remains for imported comments")
     }
   }
@@ -854,6 +1071,21 @@ public struct ImportCommentsCommand: PDFEditCommand, Sendable {
   public func apply(to graph: PDFGraph) throws -> PDFGraph {
     var graph = graph
     let base = graph.objects.keys.map(\.number).max() ?? 0
+    var next = base + entries.count * 2 + 1
+    let needsFont = entries.contains {
+      $0.subtype == PDFName("FreeText") || $0.subtype == PDFName("Stamp")
+    }
+    var fontID: PDFObjectID?
+    if needsFont {
+      if let existing = AnnotationSupport.helveticaFontID(in: graph) {
+        fontID = existing
+      } else {
+        fontID = PDFObjectID(next)
+        graph.objects[PDFObjectID(next)] = .dictionary(
+          AnnotationSupport.helveticaFontDictionary())
+        next += 1
+      }
+    }
     var objectsByID = existingParents
     var allocated: [(entry: CommentExchangeEntry, annotationID: PDFObjectID)] = []
     for (index, entry) in entries.enumerated() {
@@ -907,21 +1139,51 @@ public struct ImportCommentsCommand: PDFEditCommand, Sendable {
         dictionary[PDFName("Name")] = .name(entry.iconName ?? PDFName("Comment"))
         dictionary[PDFName("Open")] = .boolean(false)
       }
+      if entry.subtype == PDFName("Line"), let start = entry.lineStart,
+        let end = entry.lineEnd
+      {
+        dictionary[PDFName("L")] = .array([start[0], start[1], end[0], end[1]].map { .real($0) })
+        dictionary[PDFName("LE")] = .array([
+          .name(Self.lineEnding(entry.startEnding).pdfName),
+          .name(Self.lineEnding(entry.endEnding).pdfName),
+        ])
+        dictionary[PDFName("IC")] = .array(color.map { .real($0) })
+        dictionary[PDFName("BS")] = .dictionary([
+          PDFName("Type"): .name(PDFName("Border")), PDFName("W"): .real(width),
+        ])
+      }
+      if entry.subtype == PDFName("FreeText"), let fontID {
+        let size = CommentExchange.freeTextFontSize(entry.defaultAppearance)
+        dictionary[PDFName("DA")] = .string(
+          Data(
+            AnnotationSupport.defaultAppearanceString(fontSize: size, color: color).utf8))
+        dictionary[PDFName("DR")] = .dictionary([
+          PDFName("Font"): .dictionary([PDFName("Helvetica"): .reference(fontID)])
+        ])
+        dictionary[PDFName("Q")] = .integer(0)
+      }
+      if entry.subtype == PDFName("Stamp") {
+        dictionary[PDFName("Name")] = .name(entry.iconName ?? PDFName("Draft"))
+        dictionary[PDFName("BS")] = .dictionary([
+          PDFName("Type"): .name(PDFName("Border")), PDFName("W"): .real(width),
+        ])
+      }
       graph.objects[pair.annotationID] = .dictionary(dictionary)
       graph.objects[appearanceID] = .stream(
         appearance(
           for: entry, color: color, opacity: opacity, width: width,
-          quads: entry.quadPoints ?? CommentExchange.quadPoints(from: entry.rect)))
+          quads: entry.quadPoints ?? CommentExchange.quadPoints(from: entry.rect),
+          fontID: fontID))
       try AnnotationSupport.appendToAnnots(
         .reference(pair.annotationID), pageID: pageIDs[entry.pageIndex], in: &graph)
     }
-    graph.trailer[PDFName("Size")] = .integer(Int64(base + entries.count * 2 + 1))
+    graph.trailer[PDFName("Size")] = .integer(Int64(next))
     return graph
   }
 
   private func appearance(
     for entry: CommentExchangeEntry, color: [Double], opacity: Double, width: Double,
-    quads: [Double]
+    quads: [Double], fontID: PDFObjectID?
   ) -> PDFStream {
     switch entry.subtype {
     case PDFName("Text"):
@@ -951,6 +1213,36 @@ public struct ImportCommentsCommand: PDFEditCommand, Sendable {
       return AddInkCommand.appearance(
         strokes: entry.inkStrokes ?? [], rect: entry.rect, color: color,
         borderWidth: width, opacity: opacity)
+    case PDFName("FreeText"):
+      guard let fontID, let text = entry.contents else {
+        return AddHighlightCommand.appearance(
+          quads: quads, rect: entry.rect, color: color, opacity: opacity)
+      }
+      return AddFreeTextCommand.appearance(
+        rect: entry.rect, text: text,
+        fontSize: CommentExchange.freeTextFontSize(entry.defaultAppearance),
+        textColor: color, fillColor: nil, borderColor: nil, borderWidth: 0,
+        fontID: fontID)
+    case PDFName("Stamp"):
+      guard let fontID else {
+        return AddHighlightCommand.appearance(
+          quads: quads, rect: entry.rect, color: color, opacity: opacity)
+      }
+      return AddStampCommand.appearance(
+        rect: entry.rect, label: CommentExchange.stampLabel(entry.iconName),
+        color: color, borderWidth: width, fontID: fontID)
+    case PDFName("Line"):
+      guard let start = entry.lineStart, let end = entry.lineEnd else {
+        return AddHighlightCommand.appearance(
+          quads: quads, rect: entry.rect, color: color, opacity: opacity)
+      }
+      let geometry = AddLineCommand.geometry(
+        from: start, to: end, borderWidth: width,
+        startEnding: Self.lineEnding(entry.startEnding),
+        endEnding: Self.lineEnding(entry.endEnding))
+      return AddLineCommand.appearance(
+        from: start, to: end, rect: geometry.rect, startArrow: geometry.startArrow,
+        endArrow: geometry.endArrow, color: color, borderWidth: width, opacity: opacity)
     default:
       return AddHighlightCommand.appearance(
         quads: quads, rect: entry.rect, color: color, opacity: opacity)
@@ -1001,6 +1293,8 @@ public struct ImportCommentsCommand: PDFEditCommand, Sendable {
       return [1, 0.84, 0]
     case PDFName("Underline"), PDFName("StrikeOut"):
       return [1, 0, 0]
+    case PDFName("Stamp"):
+      return [0.8, 0, 0]
     default:
       return [0, 0, 0]
     }
@@ -1008,6 +1302,10 @@ public struct ImportCommentsCommand: PDFEditCommand, Sendable {
 
   private func defaultOpacity(for subtype: PDFName) -> Double {
     subtype == PDFName("Highlight") ? 0.5 : 1
+  }
+
+  private static func lineEnding(_ name: PDFName?) -> LineEnding {
+    name == PDFName("ClosedArrow") ? .closedArrow : .none
   }
 }
 
@@ -1021,11 +1319,14 @@ public struct UpdateCommentCommand: PDFEditCommand, Equatable, Sendable {
   public let state: PDFName?
   public let stateModel: PDFName?
   public let identity: String?
+  public let color: [Double]?
+  public let defaultAppearance: String?
 
   public init(
     pageID: PDFObjectID, annotationIndex: Int, contents: String? = nil,
     author: String? = nil, modified: String? = nil, subject: String? = nil,
-    state: PDFName? = nil, stateModel: PDFName? = nil, identity: String? = nil
+    state: PDFName? = nil, stateModel: PDFName? = nil, identity: String? = nil,
+    color: [Double]? = nil, defaultAppearance: String? = nil
   ) {
     self.pageID = pageID
     self.annotationIndex = annotationIndex
@@ -1036,6 +1337,8 @@ public struct UpdateCommentCommand: PDFEditCommand, Equatable, Sendable {
     self.state = state
     self.stateModel = stateModel
     self.identity = identity
+    self.color = color
+    self.defaultAppearance = defaultAppearance
   }
 
   public var name: String { "Update Comment" }
@@ -1054,6 +1357,16 @@ public struct UpdateCommentCommand: PDFEditCommand, Equatable, Sendable {
       guard !state.bytes.isEmpty else {
         throw PDFError(.malformed, "Review state is empty")
       }
+    }
+    if let color {
+      guard color.count == 3, color.allSatisfy({ $0.isFinite && $0 >= 0 && $0 <= 1 }) else {
+        throw PDFError(.malformed, "Comment text color is invalid")
+      }
+    }
+    if Annotation.subtype(of: entry.dictionary) == PDFName("FreeText"),
+      let contents, AnnotationSupport.escapedLiteral(contents) == nil
+    {
+      throw PDFError(.unsupported, "Free text is outside the supported character set")
     }
   }
 
@@ -1078,8 +1391,83 @@ public struct UpdateCommentCommand: PDFEditCommand, Equatable, Sendable {
     if let identity, !identity.isEmpty, dictionary[PDFName("NM")] == nil {
       dictionary[PDFName("NM")] = .string(AnnotationText.encode(identity))
     }
+    if Annotation.subtype(of: dictionary) == PDFName("FreeText") {
+      let existingAppearance = Self.text(dictionary[PDFName("DA")])
+      let appearanceString =
+        defaultAppearance ?? existingAppearance
+        ?? AnnotationSupport.defaultAppearanceString(fontSize: 12, color: color ?? [0, 0, 0])
+      let textColor = color ?? CommentExchange.freeTextColor(from: appearanceString) ?? [0, 0, 0]
+      let fontSize = CommentExchange.freeTextFontSize(appearanceString)
+      let text =
+        contents ?? Self.text(dictionary[PDFName("Contents")]) ?? ""
+      let fontID = try ensureHelveticaFont(in: &graph, dictionary: &dictionary)
+      let appearanceID = try ensureAppearance(in: &graph, dictionary: &dictionary)
+      if let color {
+        dictionary[PDFName("C")] = .array(color.map { .real($0) })
+      }
+      graph.objects[appearanceID] = .stream(
+        AddFreeTextCommand.appearance(
+          rect: Self.rect(dictionary[PDFName("Rect")]) ?? [0, 0, 1, 1],
+          text: text, fontSize: fontSize, textColor: textColor, fillColor: nil,
+          borderColor: nil, borderWidth: 0, fontID: fontID))
+      dictionary[PDFName("DA")] = .string(
+        Data(
+          AnnotationSupport.defaultAppearanceString(fontSize: fontSize, color: textColor).utf8))
+      dictionary[PDFName("DR")] = .dictionary([
+        PDFName("Font"): .dictionary([PDFName("Helvetica"): .reference(fontID)])
+      ])
+    }
     try AnnotationSupport.setAnnotation(dictionary, entry: entry, pageID: pageID, in: &graph)
     return graph
+  }
+
+  private static func text(_ value: PDFValue?) -> String? {
+    guard case .string(let data)? = value else { return nil }
+    return AnnotationText.decode(data)
+  }
+
+  private static func rect(_ value: PDFValue?) -> [Double]? {
+    guard case .array(let values)? = value, values.count == 4 else { return nil }
+    let numbers = values.compactMap { value -> Double? in
+      switch value {
+      case .integer(let raw): return Double(raw)
+      case .real(let raw): return raw
+      default: return nil
+      }
+    }
+    return numbers.count == 4 ? numbers : nil
+  }
+
+  private func ensureHelveticaFont(
+    in graph: inout PDFGraph, dictionary: inout [PDFName: PDFValue]
+  ) throws -> PDFObjectID {
+    if case .dictionary(let resources)? = dictionary[PDFName("DR")],
+      case .dictionary(let fonts)? = resources[PDFName("Font")],
+      case .reference(let id)? = fonts[PDFName("Helvetica")],
+      graph.objects[id] != nil
+    {
+      return id
+    }
+    if let id = AnnotationSupport.helveticaFontID(in: graph) { return id }
+    let id = try AnnotationSupport.allocateOne(in: graph)
+    graph.objects[id] = .dictionary(AnnotationSupport.helveticaFontDictionary())
+    graph.trailer[PDFName("Size")] = .integer(Int64(id.number + 1))
+    return id
+  }
+
+  private func ensureAppearance(
+    in graph: inout PDFGraph, dictionary: inout [PDFName: PDFValue]
+  ) throws -> PDFObjectID {
+    if case .dictionary(let appearance)? = dictionary[PDFName("AP")],
+      case .reference(let id)? = appearance[PDFName("N")],
+      graph.objects[id] != nil
+    {
+      return id
+    }
+    let id = try AnnotationSupport.allocateOne(in: graph)
+    dictionary[PDFName("AP")] = .dictionary([PDFName("N"): .reference(id)])
+    graph.trailer[PDFName("Size")] = .integer(Int64(id.number + 1))
+    return id
   }
 
   private func applyText(

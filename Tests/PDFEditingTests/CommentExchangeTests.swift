@@ -176,10 +176,139 @@ struct CommentExchangeTests {
     #expect(plan.commands.count == 1)
   }
 
+  @Test func freeTextAndStampRoundTripWithAppearances() throws {
+    let parsed = try PDFParser.parse(PDFFixtures.threePages())
+    let graph = try PDFEditingEngine.commit(
+      PDFTransaction([
+        AddFreeTextCommand(
+          pageID: parsed.pageIDs[0], rect: [30, 60, 240, 110], text: "Boxed text",
+          fontSize: 14, textColor: [0.2, 0.1, 0.6], modified: "D:20261012120000Z"),
+        AddStampCommand(
+          pageID: parsed.pageIDs[1], rect: [40, 50, 200, 110], stampName: .draft,
+          contents: "Review stamp", modified: "D:20261012120500Z"),
+      ]), to: parsed.graph)
+    let comments = CommentList.comments(in: graph, pageIDs: parsed.pageIDs)
+    #expect(comments.count == 2)
+    let exported = try CommentExchange.export(comments: comments)
+    let portable = try CommentExchange.parse(exported.data)
+    #expect(portable.entries.count == 2)
+    let freeText = try #require(
+      portable.entries.first { $0.subtype == PDFName("FreeText") })
+    #expect(freeText.contents == "Boxed text")
+    #expect(freeText.defaultAppearance?.contains("Tf") == true)
+    let stamp = try #require(portable.entries.first { $0.subtype == PDFName("Stamp") })
+    #expect(stamp.iconName == PDFName("Draft"))
+    #expect(stamp.contents == "Review stamp")
+
+    let fresh = try PDFParser.parse(PDFFixtures.threePages())
+    let plan = try CommentExchange.plan(
+      entries: portable.entries, issues: portable.issues, into: fresh.graph,
+      pageIDs: fresh.pageIDs)
+    #expect(plan.added == 2)
+    #expect(plan.skipped.isEmpty)
+    let imported = try PDFEditingEngine.commit(
+      PDFTransaction(plan.commands), to: fresh.graph)
+    let reopened = try PDFParser.parse(try PDFWriter.write(imported))
+    let importedComments = CommentList.comments(
+      in: reopened.graph, pageIDs: reopened.pageIDs)
+    #expect(importedComments.count == 2)
+    let importedFreeText = try #require(
+      importedComments.first { $0.subtype == PDFName("FreeText") })
+    #expect(importedFreeText.contents == "Boxed text")
+    #expect(
+      importedFreeText.annotation.dictionary[PDFName("DA")] != nil)
+    #expect(importedFreeText.annotation.dictionary[PDFName("AP")] != nil)
+    let importedStamp = try #require(
+      importedComments.first { $0.subtype == PDFName("Stamp") })
+    #expect(importedStamp.annotation.iconName == PDFName("Draft"))
+    #expect(importedStamp.annotation.dictionary[PDFName("AP")] != nil)
+
+    let repeatPlan = try CommentExchange.plan(
+      entries: portable.entries, issues: portable.issues, into: imported,
+      pageIDs: fresh.pageIDs)
+    #expect(repeatPlan.added == 0)
+    #expect(repeatPlan.unchanged == 2)
+    #expect(repeatPlan.commands.isEmpty)
+
+    let revised = portable.entries.map { entry -> CommentExchangeEntry in
+      guard entry.subtype == PDFName("FreeText") else { return entry }
+      return CommentExchangeEntry(
+        identity: entry.identity, pageIndex: entry.pageIndex, subtype: entry.subtype,
+        rect: entry.rect, quadPoints: entry.quadPoints, contents: "Revised box",
+        author: entry.author, modified: entry.modified, creationDate: entry.creationDate,
+        subject: entry.subject, state: entry.state, stateModel: entry.stateModel,
+        color: entry.color, opacity: entry.opacity, flags: entry.flags,
+        iconName: entry.iconName, inReplyTo: entry.inReplyTo,
+        borderWidth: entry.borderWidth, inkStrokes: entry.inkStrokes,
+        defaultAppearance: entry.defaultAppearance)
+    }
+    let updatePlan = try CommentExchange.plan(
+      entries: revised, into: imported, pageIDs: fresh.pageIDs)
+    #expect(updatePlan.updated == 1)
+    #expect(updatePlan.unchanged == 1)
+    let updated = try PDFEditingEngine.commit(
+      PDFTransaction(updatePlan.commands), to: imported)
+    let revisedFreeText = try #require(
+      CommentList.comments(in: updated, pageIDs: fresh.pageIDs).first {
+        $0.subtype == PDFName("FreeText")
+      })
+    #expect(revisedFreeText.contents == "Revised box")
+    guard case .dictionary(let ap)? = revisedFreeText.annotation.dictionary[PDFName("AP")],
+      case .reference(let apID)? = ap[PDFName("N")],
+      case .stream(let stream)? = updated.objects[apID]
+    else {
+      Issue.record("Free-text appearance was not regenerated")
+      return
+    }
+    #expect(String(decoding: stream.bytes, as: UTF8.self).contains("Revised box"))
+  }
+
+  @Test func lineAnnotationRoundTripsEndpointsAndArrow() throws {
+    let parsed = try PDFParser.parse(PDFFixtures.threePages())
+    let graph = try PDFEditingEngine.commit(
+      PDFTransaction([
+        AddLineCommand(
+          pageID: parsed.pageIDs[0], from: [20, 20], to: [120, 90],
+          startEnding: .none, endEnding: .closedArrow, color: [0, 0, 0.8],
+          borderWidth: 2, contents: "Review line",
+          modified: "D:20261012121000Z")
+      ]), to: parsed.graph)
+    let comments = CommentList.comments(in: graph, pageIDs: parsed.pageIDs)
+    let exported = try CommentExchange.export(comments: comments)
+    let portable = try CommentExchange.parse(exported.data)
+    let line = try #require(portable.entries.first)
+    #expect(line.subtype == PDFName("Line"))
+    #expect(line.lineStart == [20, 20])
+    #expect(line.lineEnd == [120, 90])
+    #expect(line.startEnding == PDFName("None"))
+    #expect(line.endEnding == PDFName("ClosedArrow"))
+
+    let fresh = try PDFParser.parse(PDFFixtures.threePages())
+    let plan = try CommentExchange.plan(
+      entries: portable.entries, issues: portable.issues, into: fresh.graph,
+      pageIDs: fresh.pageIDs)
+    #expect(plan.added == 1)
+    #expect(plan.skipped.isEmpty)
+    let imported = try PDFEditingEngine.commit(
+      PDFTransaction(plan.commands), to: fresh.graph)
+    let reopened = try PDFParser.parse(try PDFWriter.write(imported))
+    let importedComments = CommentList.comments(
+      in: reopened.graph, pageIDs: reopened.pageIDs)
+    let importedLine = try #require(importedComments.first)
+    #expect(importedLine.subtype == PDFName("Line"))
+    #expect(importedLine.contents == "Review line")
+    #expect(importedLine.annotation.dictionary[PDFName("L")] != nil)
+    #expect(importedLine.annotation.dictionary[PDFName("AP")] != nil)
+    let repeatPlan = try CommentExchange.plan(
+      entries: portable.entries, into: imported, pageIDs: fresh.pageIDs)
+    #expect(repeatPlan.added == 0)
+    #expect(repeatPlan.unchanged == 1)
+  }
+
   @Test func unsupportedAndMalformedCommentsAreReported() throws {
     let entry = CommentExchangeEntry(
-      identity: "stamp-1", pageIndex: 0, subtype: PDFName("Stamp"),
-      rect: [0, 0, 20, 20], contents: "Stamped")
+      identity: "polygon-1", pageIndex: 0, subtype: PDFName("Polygon"),
+      rect: [0, 0, 20, 20], contents: "Polygon")
     let parsed = try PDFParser.parse(PDFFixtures.onePage())
     let plan = try CommentExchange.plan(
       entries: [entry], into: parsed.graph, pageIDs: parsed.pageIDs)

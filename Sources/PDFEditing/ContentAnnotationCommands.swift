@@ -89,6 +89,8 @@ public struct AddFreeTextCommand: PDFEditCommand, Equatable, Sendable {
       PDFName("Font"): .dictionary([PDFName("Helvetica"): .reference(fontID)])
     ])
     dictionary[PDFName("Q")] = .integer(0)
+    dictionary[PDFName("NM")] = .string(
+      AnnotationText.encode("spdf-\(allocation.annotation.number)"))
     graph.objects[allocation.annotation] = .dictionary(dictionary)
     graph.objects[allocation.appearance] = .stream(
       Self.appearance(
@@ -257,6 +259,8 @@ public struct AddStampCommand: PDFEditCommand, Equatable, Sendable {
       PDFName("Type"): .name(PDFName("Border")),
       PDFName("W"): .real(borderWidth),
     ])
+    dictionary[PDFName("NM")] = .string(
+      AnnotationText.encode("spdf-\(allocation.annotation.number)"))
     graph.objects[allocation.annotation] = .dictionary(dictionary)
     graph.objects[allocation.appearance] = .stream(
       Self.appearance(
