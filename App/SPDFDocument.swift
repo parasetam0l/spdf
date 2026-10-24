@@ -6414,6 +6414,9 @@ final class SPDFDocument: NSDocument {
     combineWindow?.close()
     combineWindow = nil
     combineModel = nil
+    attachmentsWindow?.close()
+    attachmentsWindow = nil
+    attachmentsModel = nil
     signatureWindow?.close()
     signatureWindow = nil
     for window in tableReviewWindows { window.close() }
