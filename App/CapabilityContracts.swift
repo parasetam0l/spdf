@@ -7,6 +7,12 @@ import Foundation
 /// real menu bar and verifies these entries rather than trusting a separate
 /// hand-written list.
 struct CapabilityContract: Sendable, Equatable {
+  enum ExecutionEvidence: String, Sendable {
+    case nativeService = "native-service"
+    case coreSuite = "core-suite"
+    case menuWindow = "menu-or-window"
+  }
+
   enum Group: String, Sendable, CaseIterable {
     case create
     case export
@@ -100,11 +106,14 @@ struct CapabilityContract: Sendable, Equatable {
   let limits: String
   let output: String
   let evidence: String
+  let execution: ExecutionEvidence
+  let executionEvidence: String
 
   init(
     title: String, menuPath: String, selector: String, group: Group,
     service: String? = nil, limits: String? = nil, output: String? = nil,
-    evidence: String? = nil
+    evidence: String? = nil, execution: ExecutionEvidence = .menuWindow,
+    executionEvidence: String = "Menu/window route exercised; operation awaits user input."
   ) {
     self.id = "\(menuPath)|\(selector)"
     self.title = title
@@ -115,6 +124,8 @@ struct CapabilityContract: Sendable, Equatable {
     self.limits = limits ?? group.limits
     self.output = output ?? group.output
     self.evidence = evidence ?? group.evidence
+    self.execution = execution
+    self.executionEvidence = executionEvidence
   }
 }
 
@@ -128,9 +139,13 @@ enum CapabilityContractAudit {
     let issues: [String]
 
     var text: String {
+      let native = contracts.filter { $0.execution == .nativeService }.count
+      let core = contracts.filter { $0.execution == .coreSuite }.count
+      let menuOnly = contracts.filter { $0.execution == .menuWindow }.count
       var lines = [
         "sPDF Editor capability contracts",
         "Tools: \(contracts.count)",
+        "Execution evidence: native-service \(native), core-suite \(core), menu/window \(menuOnly)",
         issues.isEmpty ? "Status: PASS" : "Status: FAIL",
         "",
       ]
@@ -141,6 +156,7 @@ enum CapabilityContractAudit {
         lines.append("  limits: \(contract.limits)")
         lines.append("  output: \(contract.output)")
         lines.append("  evidence: \(contract.evidence)")
+        lines.append("  execution: \(contract.execution.rawValue) — \(contract.executionEvidence)")
         lines.append("")
       }
       if !issues.isEmpty {
@@ -254,6 +270,43 @@ enum CapabilityContractAudit {
     "createArchivalCopy:": "Archival derivative with its declared profile limits.",
   ]
 
+  /// Selectors whose normal document/viewer service entry point is exercised
+  /// by the native smoke or a direct service-level test.
+  private static let nativeSelectors: Set<String> = [
+    "selectTool:", "textEditTool:", "addTextTool:", "pageTool:", "imageEditTool:",
+    "toggleInkTool:", "placeGraphicalSignature:", "manageAttachments:", "manageBookmarks:",
+    "exportText:", "exportPageImages:", "exportHTML:", "exportDOCX:", "exportTables:",
+    "exportImages:", "exportPrintPDF:", "exportAttachments:", "saveSanitizedCopy:",
+    "exportEncryptedCopy:", "lockDocument:", "unlockDocument:", "signDocument:",
+    "optimizeDocument:", "compareWithDocument:", "splitDocument:", "combineDocuments:",
+    "importPages:", "rotateLeft:", "rotateRight:", "movePageUp:", "movePageDown:",
+    "insertBlankPage:", "deletePage:", "organizePages:", "addPageMark:", "flattenForm:",
+    "renameFormField:", "deleteFormField:", "duplicateFormField:", "alignFormFields:",
+    "editFormTabOrder:", "copyAsRichText:", "showFind:", "editSelectedText:",
+    "reflowParagraph:", "redactSelection:", "selectNextPageObject:",
+    "selectPreviousPageObject:", "highlightSelection:", "exportReviewSummary:",
+    "showCompatibilityReport:", "exportFormValues:", "importFormValues:",
+    "addBookmark:", "editBookmark:", "removeBookmark:", "exportOutline:",
+  ]
+
+  /// Selectors whose operation is covered by an owned-core suite, while the
+  /// document dialog itself is not driven end-to-end by a native test.
+  private static let coreSelectors: Set<String> = [
+    "noteSelection:", "underlineSelection:", "strikeoutSelection:", "flattenAnnotations:",
+    "runOCR:", "runOCRAllPages:", "findNext:", "findPrevious:", "togglePageTextBold:",
+    "togglePageTextItalic:", "createPDFFromImages:", "createPDFFromText:",
+    "documentMetadata:",
+    "addTextField:", "addCheckbox:", "addRadioGroup:", "addChoiceField:", "addPushButton:",
+    "addSignatureField:", "editFormFieldProperties:", "recalculateForm:",
+    "distributeFormFields:", "cropPages:", "removePageMark:", "repairDocument:", "reviewTables:",
+    "previewDOCX:", "convertColors:", "createArchivalCopy:",
+    "exportComments:", "importComments:",
+  ]
+
+  private static let menuSelectors: Set<String> = [
+    "printDocument:",
+  ]
+
   static func run(menu: NSMenu?) -> Report {
     var contracts: [CapabilityContract] = []
     var issues: [String] = []
@@ -268,6 +321,15 @@ enum CapabilityContractAudit {
       }
       if contract.limits.isEmpty || contract.output.isEmpty || contract.evidence.isEmpty {
         issues.append("Capability contract lacks limits/output/evidence: \(contract.menuPath)")
+      }
+      let native = nativeSelectors.contains(contract.selector)
+      let core = coreSelectors.contains(contract.selector)
+      let menuOnly = menuSelectors.contains(contract.selector)
+      let classifications = [native, core, menuOnly].filter { $0 }.count
+      if classifications == 0 {
+        issues.append("Capability contract has no execution evidence: \(contract.menuPath)")
+      } else if classifications > 1 {
+        issues.append("Capability contract has conflicting execution evidence: \(contract.menuPath)")
       }
     }
     for selector in specificSelectors {
@@ -286,6 +348,29 @@ enum CapabilityContractAudit {
       }
     }
     return Report(contracts: contracts.sorted { $0.menuPath < $1.menuPath }, issues: issues)
+  }
+
+  static func execution(for selector: String)
+    -> (CapabilityContract.ExecutionEvidence?, String)
+  {
+    let native = nativeSelectors.contains(selector)
+    let core = coreSelectors.contains(selector)
+    let menu = menuSelectors.contains(selector)
+    let count = [native, core, menu].filter { $0 }.count
+    guard count == 1 else { return (nil, "Unclassified") }
+    if native {
+      return (
+        .nativeService,
+        "Native smoke or a direct service-level test invokes the document/viewer entry point."
+      )
+    }
+    if core {
+      return (
+        .coreSuite,
+        "Owned-core suite covers the operation and limits; the document dialog is not driven end-to-end."
+      )
+    }
+    return (.menuWindow, "Menu/window route exercised; the full operation awaits user input.")
   }
 
   private static func walk(
@@ -313,13 +398,16 @@ enum CapabilityContractAudit {
         continue
       }
       let group = group(for: path + [item.title])
+      let execution = execution(for: selector)
       contracts.append(
         CapabilityContract(
           title: item.title, menuPath: itemPath.joined(separator: " → "),
           selector: selector, group: group,
           service: specificServices[selector],
           limits: specificLimits[selector],
-          output: specificOutputs[selector]))
+          output: specificOutputs[selector],
+          execution: execution.0 ?? .menuWindow,
+          executionEvidence: execution.1))
     }
   }
 

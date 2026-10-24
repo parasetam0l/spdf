@@ -1925,9 +1925,72 @@ final class SPDFDocument: NSDocument {
     return FormInventory.orphanedWidgets(in: graph, pageIDs: editSession.pageIDs).count
   }
 
+  enum FormValueFormat {
+    case json
+    case xfdf
+    case fdf
+
+    var fileExtension: String {
+      switch self {
+      case .json: return "json"
+      case .xfdf: return "xfdf"
+      case .fdf: return "fdf"
+      }
+    }
+  }
+
+  /// Testable service output for Form → Export Form Values.
+  func formValuesData(format: FormValueFormat) throws -> Data {
+    guard let graph = editSession.currentGraph else {
+      throw PDFError(.malformed, "There is no document to export")
+    }
+    switch format {
+    case .json:
+      return try FormValues.export(in: graph, pageIDs: editSession.pageIDs)
+    case .xfdf:
+      return FormDataExchange.export(
+        try FormValues.values(in: graph, pageIDs: editSession.pageIDs), format: .xfdf)
+    case .fdf:
+      return FormDataExchange.export(
+        try FormValues.values(in: graph, pageIDs: editSession.pageIDs), format: .fdf)
+    }
+  }
+
+  /// Testable service entry point for Form → Import Form Values.
+  @discardableResult
+  func importFormValues(data: Data, format: FormValueFormat) throws
+    -> (imported: Int, skipped: [String], ambiguous: [String])
+  {
+    guard canEditContent, let graph = editSession.currentGraph else {
+      throw PDFError(.unsupported, "This document cannot accept form values")
+    }
+    let (commands, skipped, ambiguous): ([any PDFEditCommand], [String], [String])
+    switch format {
+    case .xfdf:
+      let values = try FormDataExchange.parse(data, format: .xfdf)
+      (commands, skipped, ambiguous) = try FormDataExchange.commands(
+        forRawValues: values, in: graph, pageIDs: editSession.pageIDs)
+    case .fdf:
+      let values = try FormDataExchange.parse(data, format: .fdf)
+      (commands, skipped, ambiguous) = try FormDataExchange.commands(
+        forRawValues: values, in: graph, pageIDs: editSession.pageIDs)
+    case .json:
+      let values = try FormValues.parse(data)
+      (commands, skipped, ambiguous) = try FormValues.commands(
+        for: values, in: graph, pageIDs: editSession.pageIDs)
+    }
+    guard !commands.isEmpty else {
+      throw PDFError(.malformed, "No importable values matched this document")
+    }
+    try editSession.apply(PDFTransaction(commands))
+    noteUserEdit()
+    refreshViewer(preservingPage: viewer?.pageNumber ?? 1)
+    return (commands.count, skipped, ambiguous)
+  }
+
   /// P24-022/FRM-03: export supported field values as JSON, FDF or XFDF.
   func exportFormValues() {
-    guard let graph = editSession.currentGraph else { return }
+    guard editSession.currentGraph != nil else { return }
     let formatPopup = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 200, height: 24))
     formatPopup.addItems(withTitles: ["JSON (sPDF)", "XFDF (Acrobat)", "FDF (Acrobat)"])
     let dialog = NSAlert()
@@ -1939,26 +2002,15 @@ final class SPDFDocument: NSDocument {
     dialog.addButton(withTitle: "Cancel")
     guard dialog.runModal() == .alertFirstButtonReturn else { return }
     let formatIndex = max(0, formatPopup.indexOfSelectedItem)
+    let format: FormValueFormat = formatIndex == 1 ? .xfdf : (formatIndex == 2 ? .fdf : .json)
     let data: Data
-    let fileExtension: String
     do {
-      switch formatIndex {
-      case 1:
-        data = FormDataExchange.export(
-          try FormValues.values(in: graph, pageIDs: editSession.pageIDs), format: .xfdf)
-        fileExtension = "xfdf"
-      case 2:
-        data = FormDataExchange.export(
-          try FormValues.values(in: graph, pageIDs: editSession.pageIDs), format: .fdf)
-        fileExtension = "fdf"
-      default:
-        data = try FormValues.export(in: graph, pageIDs: editSession.pageIDs)
-        fileExtension = "json"
-      }
+      data = try formValuesData(format: format)
     } catch {
       presentError(error)
       return
     }
+    let fileExtension = format.fileExtension
     let panel = NSSavePanel()
     panel.nameFieldStringValue = "form-values.\(fileExtension)"
     panel.allowedContentTypes =
@@ -3521,11 +3573,10 @@ final class SPDFDocument: NSDocument {
       pageIDs: editSession.pageIDs, in: graph, to: url, mode: mode)
   }
 
-  /// P37-001/P37-007/P37-019: a read-only compatibility report (version and
-  /// extensions, archival inventory, print preflight). Nothing is written and
-  /// no conformance is claimed.
-  func showCompatibilityReport() {
-    guard let graph = editSession.currentGraph, !editSession.pageIDs.isEmpty else { return }
+  /// P37-001/P37-007/P37-019: the read-only compatibility report text. The
+  /// menu path displays this exact service output and writes nothing.
+  func compatibilityReportText() -> String? {
+    guard let graph = editSession.currentGraph, !editSession.pageIDs.isEmpty else { return nil }
     let audit = PDFVersionAudit.audit(in: graph)
     let archival = ArchivalInventory.inventory(graph, pageIDs: editSession.pageIDs)
     let preflight = PrintPreflightInventory.inventory(graph, pageIDs: editSession.pageIDs)
@@ -3558,11 +3609,17 @@ final class SPDFDocument: NSDocument {
         "  Optional content: \(facts.optionalContent.groups.count) group\(facts.optionalContent.groups.count == 1 ? "" : "s")"
       )
     }
-    let report = [
+    return [
       inventoryLines.joined(separator: "\n"), "", audit.report(), "", archival.report(), "",
       preflight.report(), "", checks?.report() ?? "Print preflight checks unavailable.", "",
       accessibility.report(),
     ].joined(separator: "\n")
+  }
+
+  /// P37-001/P37-007/P37-019: display the read-only report. Nothing is written
+  /// and no conformance is claimed.
+  func showCompatibilityReport() {
+    guard let report = compatibilityReportText() else { return }
     let alert = NSAlert()
     alert.messageText = "Compatibility Report"
     alert.informativeText =
@@ -4326,18 +4383,7 @@ final class SPDFDocument: NSDocument {
       NSSound.beep()
       return
     }
-    do {
-      try editSession.apply(
-        PDFTransaction([
-          EditBookmarkCommand(
-            objectID: entry.id, title: title, pageID: editSession.pageIDs[page - 1])
-        ]))
-    } catch {
-      presentError(error)
-      return
-    }
-    noteUserEdit()
-    refreshViewer(preservingPage: viewer?.pageNumber ?? 1)
+    _ = editBookmark(objectID: entry.id, title: title, pageIndex: page - 1)
   }
 
   private func moveBookmark(_ entry: BookmarkManagerEntry, direction: BookmarkMoveDirection) {
@@ -4361,7 +4407,7 @@ final class SPDFDocument: NSDocument {
     alert.addButton(withTitle: "Remove")
     alert.addButton(withTitle: "Cancel")
     guard alert.runModal() == .alertFirstButtonReturn else { return }
-    applyBookmarkCommand(RemoveBookmarkCommand(objectID: entry.id))
+    _ = removeBookmark(objectID: entry.id)
   }
 
   private func applyBookmarkCommand(_ command: any PDFEditCommand) {
@@ -4374,6 +4420,60 @@ final class SPDFDocument: NSDocument {
     }
     noteUserEdit()
     refreshViewer(preservingPage: viewer?.pageNumber ?? 1)
+  }
+
+  /// Testable bookmark service entry points. The menu dialogs use these and
+  /// the native smoke exercises the same calls.
+  @discardableResult
+  func addBookmark(title: String, pageIndex: Int) -> Bool {
+    guard canEditContent, editSession.pageIDs.indices.contains(pageIndex) else { return false }
+    do {
+      try editSession.apply(
+        PDFTransaction([
+          AddBookmarkCommand(
+            title: title, pageID: editSession.pageIDs[pageIndex])
+        ]))
+    } catch {
+      presentError(error)
+      return false
+    }
+    noteUserEdit()
+    refreshViewer(preservingPage: viewer?.pageNumber ?? 1)
+    return true
+  }
+
+  @discardableResult
+  func editBookmark(objectID: PDFObjectID, title: String, pageIndex: Int) -> Bool {
+    guard canEditContent, editSession.pageIDs.indices.contains(pageIndex) else { return false }
+    do {
+      try editSession.apply(
+        PDFTransaction([
+          EditBookmarkCommand(
+            objectID: objectID, title: title,
+            pageID: editSession.pageIDs[pageIndex])
+        ]))
+    } catch {
+      presentError(error)
+      return false
+    }
+    noteUserEdit()
+    refreshViewer(preservingPage: viewer?.pageNumber ?? 1)
+    return true
+  }
+
+  @discardableResult
+  func removeBookmark(objectID: PDFObjectID) -> Bool {
+    guard canEditContent else { return false }
+    do {
+      try editSession.apply(
+        PDFTransaction([RemoveBookmarkCommand(objectID: objectID)]))
+    } catch {
+      presentError(error)
+      return false
+    }
+    noteUserEdit()
+    refreshViewer(preservingPage: viewer?.pageNumber ?? 1)
+    return true
   }
 
   /// PAG-09: add a top-level bookmark at the current page.
@@ -4400,18 +4500,7 @@ final class SPDFDocument: NSDocument {
       NSSound.beep()
       return
     }
-    do {
-      try editSession.apply(
-        PDFTransaction([
-          AddBookmarkCommand(
-            title: title, pageID: editSession.pageIDs[viewer.pageNumber - 1])
-        ]))
-    } catch {
-      presentError(error)
-      return
-    }
-    noteUserEdit()
-    refreshViewer(preservingPage: viewer.pageNumber)
+    _ = addBookmark(title: title, pageIndex: viewer.pageNumber - 1)
   }
 
   /// PAG-09: remove one existing bookmark and its descendants.
@@ -4447,15 +4536,7 @@ final class SPDFDocument: NSDocument {
     alert.addButton(withTitle: "Cancel")
     guard alert.runModal() == .alertFirstButtonReturn else { return }
     let item = flat[max(0, popup.indexOfSelectedItem)]
-    do {
-      try editSession.apply(
-        PDFTransaction([RemoveBookmarkCommand(objectID: item.objectID)]))
-    } catch {
-      presentError(error)
-      return
-    }
-    noteUserEdit()
-    refreshViewer(preservingPage: viewer?.pageNumber ?? 1)
+    _ = removeBookmark(objectID: item.objectID)
   }
 
   /// PAG-09: edit the document information dictionary.
@@ -4770,47 +4851,28 @@ final class SPDFDocument: NSDocument {
     ]
     panel.allowsMultipleSelection = false
     panel.begin { [weak self] response in
-      guard response == .OK, let url = panel.url, let self,
-        self.canEditContent,
-        let graph = self.editSession.currentGraph
+      guard response == .OK, let url = panel.url, let self, self.canEditContent
       else { return }
       do {
         let data = try Data(contentsOf: url)
-        let (commands, skipped, ambiguous): (
-          [any PDFEditCommand], [String], [String]
-        )
+        let format: FormValueFormat
         switch url.pathExtension.lowercased() {
-        case "xfdf":
-          let values = try FormDataExchange.parse(data, format: .xfdf)
-          (commands, skipped, ambiguous) = try FormDataExchange.commands(
-            forRawValues: values, in: graph, pageIDs: self.editSession.pageIDs)
-        case "fdf":
-          let values = try FormDataExchange.parse(data, format: .fdf)
-          (commands, skipped, ambiguous) = try FormDataExchange.commands(
-            forRawValues: values, in: graph, pageIDs: self.editSession.pageIDs)
-        default:
-          let values = try FormValues.parse(data)
-          (commands, skipped, ambiguous) = try FormValues.commands(
-            for: values, in: graph, pageIDs: self.editSession.pageIDs)
+        case "xfdf": format = .xfdf
+        case "fdf": format = .fdf
+        default: format = .json
         }
-        guard !commands.isEmpty else {
-          self.presentError(PDFError(.malformed, "No importable values matched this document"))
-          return
-        }
-        try self.editSession.apply(PDFTransaction(commands))
-        self.noteUserEdit()
-        self.refreshViewer(preservingPage: self.viewer?.pageNumber ?? 1)
-        if !skipped.isEmpty || !ambiguous.isEmpty {
+        let result = try self.importFormValues(data: data, format: format)
+        if !result.skipped.isEmpty || !result.ambiguous.isEmpty {
           let alert = NSAlert()
           alert.messageText = "Some values need attention"
           var lines: [String] = []
-          if !skipped.isEmpty {
+          if !result.skipped.isEmpty {
             lines.append(
-              "Missing, read-only, or unsupported: \(skipped.joined(separator: ", "))")
+              "Missing, read-only, or unsupported: \(result.skipped.joined(separator: ", "))")
           }
-          if !ambiguous.isEmpty {
+          if !result.ambiguous.isEmpty {
             lines.append(
-              "Duplicate field names (first match used): \(ambiguous.joined(separator: ", "))")
+              "Duplicate field names (first match used): \(result.ambiguous.joined(separator: ", "))")
           }
           alert.informativeText = lines.joined(separator: "\n\n")
           alert.addButton(withTitle: "OK")
@@ -6109,17 +6171,24 @@ final class SPDFDocument: NSDocument {
     return editSession.pageIDs[index]
   }
 
+  /// P22-021: the local review summary text. The menu path writes this exact
+  /// service output; tests call the same entry point.
+  func reviewSummaryText() -> String? {
+    let comments = editSession.comments()
+    guard !comments.isEmpty else { return nil }
+    return CommentSummary.text(comments: comments)
+  }
+
   /// P22-021: write the local review summary. Nothing leaves the machine.
   func exportReviewSummary() {
-    let comments = editSession.comments()
-    guard !comments.isEmpty else { return }
+    guard let text = reviewSummaryText() else { return }
     let panel = NSSavePanel()
     panel.nameFieldStringValue = "review-summary.txt"
     panel.allowedContentTypes = [.plainText]
     panel.begin { [weak self] response in
       guard response == .OK, let url = panel.url, let self else { return }
       do {
-        try Data(CommentSummary.text(comments: comments).utf8).write(to: url, options: .atomic)
+        try Data(text.utf8).write(to: url, options: .atomic)
       } catch {
         self.presentError(error)
       }

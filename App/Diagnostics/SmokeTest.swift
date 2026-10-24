@@ -886,6 +886,27 @@
             contentsOf: attachmentDirectory.appendingPathComponent("notes.txt"), encoding: .utf8)
             == "Attachment payload one.\n"
         else { throw PDFError(.malformed, "Attachment extraction did not preserve bytes safely") }
+        guard !attachmentDocument.editSession.pageIDs.isEmpty,
+          attachmentDocument.addBookmark(title: "Smoke bookmark", pageIndex: 0),
+          let bookmarkGraph = attachmentDocument.editSession.currentGraph
+        else { throw PDFError(.malformed, "Bookmark service could not add a bookmark") }
+        let bookmarkItems = PDFOutlineInventory.items(
+          in: bookmarkGraph, pageIDs: attachmentDocument.editSession.pageIDs)
+        guard let bookmarkID = bookmarkItems.first?.objectID,
+          bookmarkItems.first?.title == "Smoke bookmark"
+        else { throw PDFError(.malformed, "Bookmark service did not publish its entry") }
+        let outlineURL = output.appendingPathComponent("outline.md")
+        try attachmentDocument.exportOutline(to: outlineURL)
+        guard
+          try String(contentsOf: outlineURL, encoding: .utf8).contains("Smoke bookmark"),
+          attachmentDocument.editBookmark(
+            objectID: bookmarkID, title: "Smoke bookmark 2", pageIndex: 0),
+          attachmentDocument.removeBookmark(objectID: bookmarkID),
+          let afterBookmarkGraph = attachmentDocument.editSession.currentGraph,
+          PDFOutlineInventory.items(
+            in: afterBookmarkGraph, pageIDs: attachmentDocument.editSession.pageIDs
+          ).isEmpty
+        else { throw PDFError(.malformed, "Bookmark edit/remove/export service failed") }
         attachmentDocument.manageAttachments()
         try await Task.sleep(for: .milliseconds(80))
         guard
@@ -1068,7 +1089,11 @@
           firstGraph, pageIDs: first.editSession.pageIDs)
         let preflightInventory = PrintPreflightInventory.inventory(
           firstGraph, pageIDs: first.editSession.pageIDs)
-        guard !versionAudit.declaresPDF20,
+        guard let compatibilityText = first.compatibilityReportText(),
+          compatibilityText.contains("not a conformance claim"),
+          compatibilityText.contains("No preflight profile is selected"),
+          compatibilityText.contains("Font embedding"),
+          !versionAudit.declaresPDF20,
           archivalInventory.report().contains("not a conformance claim"),
           archivalInventory.findings.contains { $0.rule == "Font embedding" },
           !preflightInventory.pages.isEmpty,
@@ -1458,7 +1483,8 @@
         // Review summary, annotation move/delete, and undo back to baseline.
         let summary = CommentSummary.text(comments: comments)
         guard summary.contains("Comments: 5"), summary.contains("Page 1 · Highlight"),
-          summary.contains("Smoke review")
+          summary.contains("Smoke review"),
+          first.reviewSummaryText() == summary
         else { throw PDFError(.malformed, "Review summary formatting failed") }
         try Data(summary.utf8).write(
           to: output.appendingPathComponent("review-summary.txt"), options: .atomic)
@@ -2242,6 +2268,13 @@
         }
         checkpoint("forms sidebar render passed")
         formViewer.showPages()
+        let formValuesXFDF = try formDocument.formValuesData(format: .xfdf)
+        let formValuesText = String(decoding: formValuesXFDF, as: UTF8.self)
+        guard formValuesText.contains("<xfdf"), formValuesText.contains("name"),
+          formValuesText.contains("value")
+        else { throw PDFError(.malformed, "Form value export service failed") }
+        try formValuesXFDF.write(
+          to: output.appendingPathComponent("form-values.xfdf"), options: .atomic)
         formDocument.resetForm()
         let resetGraph = try PDFParser.parse(
           try formDocument.data(ofType: "com.adobe.pdf")
@@ -2276,6 +2309,14 @@
           try formDocument.data(ofType: "com.adobe.pdf") == formBaseline
         else { throw PDFError(.malformed, "Form edits did not undo to the baseline bytes") }
         checkpoint("form undo passed")
+        let importedFormValues = try formDocument.importFormValues(
+          data: formValuesXFDF, format: .xfdf)
+        guard importedFormValues.imported > 0,
+          try formDocument.data(ofType: "com.adobe.pdf") != formBaseline,
+          formDocument.undoEdit(),
+          try formDocument.data(ofType: "com.adobe.pdf") == formBaseline
+        else { throw PDFError(.malformed, "Form value import service failed") }
+        checkpoint("form value import service passed")
 
         // Viewer search: matches, navigation, and clearing.
         viewer.showSearch()
