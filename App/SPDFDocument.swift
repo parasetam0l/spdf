@@ -3723,33 +3723,62 @@ final class SPDFDocument: NSDocument {
     }
   }
 
+  private struct PreparedCombination {
+    let graph: PDFGraph
+    let sourceURLs: [URL]
+    let summaries: [(name: String, pages: Int)]
+    let report: DocumentAssemblyReport
+
+    var pageCount: Int {
+      summaries.reduce(0) { $0 + $1.pages }
+    }
+  }
+
+  /// PAG-02: assemble selected PDFs in memory so order and conflicts can be
+  /// inspected before any output is written.
+  private func prepareCombinedDocument(from urls: [URL]) throws -> PreparedCombination {
+    guard !urls.isEmpty else {
+      throw PDFError(.malformed, "Choose at least one PDF to combine")
+    }
+    var sources: [(graph: PDFGraph, pageIDs: [PDFObjectID])] = []
+    var summaries: [(String, Int)] = []
+    for file in urls {
+      let data = try Data(contentsOf: file)
+      let parsed = try PDFParser.parse(
+        data, limits: SPDFDocumentResourcePolicy.parsingLimits)
+      sources.append((graph: parsed.graph, pageIDs: parsed.pageIDs))
+      summaries.append((file.lastPathComponent, parsed.pageCount))
+    }
+    let merged = try DocumentAssembly.merge(
+      sources, labels: .preserve, catalogData: .firstDocument)
+    return PreparedCombination(
+      graph: merged.graph, sourceURLs: urls, summaries: summaries, report: merged.report)
+  }
+
+  /// PAG-02: write an inspected combination through the verified writer.
+  private func writeCombinedDocument(_ prepared: PreparedCombination, to url: URL) throws {
+    for file in prepared.sourceURLs {
+      try DerivativeOutputPolicy.validateDestination(url, source: file)
+    }
+    let data = try PDFWriter.write(
+      prepared.graph, limits: SPDFDocumentResourcePolicy.parsingLimits)
+    try VerifiedFileWriter.write(
+      data, to: url, expectedGraph: prepared.graph,
+      limits: SPDFDocumentResourcePolicy.parsingLimits)
+  }
+
   /// PAG-02: merge external PDFs in the chosen order into one verified file.
   /// The assembly layer refuses encrypted/signed sources and reports renamed
   /// fields or dropped destinations.
   @discardableResult
   func combineDocuments(from urls: [URL], to url: URL) throws -> DocumentAssemblyReport {
-    guard !urls.isEmpty else {
-      throw PDFError(.malformed, "Choose at least one PDF to combine")
-    }
-    var sources: [(graph: PDFGraph, pageIDs: [PDFObjectID])] = []
-    for file in urls {
-      try DerivativeOutputPolicy.validateDestination(url, source: file)
-      let data = try Data(contentsOf: file)
-      let parsed = try PDFParser.parse(
-        data, limits: SPDFDocumentResourcePolicy.parsingLimits)
-      sources.append((graph: parsed.graph, pageIDs: parsed.pageIDs))
-    }
-    let merged = try DocumentAssembly.merge(
-      sources, labels: .preserve, catalogData: .firstDocument)
-    let data = try PDFWriter.write(
-      merged.graph, limits: SPDFDocumentResourcePolicy.parsingLimits)
-    try VerifiedFileWriter.write(
-      data, to: url, expectedGraph: merged.graph,
-      limits: SPDFDocumentResourcePolicy.parsingLimits)
-    return merged.report
+    let prepared = try prepareCombinedDocument(from: urls)
+    try writeCombinedDocument(prepared, to: url)
+    return prepared.report
   }
 
-  /// PAG-02: choose source PDFs in order, then write one combined file.
+  /// PAG-02: choose source PDFs in order, inspect the result and conflicts,
+  /// then write one combined file.
   func presentCombineDocuments() {
     let open = NSOpenPanel()
     open.allowedContentTypes = [.pdf]
@@ -3758,6 +3787,26 @@ final class SPDFDocument: NSDocument {
     open.prompt = "Choose"
     open.begin { [weak self] response in
       guard response == .OK, !open.urls.isEmpty, let self else { return }
+      let prepared: PreparedCombination
+      do {
+        prepared = try self.prepareCombinedDocument(from: open.urls)
+      } catch {
+        self.presentError(error)
+        return
+      }
+      var detail = prepared.summaries.enumerated().map {
+        "\($0.offset + 1). \($0.element.name) — \($0.element.pages) page"
+          + ($0.element.pages == 1 ? "" : "s")
+      }.joined(separator: "\n")
+      detail += "\n\nCombined result: \(prepared.pageCount) page"
+        + (prepared.pageCount == 1 ? "" : "s") + "\n\n"
+      detail += prepared.report.report()
+      let review = NSAlert()
+      review.messageText = "Combine Documents"
+      review.informativeText = detail
+      review.addButton(withTitle: "Choose Destination…")
+      review.addButton(withTitle: "Cancel")
+      guard review.runModal() == .alertFirstButtonReturn else { return }
       let save = NSSavePanel()
       save.allowedContentTypes = [.pdf]
       let base = self.editSession.pageIDs.isEmpty
@@ -3766,10 +3815,10 @@ final class SPDFDocument: NSDocument {
       save.begin { [weak self] saveResponse in
         guard saveResponse == .OK, let url = save.url, let self else { return }
         do {
-          let report = try self.combineDocuments(from: open.urls, to: url)
+          try self.writeCombinedDocument(prepared, to: url)
           let alert = NSAlert()
           alert.messageText = "Documents Combined"
-          alert.informativeText = report.report()
+          alert.informativeText = prepared.report.report()
           alert.addButton(withTitle: "OK")
           alert.runModal()
         } catch {
