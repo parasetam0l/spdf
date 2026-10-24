@@ -4666,14 +4666,85 @@ final class SPDFDocument: NSDocument {
 
   /// P26-003/P26-018: run the local OCR job for the current page.
   func runOCR() {
-    guard let viewer, viewer.view.document != nil, viewer.pageNumber > 0 else { return }
-    let index = viewer.pageNumber - 1
-    guard index < editSession.pageIDs.count,
-      let candidate = editSession.ocrCandidates().first(where: {
-        $0.pageID == editSession.pageIDs[index]
+    presentOCR()
+  }
+
+  private var ocrLanguage: String {
+    UserDefaults.standard.string(forKey: "spdf.ocr.language") ?? "en-US"
+  }
+
+  private var ocrLevel: OCRRecognitionLevel {
+    OCRRecognitionLevel(
+      rawValue: UserDefaults.standard.string(forKey: "spdf.ocr.level") ?? "") ?? .accurate
+  }
+
+  /// OCR-02: choose the language, quality and pages before recognition. The
+  /// chooser comes from Vision's installed language set, so an unavailable
+  /// language is visible before any work starts.
+  func presentOCR() {
+    guard canRunOCR, let viewer, viewer.pageNumber > 0 else { return }
+    let languages: [String]
+    do {
+      languages = try VisionTextRecognizer.supportedLanguages()
+    } catch {
+      presentError(error)
+      return
+    }
+    guard !languages.isEmpty else {
+      presentError(
+        PDFError(.unsupported, "No text-recognition languages are installed on this system"))
+      return
+    }
+    let languagePopup = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 190, height: 24))
+    languagePopup.addItems(withTitles: languages)
+    if let stored = languages.firstIndex(of: ocrLanguage) ?? languages.firstIndex(of: "en-US") {
+      languagePopup.selectItem(at: stored)
+    }
+    let qualityPopup = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 140, height: 24))
+    qualityPopup.addItems(withTitles: ["Accurate", "Fast"])
+    qualityPopup.selectItem(at: ocrLevel == .accurate ? 0 : 1)
+    let pagesField = NSTextField(frame: NSRect(x: 0, y: 0, width: 160, height: 22))
+    pagesField.stringValue = "\(viewer.pageNumber)"
+    let rows: [[NSView]] = [
+      [NSTextField(labelWithString: "Language:"), languagePopup],
+      [NSTextField(labelWithString: "Quality:"), qualityPopup],
+      [NSTextField(labelWithString: "Pages:"), pagesField],
+    ]
+    let grid = NSGridView(views: rows)
+    grid.column(at: 0).xPlacement = .trailing
+    grid.frame = NSRect(x: 0, y: 0, width: 300, height: 90)
+    let alert = NSAlert()
+    alert.messageText = "Recognize Text"
+    alert.informativeText =
+      "Recognition is local. Only pages without a generated text layer are offered; "
+      + "use pages such as 1, 3-5. A completed page gains a searchable text layer."
+    alert.accessoryView = grid
+    alert.addButton(withTitle: "Recognize")
+    alert.addButton(withTitle: "Cancel")
+    guard alert.runModal() == .alertFirstButtonReturn else { return }
+    let language = languages[max(0, languagePopup.indexOfSelectedItem)]
+    let level: OCRRecognitionLevel =
+      qualityPopup.indexOfSelectedItem == 1 ? .fast : .accurate
+    UserDefaults.standard.set(language, forKey: "spdf.ocr.language")
+    UserDefaults.standard.set(level.rawValue, forKey: "spdf.ocr.level")
+    let indices = pageIndices(from: pagesField.stringValue, count: editSession.pageIDs.count)
+    let candidates = editSession.ocrCandidates()
+    let candidateIDs = Set(candidates.map(\.pageID))
+    let pageIDs = editSession.pageIDs
+    let selected = indices.filter {
+      $0 >= 0 && $0 < pageIDs.count && candidateIDs.contains(pageIDs[$0])
+    }
+    guard !selected.isEmpty else {
+      presentError(
+        PDFError(.unsupported, "The selected pages already have a generated text layer"))
+      return
+    }
+    let replacing = Set(
+      selected.filter { index in
+        candidates.contains { $0.pageID == pageIDs[index] && $0.replacing }
       })
-    else { return }
-    startOCR(pageIndexes: [index], replacing: candidate.replacing ? [index] : [])
+    startOCR(
+      pageIndexes: selected, replacing: replacing, languages: [language], level: level)
   }
 
   /// P26-003: run the local OCR job for every candidate page.
@@ -4688,7 +4759,9 @@ final class SPDFDocument: NSDocument {
       indexes.append(index)
       if candidate.replacing { replacing.insert(index) }
     }
-    startOCR(pageIndexes: indexes, replacing: replacing)
+    startOCR(
+      pageIndexes: indexes, replacing: replacing,
+      languages: [ocrLanguage], level: ocrLevel)
   }
 
   var canRunOCR: Bool {
@@ -4703,11 +4776,15 @@ final class SPDFDocument: NSDocument {
     canEditContent && !isRunningOCR && !editSession.ocrCandidates().isEmpty
   }
 
-  private func startOCR(pageIndexes: [Int], replacing: Set<Int>) {
+  private func startOCR(
+    pageIndexes: [Int], replacing: Set<Int>,
+    languages: [String] = ["en-US"], level: OCRRecognitionLevel = .accurate
+  ) {
     guard !isRunningOCR else { return }
     Task { @MainActor in
       do {
-        try await performOCR(pageIndexes: pageIndexes, replacing: replacing)
+        try await performOCR(
+          pageIndexes: pageIndexes, replacing: replacing, languages: languages, level: level)
       } catch is CancellationError {
       } catch { presentError(error) }
     }
@@ -4718,6 +4795,7 @@ final class SPDFDocument: NSDocument {
   /// the document while recognition runs cannot attach text to stale pages.
   func performOCR(
     pageIndexes: [Int], replacing: Set<Int> = [],
+    languages: [String] = ["en-US"], level: OCRRecognitionLevel = .accurate,
     recognizer: TextRecognizing = VisionTextRecognizer()
   ) async throws {
     guard !isRunningOCR, canEditContent, let graph = editSession.currentGraph else {
@@ -4742,7 +4820,7 @@ final class SPDFDocument: NSDocument {
       relay.update(id: job, completed: done)
     }
     let results = try await OCRJob.run(
-      data: bytes, pageIndexes: pageIndexes, languages: ["en-US"], level: .accurate,
+      data: bytes, pageIndexes: pageIndexes, languages: languages, level: level,
       recognizer: recognizer, onProgress: progress)
     try Task.checkCancellation()
     guard !isClosed, editSession.documentRevision == revision else {

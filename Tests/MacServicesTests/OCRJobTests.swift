@@ -174,6 +174,30 @@ struct OCRJobTests {
     #expect(topLeft.confidence == 0.8)
   }
 
+  @Test func requestedLanguagesAndLevelReachTheRecognizer() throws {
+    final class Recorder: @unchecked Sendable {
+      var languages: [[String]] = []
+      var levels: [OCRRecognitionLevel] = []
+    }
+    struct Stub: TextRecognizing {
+      let recorder: Recorder
+      func recognize(image: CGImage, languages: [String], level: OCRRecognitionLevel) throws
+        -> [OCRObservation]
+      {
+        recorder.languages.append(languages)
+        recorder.levels.append(level)
+        return []
+      }
+    }
+    let document = try #require(PDFDocument(data: PDFFixtures.imagePages()))
+    let recorder = Recorder()
+    _ = try OCRJob.run(
+      document: document, pageIndexes: [0], languages: ["tr-TR", "en-US"], level: .fast,
+      recognizer: Stub(recorder: recorder))
+    #expect(recorder.languages == [["tr-TR", "en-US"]])
+    #expect(recorder.levels == [.fast])
+  }
+
   @Test func jobCancellationLeavesNoResults() async throws {
     struct Stub: TextRecognizing {
       func recognize(image: CGImage, languages: [String], level: OCRRecognitionLevel) throws
