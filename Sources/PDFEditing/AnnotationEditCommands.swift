@@ -108,7 +108,8 @@ public struct SetAnnotationStyleCommand: PDFEditCommand, Equatable, Sendable {
 
   static let supportedSubtypes: Set<PDFName> = [
     PDFName("Highlight"), PDFName("Underline"), PDFName("StrikeOut"), PDFName("Square"),
-    PDFName("Circle"), PDFName("Line"), PDFName("Ink"),
+    PDFName("Circle"), PDFName("Line"), PDFName("Ink"), PDFName("Text"),
+    PDFName("FreeText"), PDFName("Stamp"),
   ]
 
   public func validate(in graph: PDFGraph) throws {
@@ -191,6 +192,38 @@ public struct SetAnnotationStyleCommand: PDFEditCommand, Equatable, Sendable {
       stream = AddInkCommand.appearance(
         strokes: strokes, rect: rect, color: newColor,
         borderWidth: width > 0 ? width : 2, opacity: newOpacity)
+    case PDFName("Text"):
+      let size = min(max(min(rect[2] - rect[0], rect[3] - rect[1]), 8), 72)
+      stream = AddNoteCommand.appearance(size: size, color: newColor, opacity: newOpacity)
+    case PDFName("FreeText"):
+      let fontID = try Self.ensureHelveticaFont(in: &graph, dictionary: &dictionary)
+      let text = Self.text(dictionary[PDFName("Contents")]) ?? ""
+      let appearance = Self.text(dictionary[PDFName("DA")])
+      let fontSize = CommentExchange.freeTextFontSize(appearance)
+      stream = AddFreeTextCommand.appearance(
+        rect: rect, text: text, fontSize: fontSize, textColor: newColor,
+        fillColor: nil, borderColor: nil, borderWidth: 0, fontID: fontID,
+        opacity: newOpacity)
+      dictionary[PDFName("DA")] = .string(
+        Data(
+          AnnotationSupport.defaultAppearanceString(
+            fontSize: fontSize, color: newColor).utf8))
+      dictionary[PDFName("DR")] = .dictionary([
+        PDFName("Font"): .dictionary([PDFName("Helvetica"): .reference(fontID)])
+      ])
+    case PDFName("Stamp"):
+      let fontID = try Self.ensureHelveticaFont(in: &graph, dictionary: &dictionary)
+      var label = "Stamp"
+      if case .name(let stampName)? = dictionary[PDFName("Name")] {
+        let raw = String(decoding: stampName.bytes, as: UTF8.self)
+        label =
+          StampName.allCases.first(where: { $0.pdfName == stampName })?.label
+          ?? (raw.isEmpty ? "Stamp" : raw)
+      }
+      let width = AnnotationSupport.borderWidth(of: dictionary)
+      stream = AddStampCommand.appearance(
+        rect: rect, label: label, color: newColor,
+        borderWidth: width > 0 ? width : 2, fontID: fontID, opacity: newOpacity)
     default:
       throw PDFError(.unsupported, "Style editing is not supported for this annotation type yet")
     }
@@ -254,6 +287,28 @@ public struct SetAnnotationStyleCommand: PDFEditCommand, Equatable, Sendable {
     return result.isEmpty ? nil : result
   }
 
+  static func text(_ value: PDFValue?) -> String? {
+    guard case .string(let data)? = value else { return nil }
+    return AnnotationText.decode(data)
+  }
+
+  static func ensureHelveticaFont(
+    in graph: inout PDFGraph, dictionary: inout [PDFName: PDFValue]
+  ) throws -> PDFObjectID {
+    if case .dictionary(let resources)? = dictionary[PDFName("DR")],
+      case .dictionary(let fonts)? = resources[PDFName("Font")],
+      case .reference(let id)? = fonts[PDFName("Helvetica")],
+      graph.objects[id] != nil
+    {
+      return id
+    }
+    if let existing = AnnotationSupport.helveticaFontID(in: graph) { return existing }
+    let id = try AnnotationSupport.allocateOne(in: graph)
+    graph.objects[id] = .dictionary(AnnotationSupport.helveticaFontDictionary())
+    graph.trailer[PDFName("Size")] = .integer(Int64(id.number + 1))
+    return id
+  }
+
   static func lineEndings(of dictionary: [PDFName: PDFValue]) -> (LineEnding, LineEnding)? {
     guard case .array(let values)? = dictionary[PDFName("LE")] else { return (.none, .none) }
     guard values.count == 2 else { return nil }
@@ -289,6 +344,10 @@ public struct SetAnnotationStyleCommand: PDFEditCommand, Equatable, Sendable {
     case PDFName("Ink"):
       guard inkStrokes(of: dictionary) != nil else {
         throw PDFError(.malformed, "Ink annotation has no strokes")
+      }
+    case PDFName("Text"), PDFName("FreeText"), PDFName("Stamp"):
+      guard Annotation.numbers(dictionary[PDFName("Rect")], count: 4) != nil else {
+        throw PDFError(.malformed, "Annotation has no rectangle")
       }
     default:
       break

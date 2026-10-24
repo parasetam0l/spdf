@@ -104,11 +104,12 @@ public struct AddFreeTextCommand: PDFEditCommand, Equatable, Sendable {
 
   static func appearance(
     rect: [Double], text: String, fontSize: Double, textColor: [Double], fillColor: [Double]?,
-    borderColor: [Double]?, borderWidth: Double, fontID: PDFObjectID
+    borderColor: [Double]?, borderWidth: Double, fontID: PDFObjectID, opacity: Double = 1
   ) -> PDFStream {
     let width = rect[2] - rect[0]
     let height = rect[3] - rect[1]
     var content = "q\n"
+    if opacity < 1 { content += "/GS0 gs\n" }
     if let fillColor {
       content += "\(AnnotationSupport.number(fillColor[0])) "
       content += "\(AnnotationSupport.number(fillColor[1])) "
@@ -137,9 +138,18 @@ public struct AddFreeTextCommand: PDFEditCommand, Equatable, Sendable {
       content += "1 0 0 1 2 \(AnnotationSupport.number(y)) Tm \(escaped) Tj\n"
     }
     content += "ET\nQ\n"
+    var resources: [PDFName: PDFValue] = [
+      PDFName("Font"): .dictionary([PDFName("F1"): .reference(fontID)])
+    ]
+    if opacity < 1 {
+      for (key, value) in AnnotationSupport.stateResources(
+        opacity: opacity, blendMultiply: false)
+      {
+        resources[key] = value
+      }
+    }
     return AnnotationSupport.formAppearance(
-      rect: rect, content: content,
-      resources: [PDFName("Font"): .dictionary([PDFName("F1"): .reference(fontID)])])
+      rect: rect, content: content, resources: resources)
   }
 }
 
@@ -273,7 +283,8 @@ public struct AddStampCommand: PDFEditCommand, Equatable, Sendable {
   }
 
   static func appearance(
-    rect: [Double], label: String, color: [Double], borderWidth: Double, fontID: PDFObjectID
+    rect: [Double], label: String, color: [Double], borderWidth: Double,
+    fontID: PDFObjectID, opacity: Double = 1
   ) -> PDFStream {
     let width = rect[2] - rect[0]
     let height = rect[3] - rect[1]
@@ -284,6 +295,7 @@ public struct AddStampCommand: PDFEditCommand, Equatable, Sendable {
     let x = max(2, (width - textWidth) / 2)
     let y = (height - fontSize) / 2 + fontSize * 0.2
     var content = "q\n"
+    if opacity < 1 { content += "/GS0 gs\n" }
     content += "\(AnnotationSupport.number(color[0])) "
     content += "\(AnnotationSupport.number(color[1])) "
     content += "\(AnnotationSupport.number(color[2])) RG\n"
@@ -300,9 +312,18 @@ public struct AddStampCommand: PDFEditCommand, Equatable, Sendable {
     content += "1 0 0 1 \(AnnotationSupport.number(x)) \(AnnotationSupport.number(y)) Tm "
     content += "\(escaped) Tj\n"
     content += "ET\nQ\n"
+    var resources: [PDFName: PDFValue] = [
+      PDFName("Font"): .dictionary([PDFName("F1"): .reference(fontID)])
+    ]
+    if opacity < 1 {
+      for (key, value) in AnnotationSupport.stateResources(
+        opacity: opacity, blendMultiply: false)
+      {
+        resources[key] = value
+      }
+    }
     return AnnotationSupport.formAppearance(
-      rect: rect, content: content,
-      resources: [PDFName("Font"): .dictionary([PDFName("F1"): .reference(fontID)])])
+      rect: rect, content: content, resources: resources)
   }
 }
 

@@ -144,7 +144,68 @@ struct AnnotationEditTests {
     let inkReparsed = try PDFParser.parse(PDFWriter.write(inkStyled))
     #expect(inkReparsed.graph == inkStyled)
 
-    let reparsed = try PDFParser.parse(PDFWriter.write(shapeStyled))
+    // Text notes, free text and stamps regenerate their generated appearances.
+    let noteStyled = try PDFEditingEngine.commit(
+      PDFTransaction([
+        SetAnnotationStyleCommand(
+          pageID: pageID, annotationIndex: 3, color: [0.9, 0.2, 0.1], opacity: 0.5)
+      ]), to: graph)
+    let note = try #require(
+      try AnnotationInventory.annotations(in: noteStyled, pageID: pageID)[safe: 3])
+    #expect(note.dictionary[PDFName("C")] == .array([.real(0.9), .real(0.2), .real(0.1)]))
+    #expect(note.dictionary[PDFName("CA")] == .real(0.5))
+    let noteContent = try appearanceContent(of: note, in: noteStyled)
+    #expect(noteContent.contains("0.9 0.2 0.1 rg"))
+    #expect(noteContent.contains("/GS0 gs"))
+
+    let freeText = try PDFEditingEngine.commit(
+      PDFTransaction([
+        AddFreeTextCommand(
+          pageID: shapePageID, rect: [10, 10, 110, 40], text: "styled", fontSize: 15)
+      ]), to: parsed.graph)
+    let freeTextStyled = try PDFEditingEngine.commit(
+      PDFTransaction([
+        SetAnnotationStyleCommand(
+          pageID: shapePageID, annotationIndex: 0, color: [0, 0.7, 0.2], opacity: 0.7)
+      ]), to: freeText)
+    let free = try #require(
+      try AnnotationInventory.annotations(in: freeTextStyled, pageID: shapePageID).first)
+    #expect(free.dictionary[PDFName("C")] == .array([.real(0), .real(0.7), .real(0.2)]))
+    let freeContent = try appearanceContent(of: free, in: freeTextStyled)
+    #expect(freeContent.contains("0 0.7 0.2 rg"))
+    #expect(freeContent.contains("/F1 15 Tf"))
+    #expect(freeContent.contains("/GS0 gs"))
+    let freeDAData = try #require({
+      if case .string(let data)? = free.dictionary[PDFName("DA")] { return data }
+      return nil
+    }())
+    let freeDA = AnnotationText.decode(freeDAData)
+    #expect(freeDA.contains("/Helvetica 15 Tf"))
+    #expect(freeDA.contains("0 0.7 0.2 rg"))
+
+    let stamped = try PDFEditingEngine.commit(
+      PDFTransaction([
+        AddStampCommand(
+          pageID: shapePageID, rect: [150, 100, 290, 160], stampName: .draft,
+          color: [0.8, 0, 0], borderWidth: 2)
+      ]), to: parsed.graph)
+    let stampStyled = try PDFEditingEngine.commit(
+      PDFTransaction([
+        SetAnnotationStyleCommand(
+          pageID: shapePageID, annotationIndex: 0, color: [0.1, 0.3, 0.8], opacity: 0.6)
+      ]), to: stamped)
+    let stamp = try #require(
+      try AnnotationInventory.annotations(in: stampStyled, pageID: shapePageID).first)
+    #expect(stamp.dictionary[PDFName("C")] == .array([.real(0.1), .real(0.3), .real(0.8)]))
+    #expect(stamp.dictionary[PDFName("CA")] == .real(0.6))
+    let stampContent = try appearanceContent(of: stamp, in: stampStyled)
+    #expect(stampContent.contains("0.1 0.3 0.8 RG"))
+    #expect(stampContent.contains("Draft"))
+    #expect(stampContent.contains("/GS0 gs"))
+    let styleReparsed = try PDFParser.parse(try PDFWriter.write(stampStyled))
+    #expect(styleReparsed.graph == stampStyled)
+
+    let reparsed = try PDFParser.parse(try PDFWriter.write(shapeStyled))
     #expect(reparsed.graph == shapeStyled)
 
     func refuse(_ command: any PDFEditCommand, in graph: PDFGraph) {
@@ -152,15 +213,6 @@ struct AnnotationEditTests {
         _ = try PDFEditingEngine.commit(PDFTransaction([command]), to: graph)
       }
     }
-    // Note, free text, and stamp style editing is not supported yet.
-    refuse(SetAnnotationStyleCommand(pageID: pageID, annotationIndex: 3, color: [1, 1, 1]), in: graph)
-    let freeText = try PDFEditingEngine.commit(
-      PDFTransaction([
-        AddFreeTextCommand(pageID: shapePageID, rect: [10, 10, 110, 40], text: "x")
-      ]), to: parsed.graph)
-    refuse(
-      SetAnnotationStyleCommand(pageID: shapePageID, annotationIndex: 0, color: [1, 1, 1]),
-      in: freeText)
     refuse(
       SetAnnotationStyleCommand(pageID: pageID, annotationIndex: 0, color: nil, opacity: nil),
       in: graph)

@@ -175,10 +175,11 @@ public struct AddNoteCommand: PDFEditCommand, Equatable, Sendable {
 
   /// Icon appearance: filled background, darker border inset by half the
   /// stroke, and a folded corner so the mark reads as a note.
-  static func appearance(size: Double, color: [Double]) -> PDFStream {
+  static func appearance(size: Double, color: [Double], opacity: Double = 1) -> PDFStream {
     let border = max(0.5, size * 0.05)
     let inset = border / 2
     var content = "q\n"
+    if opacity < 1 { content += "/GS0 gs\n" }
     content += "\(AnnotationSupport.number(color[0])) "
     content += "\(AnnotationSupport.number(color[1])) "
     content += "\(AnnotationSupport.number(color[2])) rg\n"
@@ -195,7 +196,7 @@ public struct AddNoteCommand: PDFEditCommand, Equatable, Sendable {
     content += "Q\n"
     return AnnotationSupport.formAppearance(
       rect: [0, 0, size, size], content: content,
-      resources: AnnotationSupport.stateResources(opacity: 1, blendMultiply: false))
+      resources: AnnotationSupport.stateResources(opacity: opacity, blendMultiply: false))
   }
 }
 
