@@ -13,13 +13,15 @@ struct CommentsPanel: View {
   var onSelect: (Comment) -> Void
   var onDelete: (Comment) -> Void
   var onReply: (Comment) -> Void
-  var onSetState: (Comment, PDFName?) -> Void
+  var onSetStateComments: ([Comment], PDFName?) -> Void
 
   @State private var pageIndex: Int?
   @State private var subtype: PDFName?
   @State private var state: PDFName?
   @State private var author: String?
   @State private var query = ""
+  @State private var dateFilter = DateFilter.any
+  @State private var selection = Set<String>()
 
   private static let subtypes: [PDFName] = [
     PDFName("Highlight"), PDFName("Underline"), PDFName("StrikeOut"), PDFName("Squiggly"),
@@ -36,17 +38,74 @@ struct CommentsPanel: View {
     PDFName("Accepted"), PDFName("Rejected"), PDFName("Completed"), PDFName("Cancelled"),
   ]
 
+  private enum DateFilter: String, CaseIterable {
+    case any
+    case today
+    case last7Days
+    case last30Days
+
+    var title: String {
+      switch self {
+      case .any: return "Any Date"
+      case .today: return "Today"
+      case .last7Days: return "Last 7 Days"
+      case .last30Days: return "Last 30 Days"
+      }
+    }
+
+    func bounds(now: Date = Date()) -> (after: Date?, before: Date?) {
+      guard self != .any else { return (nil, nil) }
+      var calendar = Calendar.current
+      calendar.timeZone = .current
+      let start = calendar.startOfDay(for: now)
+      let end = calendar.date(byAdding: .day, value: 1, to: start)?
+        .addingTimeInterval(-0.001)
+      switch self {
+      case .any: return (nil, nil)
+      case .today: return (start, end)
+      case .last7Days:
+        return (calendar.date(byAdding: .day, value: -6, to: start), end)
+      case .last30Days:
+        return (calendar.date(byAdding: .day, value: -29, to: start), end)
+      }
+    }
+  }
+
   /// Thread rows with their reply depth, so replies render indented.
-  private var rows: [(comment: Comment, depth: Int)] {
+  private var rows: [(id: String, comment: Comment, depth: Int)] {
+    let bounds = dateFilter.bounds()
     let filter = CommentFilter(
-      pageIndex: pageIndex, subtype: subtype, state: state, text: query, author: author)
+      pageIndex: pageIndex, subtype: subtype, state: state, text: query, author: author,
+      modifiedOnOrAfter: bounds.after, modifiedOnOrBefore: bounds.before)
     return CommentList.threads(comments, by: filter).flatMap { thread in
-      [(thread.root, 0)] + thread.replies.map { ($0, 1) }
+      [(rowID(thread.root), thread.root, 0)]
+        + thread.replies.map { (rowID($0), $0, 1) }
     }
   }
 
   private var authors: [String] {
     Array(Set(comments.compactMap(\.author).filter { !$0.isEmpty })).sorted()
+  }
+
+  private var hasDatedComments: Bool {
+    comments.contains { $0.annotation.modified != nil }
+  }
+
+  private var selectedComments: [Comment] {
+    rows.filter { selection.contains($0.id) }.map(\.comment)
+  }
+
+  private func rowID(_ comment: Comment) -> String {
+    if let objectID = comment.annotation.objectID {
+      return "\(objectID.number)-\(objectID.generation)"
+    }
+    return "\(comment.pageIndex)-\(comment.annotation.index)"
+  }
+
+  private func statusTargets(for comment: Comment) -> [Comment] {
+    let id = rowID(comment)
+    if selection.contains(id), selectedComments.count > 1 { return selectedComments }
+    return [comment]
   }
 
   var body: some View {
@@ -106,6 +165,15 @@ struct CommentsPanel: View {
               }
             }
           }
+          if hasDatedComments {
+            filterMenu(title: dateFilter.title) {
+              Button("Any Date") { dateFilter = .any }
+              Divider()
+              ForEach(DateFilter.allCases.filter { $0 != .any }, id: \.rawValue) { option in
+                Button(option.title) { dateFilter = option }
+              }
+            }
+          }
         }
         .padding(8)
         Divider()
@@ -116,36 +184,73 @@ struct CommentsPanel: View {
           symbol: "text.bubble",
           detail: comments.isEmpty
             ? "Select text on the page, then choose Highlight or Add Note."
-            : "Try another page, type, status, author, or search.")
+            : "Try another page, type, status, author, date, or search.")
       } else {
-        List {
-          ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
+        if !selectedComments.isEmpty {
+          HStack(spacing: 6) {
+            Text("\(selectedComments.count) selected")
+              .font(.caption)
+              .foregroundStyle(.secondary)
+            Spacer(minLength: 4)
+            Menu("Set Status") {
+              ForEach(Array(Self.statusOptions.enumerated()), id: \.offset) { _, name in
+                Button(Self.stateLabel(for: name)) {
+                  onSetStateComments(selectedComments, name)
+                }
+              }
+              Divider()
+              Button("Clear Status") { onSetStateComments(selectedComments, nil) }
+            }
+            .menuStyle(.button)
+            .buttonStyle(.borderless)
+            .disabled(!canEditContent)
+            .help(editingRestrictionNotice ?? "Set status for selected comments")
             Button {
-              onSelect(row.comment)
+              selection.removeAll()
             } label: {
-              CommentRow(comment: row.comment, isReply: row.depth > 0)
+              Image(systemName: "xmark.circle.fill")
+                .foregroundStyle(.secondary)
             }
             .buttonStyle(.plain)
-            .contextMenu {
-              Button("Reply…") { onReply(row.comment) }
-                .disabled(!canEditContent)
-                .help(editingRestrictionNotice ?? "Reply to this comment")
-              Menu("Set Status") {
-                ForEach(Array(Self.statusOptions.enumerated()), id: \.offset) { _, name in
-                  Button(Self.stateLabel(for: name)) { onSetState(row.comment, name) }
+            .accessibilityLabel("Clear comment selection")
+          }
+          .padding(.horizontal, 8)
+          .padding(.vertical, 5)
+          .background(.quaternary.opacity(0.35))
+          Divider()
+        }
+        List(selection: $selection) {
+          ForEach(rows, id: \.id) { row in
+            CommentRow(comment: row.comment, isReply: row.depth > 0)
+              .tag(row.id)
+              .contextMenu {
+                Button("Reply…") { onReply(row.comment) }
+                  .disabled(!canEditContent)
+                  .help(editingRestrictionNotice ?? "Reply to this comment")
+                Menu("Set Status") {
+                  let targets = statusTargets(for: row.comment)
+                  ForEach(Array(Self.statusOptions.enumerated()), id: \.offset) { _, name in
+                    Button(Self.stateLabel(for: name)) {
+                      onSetStateComments(targets, name)
+                    }
+                  }
+                  Divider()
+                  Button("Clear Status") { onSetStateComments(targets, nil) }
                 }
-                Divider()
-                Button("Clear Status") { onSetState(row.comment, nil) }
-              }
-              .disabled(!canEditContent)
-              Divider()
-              Button("Delete Comment", role: .destructive) { onDelete(row.comment) }
                 .disabled(!canEditContent)
-                .help(editingRestrictionNotice ?? "Delete this comment")
-            }
+                Divider()
+                Button("Delete Comment", role: .destructive) { onDelete(row.comment) }
+                  .disabled(!canEditContent)
+                  .help(editingRestrictionNotice ?? "Delete this comment")
+              }
           }
         }
         .listStyle(.inset)
+        .onChange(of: selection) { oldValue, newValue in
+          let added = newValue.subtracting(oldValue)
+          guard let row = rows.first(where: { added.contains($0.id) }) else { return }
+          onSelect(row.comment)
+        }
       }
     }
     .accessibilityElement(children: .contain)

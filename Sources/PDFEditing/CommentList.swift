@@ -48,16 +48,22 @@ public struct CommentFilter: Sendable, Equatable {
   public var text: String?
   /// Exact, case-insensitive author match.
   public var author: String?
+  /// Inclusive lower/upper bounds on the annotation's /M date.
+  public var modifiedOnOrAfter: Date?
+  public var modifiedOnOrBefore: Date?
 
   public init(
     pageIndex: Int? = nil, subtype: PDFName? = nil, state: PDFName? = nil,
-    text: String? = nil, author: String? = nil
+    text: String? = nil, author: String? = nil,
+    modifiedOnOrAfter: Date? = nil, modifiedOnOrBefore: Date? = nil
   ) {
     self.pageIndex = pageIndex
     self.subtype = subtype
     self.state = state
     self.text = text
     self.author = author
+    self.modifiedOnOrAfter = modifiedOnOrAfter
+    self.modifiedOnOrBefore = modifiedOnOrBefore
   }
 }
 
@@ -102,6 +108,13 @@ public enum CommentList {
           .joined(separator: "\n")
           .lowercased()
         guard searchable.contains(query) else { return false }
+      }
+      if filter.modifiedOnOrAfter != nil || filter.modifiedOnOrBefore != nil {
+        guard let modified = comment.annotation.modified,
+          let date = CommentDate.parse(modified)
+        else { return false }
+        if let after = filter.modifiedOnOrAfter, date < after { return false }
+        if let before = filter.modifiedOnOrBefore, date > before { return false }
       }
       return true
     }
@@ -155,5 +168,64 @@ public enum CommentSummary {
       lines.append("")
     }
     return lines.joined(separator: "\n")
+  }
+}
+
+/// Parses the PDF date strings carried by annotation /M entries. The parser
+/// accepts the common `D:YYYYMMDDHHmmSSOHH'mm'` form, partial dates, `Z`, and
+/// explicit offsets; a missing offset uses the current time zone.
+public enum CommentDate {
+  public static func parse(_ raw: String) -> Date? {
+    var string = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+    if string.hasPrefix("D:") { string.removeFirst(2) }
+    guard !string.isEmpty else { return nil }
+    let characters = Array(string)
+    var index = 0
+    func take(_ count: Int) -> Int? {
+      guard index + count <= characters.count else { return nil }
+      let part = String(characters[index..<(index + count)])
+      index += count
+      return Int(part)
+    }
+    guard let year = take(4), (1...9999).contains(year) else { return nil }
+    let month = take(2) ?? 1
+    let day = take(2) ?? 1
+    let hour = take(2) ?? 0
+    let minute = take(2) ?? 0
+    let second = take(2) ?? 0
+    guard (1...12).contains(month), (1...31).contains(day), (0...23).contains(hour),
+      (0...59).contains(minute), (0...59).contains(second)
+    else { return nil }
+
+    var timeZone = TimeZone.current
+    if index < characters.count {
+      let marker = characters[index]
+      if marker == "Z" {
+        timeZone = TimeZone(secondsFromGMT: 0) ?? timeZone
+      } else if marker == "+" || marker == "-" {
+        index += 1
+        let offsetHours = take(2) ?? 0
+        if index < characters.count, characters[index] == "'" { index += 1 }
+        let offsetMinutes = take(2) ?? 0
+        guard (0...23).contains(offsetHours), (0...59).contains(offsetMinutes) else {
+          return nil
+        }
+        let direction = marker == "+" ? 1 : -1
+        timeZone =
+          TimeZone(secondsFromGMT: direction * (offsetHours * 3_600 + offsetMinutes * 60))
+          ?? timeZone
+      }
+    }
+    var components = DateComponents()
+    components.timeZone = timeZone
+    components.year = year
+    components.month = month
+    components.day = day
+    components.hour = hour
+    components.minute = minute
+    components.second = second
+    var calendar = Calendar(identifier: .gregorian)
+    calendar.timeZone = timeZone
+    return calendar.date(from: components)
   }
 }

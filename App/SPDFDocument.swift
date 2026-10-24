@@ -549,7 +549,9 @@ final class SPDFDocument: NSDocument {
         onSelectComment: { [weak self] comment in self?.navigate(to: comment) },
         onDeleteComment: { [weak self] comment in self?.deleteAnnotation(comment) },
         onReplyComment: { [weak self] comment in self?.addReply(to: comment) },
-        onSetStateComment: { [weak self] comment, state in self?.setState(state, on: comment) },
+        onSetStateComments: { [weak self] comments, state in
+          self?.setState(state, on: comments)
+        },
         onSubmitFormText: { [weak self] name, text in
           self?.fillFormText(fieldName: name, text: text)
         },
@@ -4796,14 +4798,25 @@ final class SPDFDocument: NSDocument {
 
   /// P22-015: set or clear a comment's review status.
   func setState(_ state: PDFName?, on comment: Comment) {
-    guard canEditContent else { return }
+    setState(state, on: [comment])
+  }
+
+  /// REV-03: apply one review status to every selected comment atomically.
+  func setState(_ state: PDFName?, on comments: [Comment]) {
+    guard canEditContent, !comments.isEmpty else { return }
+    var commands: [any PDFEditCommand] = []
+    var seen = Set<String>()
+    for comment in comments {
+      let key = "\(comment.pageID.number):\(comment.pageID.generation):\(comment.annotation.index)"
+      guard seen.insert(key).inserted else { continue }
+      commands.append(
+        SetAnnotationStateCommand(
+          pageID: comment.pageID, annotationIndex: comment.annotation.index, state: state))
+    }
+    guard !commands.isEmpty else { return }
     do {
       try WorkspacePerformance.profile("comment-edit") {
-        try editSession.apply(
-          PDFTransaction([
-            SetAnnotationStateCommand(
-              pageID: comment.pageID, annotationIndex: comment.annotation.index, state: state)
-          ]))
+        try editSession.apply(PDFTransaction(commands))
       }
     } catch {
       presentError(error)

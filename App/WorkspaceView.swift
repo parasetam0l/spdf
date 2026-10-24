@@ -18,7 +18,7 @@ struct WorkspaceView: View {
   var onSelectComment: (Comment) -> Void
   var onDeleteComment: (Comment) -> Void
   var onReplyComment: (Comment) -> Void
-  var onSetStateComment: (Comment, PDFName?) -> Void
+  var onSetStateComments: ([Comment], PDFName?) -> Void
   var onSubmitFormText: (String, String) -> Void
   var onDraftFormText: (String, String) -> Void
   var onToggleForm: (String, Bool) -> Void
@@ -474,7 +474,7 @@ struct WorkspaceView: View {
           comments: comments.comments, pageCount: viewer.pageCount,
           canEditContent: canEdit, editingRestrictionNotice: viewer.editingRestrictionNotice,
           onSelect: onSelectComment, onDelete: onDeleteComment,
-          onReply: onReplyComment, onSetState: onSetStateComment)
+          onReply: onReplyComment, onSetStateComments: onSetStateComments)
       case .forms:
         FormsPanel(
           fields: forms.fields, orphanedWidgetCount: forms.orphanedWidgetCount,

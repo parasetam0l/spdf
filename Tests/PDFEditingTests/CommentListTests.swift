@@ -68,6 +68,44 @@ struct CommentListTests {
       ).count == 1)
   }
 
+  @Test func commentFiltersMatchModifiedDateRange() throws {
+    func comment(_ modified: String?, index: Int) -> PDFEditing.Comment {
+      var dictionary: [PDFName: PDFValue] = [
+        PDFName("Subtype"): .name(PDFName("Highlight")),
+        PDFName("Contents"): .string(Data("dated".utf8)),
+      ]
+      if let modified {
+        dictionary[PDFName("M")] = .string(Data(modified.utf8))
+      }
+      return PDFEditing.Comment(
+        pageID: PDFObjectID(10), pageIndex: 0,
+        annotation: Annotation(
+          pageID: PDFObjectID(10), objectID: nil, index: index, dictionary: dictionary))
+    }
+    let early = comment("D:20261001120000Z", index: 0)
+    let late = comment("D:20261015120000Z", index: 1)
+    let undated = comment(nil, index: 2)
+    let cutoff = try #require(CommentDate.parse("D:20261010120000Z"))
+    #expect(
+      CommentList.filter([early, late, undated], by: CommentFilter(modifiedOnOrAfter: cutoff))
+        .map(\.annotation.index) == [1])
+    #expect(
+      CommentList.filter([early, late, undated], by: CommentFilter(modifiedOnOrBefore: cutoff))
+        .map(\.annotation.index) == [0])
+    #expect(
+      CommentList.filter(
+        [early, late, undated],
+        by: CommentFilter(modifiedOnOrAfter: cutoff, modifiedOnOrBefore: cutoff)
+      ).isEmpty)
+    #expect(
+      CommentList.filter([early, late, undated], by: CommentFilter()).count == 3)
+    #expect(
+      CommentDate.parse("D:20261010120000+02'00'")
+        == CommentDate.parse("D:20261010100000Z"))
+    #expect(CommentDate.parse("D:2026Z") != nil)
+    #expect(CommentDate.parse("not a date") == nil)
+  }
+
   @Test func subjectAuthorTimestampAndPrivacyDefaults() throws {
     let parsed = try PDFParser.parse(PDFFixtures.textWidthsPages())
     let pageID = parsed.pageIDs[0]

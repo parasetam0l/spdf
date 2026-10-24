@@ -95,6 +95,43 @@ struct ReplyAndStatusTests {
     refuse(AddReplyCommand(pageID: pageID, annotationIndex: 0, text: "x"), in: direct)
   }
 
+  @Test func bulkStatusUpdatesAreAtomic() throws {
+    let parsed = try PDFParser.parse(PDFFixtures.textWidthsPages())
+    let pageID = parsed.pageIDs[0]
+    let marked = try PDFEditingEngine.commit(
+      PDFTransaction([
+        AddHighlightCommand(
+          pageID: pageID, quads: [42, 770, 102, 770, 42, 710, 102, 710], contents: "one"),
+        AddNoteCommand(pageID: pageID, at: [20, 20], contents: "two"),
+      ]), to: parsed.graph)
+    let comments = CommentList.comments(in: marked, pageIDs: [pageID])
+    #expect(comments.count == 2)
+    let updated = try PDFEditingEngine.commit(
+      PDFTransaction(
+        comments.map {
+          SetAnnotationStateCommand(
+            pageID: $0.pageID, annotationIndex: $0.annotation.index, state: PDFName("Accepted"))
+        }), to: marked)
+    #expect(
+      CommentList.comments(in: updated, pageIDs: [pageID]).map(\.reviewState)
+        == [PDFName("Accepted"), PDFName("Accepted")])
+    let reopened = try PDFParser.parse(PDFWriter.write(updated))
+    #expect(
+      CommentList.comments(in: reopened.graph, pageIDs: [pageID]).allSatisfy {
+        $0.reviewState == PDFName("Accepted")
+      })
+    let cleared = try PDFEditingEngine.commit(
+      PDFTransaction(
+        comments.map {
+          SetAnnotationStateCommand(
+            pageID: $0.pageID, annotationIndex: $0.annotation.index, state: nil)
+        }), to: updated)
+    #expect(
+      CommentList.comments(in: cleared, pageIDs: [pageID]).allSatisfy {
+        $0.reviewState == PDFName("None")
+      })
+  }
+
   @Test func statusRoundTripAndFiltering() throws {
     let parsed = try PDFParser.parse(PDFFixtures.textWidthsPages())
     let pageID = parsed.pageIDs[0]
