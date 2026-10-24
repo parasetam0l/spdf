@@ -112,6 +112,36 @@ struct FormDataExchangeTests {
     #expect(fields.first { $0.name == "agree" }?.buttonState == PDFName("Yes"))
   }
 
+  @Test func multiSelectChoiceExchangeKeepsAllValues() throws {
+    let parsed = try PDFParser.parse(PDFFixtures.formPages())
+    guard case .dictionary(var field)? = parsed.graph.objects[PDFObjectID(210)] else {
+      Issue.record("team field missing")
+      return
+    }
+    field[PDFName("Ff")] = .integer(2_097_152)
+    var graph = parsed.graph
+    graph.objects[PDFObjectID(210)] = .dictionary(field)
+    let selected = try PDFEditingEngine.commit(
+      PDFTransaction([
+        SetFormChoiceCommand(fieldName: "team", exportValues: ["red", "blue"])
+      ]), to: graph)
+    let values = try FormValues.values(in: selected, pageIDs: parsed.pageIDs)
+    #expect(values.first { $0.name == "team" }?.selectedValues == ["red", "blue"])
+
+    for format in FormDataExchange.Format.allCases {
+      let data = FormDataExchange.export(values, format: format)
+      let raw = try FormDataExchange.parse(data, format: format)
+      let (commands, skipped, _) = try FormDataExchange.commands(
+        forRawValues: raw, in: selected, pageIDs: parsed.pageIDs)
+      #expect(skipped == ["locked"])
+      let imported = try PDFEditingEngine.commit(PDFTransaction(commands), to: selected)
+      let team = try #require(
+        try FormInventory.fields(in: imported, pageIDs: parsed.pageIDs)
+          .first { $0.name == "team" })
+      #expect(team.selectedIndexes == [0, 1])
+    }
+  }
+
   @Test func nestedXFDFUsesFullyQualifiedNames() throws {
     let xml = """
       <?xml version="1.0" encoding="UTF-8"?>

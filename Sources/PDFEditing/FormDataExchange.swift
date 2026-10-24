@@ -39,25 +39,40 @@ public enum FormDataExchange {
     in graph: PDFGraph, pageIDs: [PDFObjectID]
   ) throws -> (commands: [any PDFEditCommand], skipped: [String], ambiguous: [String]) {
     let fields = try FormInventory.fields(in: graph, pageIDs: pageIDs)
+    var grouped: [(name: String, values: [String])] = []
+    var indexByName: [String: Int] = [:]
+    for pair in values {
+      if let index = indexByName[pair.name] {
+        if let value = pair.value { grouped[index].values.append(value) }
+      } else {
+        indexByName[pair.name] = grouped.count
+        grouped.append((pair.name, pair.value.map { [$0] } ?? []))
+      }
+    }
     var mapped: [FormFieldValue] = []
     var missing: [String] = []
-    for pair in values {
-      guard let field = fields.first(where: { $0.name == pair.name }) else {
-        missing.append(pair.name)
+    for group in grouped {
+      guard let field = fields.first(where: { $0.name == group.name }) else {
+        missing.append(group.name)
         continue
       }
       switch field.kind {
       case .text:
         mapped.append(
-          FormFieldValue(name: pair.name, kind: "text", value: pair.value ?? ""))
+          FormFieldValue(name: group.name, kind: "text", value: group.values.first ?? ""))
       case .choice:
-        mapped.append(
-          FormFieldValue(name: pair.name, kind: "choice", value: pair.value ?? ""))
-      case .button:
+        let selected = field.isMultiSelect
+          ? group.values : Array(group.values.prefix(1))
         mapped.append(
           FormFieldValue(
-            name: pair.name, kind: "button",
-            buttonState: (pair.value?.isEmpty ?? true) ? "Off" : pair.value))
+            name: group.name, kind: "choice", value: selected.first ?? "",
+            selectedValues: field.isMultiSelect ? selected : nil))
+      case .button:
+        let state = group.values.first
+        mapped.append(
+          FormFieldValue(
+            name: group.name, kind: "button",
+            buttonState: (state?.isEmpty ?? true) ? "Off" : state))
       default:
         continue
       }
@@ -76,6 +91,14 @@ public enum FormDataExchange {
 
       """
     for value in values {
+      if value.kind == "choice", let selected = value.selectedValues, selected.count > 1 {
+        xml += "<field name=\"\(escapeXML(value.name))\">"
+        for item in selected {
+          xml += "<value>\(escapeXML(item))</value>"
+        }
+        xml += "</field>\n"
+        continue
+      }
       let raw: String
       switch value.kind {
       case "button": raw = value.buttonState ?? "Off"
@@ -169,6 +192,9 @@ public enum FormDataExchange {
         let state = value.buttonState ?? "Off"
         let token = state == "Off" ? "/Off" : "/\(escapeName(state))"
         body += "<< /T \(name) /V \(token) >>\n"
+      case "choice" where (value.selectedValues?.count ?? 0) > 1:
+        let items = (value.selectedValues ?? []).map(pdfTextString).joined(separator: " ")
+        body += "<< /T \(name) /V [ \(items) ] >>\n"
       default:
         body += "<< /T \(name) /V \(pdfTextString(value.value ?? "")) >>\n"
       }
@@ -440,6 +466,17 @@ public enum FormDataExchange {
         values.append((name, value))
       case .name(let value)?:
         values.append((name, value == "Off" ? nil : value))
+      case .array(let items)?:
+        for item in items {
+          switch item {
+          case .string(let value):
+            values.append((name, value))
+          case .name(let value):
+            values.append((name, value == "Off" ? nil : value))
+          default:
+            break
+          }
+        }
       case nil:
         values.append((name, nil))
       default:

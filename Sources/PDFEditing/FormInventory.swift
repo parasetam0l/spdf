@@ -59,8 +59,17 @@ public struct FormField: Sendable, Equatable {
   }
 
   public var stringValue: String? {
-    guard case .string(let data)? = value else { return nil }
-    return AnnotationText.decode(data)
+    if case .string(let data)? = value {
+      return AnnotationText.decode(data)
+    }
+    if case .array(let values)? = value {
+      let strings = values.compactMap { item -> String? in
+        guard case .string(let data) = item else { return nil }
+        return AnnotationText.decode(data)
+      }
+      return strings.isEmpty ? nil : strings.joined(separator: ", ")
+    }
+    return nil
   }
 
   public var defaultStringValue: String? {

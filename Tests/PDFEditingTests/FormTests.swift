@@ -281,12 +281,31 @@ struct FormTests {
     }
     refuse(SetFormChoiceCommand(fieldName: "department", exportValue: "Marketing"), in: graph)
     refuse(SetFormChoiceCommand(fieldName: "name", exportValue: "x"), in: graph)
-    // A multi-select list refuses explicitly.
+    // A multi-select list accepts several export values and records both /V
+    // and /I arrays.
     var multi = graph
     guard case .dictionary(var multiField)? = multi.objects[PDFObjectID(210)] else { return }
     multiField[PDFName("Ff")] = .integer(2_097_152)
     multi.objects[PDFObjectID(210)] = .dictionary(multiField)
-    refuse(SetFormChoiceCommand(fieldName: "team", exportValue: "red"), in: multi)
+    let multiple = try PDFEditingEngine.commit(
+      PDFTransaction([
+        SetFormChoiceCommand(fieldName: "team", exportValues: ["red", "blue"])
+      ]), to: multi)
+    guard case .dictionary(let selectedTeam)? = multiple.objects[PDFObjectID(210)],
+      case .array(let teamValues)? = selectedTeam[PDFName("V")],
+      case .array(let teamIndexes)? = selectedTeam[PDFName("I")]
+    else {
+      Issue.record("Selected multi-select field is missing")
+      return
+    }
+    #expect(teamValues.count == 2)
+    #expect(teamIndexes == [.integer(0), .integer(1)])
+    let reopenedMulti = try PDFParser.parse(PDFWriter.write(multiple))
+    let reopenedTeam = try #require(
+      try FormInventory.fields(in: reopenedMulti.graph, pageIDs: pageIDs)
+        .first { $0.name == "team" })
+    #expect(reopenedTeam.selectedIndexes == [0, 1])
+    #expect(reopenedTeam.stringValue == "red, blue")
   }
 
   @Test func resetRestoresDocumentedDefaultValues() throws {

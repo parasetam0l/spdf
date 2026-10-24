@@ -8,16 +8,19 @@ public struct FormFieldValue: Sendable, Equatable {
   public let value: String?
   public let selectedIndex: Int?
   public let buttonState: String?
+  /// FRM-05: all selected export values for a multi-select choice field.
+  public let selectedValues: [String]?
 
   public init(
     name: String, kind: String, value: String? = nil, selectedIndex: Int? = nil,
-    buttonState: String? = nil
+    buttonState: String? = nil, selectedValues: [String]? = nil
   ) {
     self.name = name
     self.kind = kind
     self.value = value
     self.selectedIndex = selectedIndex
     self.buttonState = buttonState
+    self.selectedValues = selectedValues
   }
 }
 
@@ -34,10 +37,14 @@ public enum FormValues {
       case "text":
         entries.append(["name": field.name, "kind": "text", "value": field.value ?? ""])
       case "choice":
-        entries.append([
+        var entry: [String: Any] = [
           "name": field.name, "kind": "choice", "value": field.value ?? "",
           "selectedIndex": field.selectedIndex ?? -1,
-        ])
+        ]
+        if let selectedValues = field.selectedValues {
+          entry["values"] = selectedValues
+        }
+        entries.append(entry)
       case "button":
         entries.append([
           "name": field.name, "kind": "button", "state": field.buttonState ?? "Off",
@@ -64,10 +71,14 @@ public enum FormValues {
         values.append(
           FormFieldValue(name: field.name, kind: "text", value: field.stringValue ?? ""))
       case .choice:
+        let selectedValues = field.selectedIndexes.compactMap { index in
+          field.options.indices.contains(index) ? field.options[index].export : nil
+        }
         values.append(
           FormFieldValue(
             name: field.name, kind: "choice", value: field.stringValue ?? "",
-            selectedIndex: field.selectedIndexes.first ?? -1))
+            selectedIndex: field.selectedIndexes.first ?? -1,
+            selectedValues: field.isMultiSelect ? selectedValues : nil))
       case .button where !field.isPushButton:
         values.append(
           FormFieldValue(
@@ -94,7 +105,9 @@ public enum FormValues {
       }
       return FormFieldValue(
         name: name, kind: kind, value: entry["value"] as? String,
-        selectedIndex: entry["selectedIndex"] as? Int, buttonState: entry["state"] as? String)
+        selectedIndex: entry["selectedIndex"] as? Int,
+        buttonState: entry["state"] as? String,
+        selectedValues: entry["values"] as? [String])
     }
   }
 
@@ -128,13 +141,25 @@ public enum FormValues {
       case (.text, "text"):
         commands.append(SetFormTextCommand(fieldName: value.name, text: value.value ?? ""))
       case (.choice, "choice"):
-        guard let exportValue = value.value, !exportValue.isEmpty,
-          field.options.contains(where: { $0.export == exportValue })
+        let selected = value.selectedValues
+          ?? (value.value.map { $0.isEmpty ? [] : [$0] } ?? [])
+        guard !selected.isEmpty,
+          selected.allSatisfy({ export in field.options.contains(where: { $0.export == export }) })
         else {
           skipped.append(value.name)
           continue
         }
-        commands.append(SetFormChoiceCommand(fieldName: value.name, exportValue: exportValue))
+        if field.isMultiSelect {
+          commands.append(
+            SetFormChoiceCommand(fieldName: value.name, exportValues: selected))
+        } else {
+          guard selected.count == 1 else {
+            skipped.append(value.name)
+            continue
+          }
+          commands.append(
+            SetFormChoiceCommand(fieldName: value.name, exportValue: selected[0]))
+        }
       case (.button, "button"):
         let state = value.buttonState.flatMap { $0 == "Off" ? nil : PDFName($0) }
         commands.append(SetFormButtonStateCommand(fieldName: value.name, state: state))

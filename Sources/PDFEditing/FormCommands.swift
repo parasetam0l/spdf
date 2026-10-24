@@ -373,12 +373,18 @@ public struct SetFormButtonStateCommand: PDFEditCommand, Equatable, Sendable {
 /// updating /V, /I, and every widget appearance transactionally.
 public struct SetFormChoiceCommand: PDFEditCommand, Equatable, Sendable {
   public let fieldName: String
-  /// Export value of the option to select.
-  public let exportValue: String
+  /// Export values of the options to select. Multi-select lists may carry
+  /// several; single-select fields require exactly one.
+  public let exportValues: [String]
 
   public init(fieldName: String, exportValue: String) {
     self.fieldName = fieldName
-    self.exportValue = exportValue
+    self.exportValues = [exportValue]
+  }
+
+  public init(fieldName: String, exportValues: [String]) {
+    self.fieldName = fieldName
+    self.exportValues = exportValues
   }
 
   public var name: String { "Set Form Choice" }
@@ -404,8 +410,15 @@ public struct SetFormChoiceCommand: PDFEditCommand, Equatable, Sendable {
     else {
       throw PDFError(.malformed, "The field dictionary is missing")
     }
-    fieldDictionary[PDFName("V")] = .string(AnnotationText.encode(exportValue))
-    fieldDictionary[PDFName("I")] = .array([.integer(Int64(context.index))])
+    if context.field.isMultiSelect {
+      fieldDictionary[PDFName("V")] = .array(
+        context.exportValues.map { .string(AnnotationText.encode($0)) })
+      fieldDictionary[PDFName("I")] = .array(
+        context.indexes.map { .integer(Int64($0)) })
+    } else {
+      fieldDictionary[PDFName("V")] = .string(AnnotationText.encode(context.exportValues[0]))
+      fieldDictionary[PDFName("I")] = .array([.integer(Int64(context.indexes[0]))])
+    }
     graph.objects[fieldID] = .dictionary(fieldDictionary)
     for widget in context.field.widgets {
       guard let widgetID = widget.objectID, let rect = widget.rect else { continue }
@@ -420,7 +433,8 @@ public struct SetFormChoiceCommand: PDFEditCommand, Equatable, Sendable {
 
   struct Context {
     let field: FormField
-    let index: Int
+    let indexes: [Int]
+    let exportValues: [String]
     let display: String
     let da: (size: Double, color: [Double])
   }
@@ -437,17 +451,24 @@ public struct SetFormChoiceCommand: PDFEditCommand, Equatable, Sendable {
     guard !field.isReadOnly else {
       throw PDFError(.unsupported, "This form field is read-only")
     }
-    guard !field.isMultiSelect else {
-      throw PDFError(.unsupported, "Multi-select choice fields are not supported yet")
+    guard !exportValues.isEmpty else {
+      throw PDFError(.malformed, "Choose at least one option")
     }
-    guard field.fieldID != nil else {
-      throw PDFError(.unsupported, "Direct field dictionaries cannot be filled in this profile")
+    guard field.isMultiSelect || exportValues.count == 1 else {
+      throw PDFError(.unsupported, "This choice field accepts one option")
     }
-    guard let index = field.options.firstIndex(where: { $0.export == exportValue }) else {
-      throw PDFError(.malformed, "Unknown choice option for this field")
+    var indexes: [Int] = []
+    for exportValue in exportValues {
+      guard let index = field.options.firstIndex(where: { $0.export == exportValue }) else {
+        throw PDFError(.malformed, "Unknown choice option for this field")
+      }
+      if !indexes.contains(index) { indexes.append(index) }
     }
+    let displays = indexes.map { field.options[$0].display }
     let da = SetFormTextCommand.parseDA(SetFormTextCommand.daValue(for: field, in: graph))
-    return Context(field: field, index: index, display: field.options[index].display, da: da)
+    return Context(
+      field: field, indexes: indexes, exportValues: indexes.map { field.options[$0].export },
+      display: displays.joined(separator: ", "), da: da)
   }
 }
 
