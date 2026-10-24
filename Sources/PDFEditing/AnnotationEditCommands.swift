@@ -107,9 +107,9 @@ public struct SetAnnotationStyleCommand: PDFEditCommand, Equatable, Sendable {
   public var name: String { "Set Annotation Style" }
 
   static let supportedSubtypes: Set<PDFName> = [
-    PDFName("Highlight"), PDFName("Underline"), PDFName("StrikeOut"), PDFName("Square"),
-    PDFName("Circle"), PDFName("Line"), PDFName("Ink"), PDFName("Text"),
-    PDFName("FreeText"), PDFName("Stamp"),
+    PDFName("Highlight"), PDFName("Underline"), PDFName("StrikeOut"), PDFName("Squiggly"),
+    PDFName("Square"), PDFName("Circle"), PDFName("Line"), PDFName("Ink"),
+    PDFName("Text"), PDFName("FreeText"), PDFName("Stamp"),
   ]
 
   public func validate(in graph: PDFGraph) throws {
@@ -162,6 +162,12 @@ public struct SetAnnotationStyleCommand: PDFEditCommand, Equatable, Sendable {
       let style: TextMarkupStyle = subtype == PDFName("Underline") ? .underline : .strikeout
       stream = AddTextMarkupCommand.appearance(
         style: style, quads: quads, rect: rect, color: newColor, opacity: newOpacity)
+    case PDFName("Squiggly"):
+      guard let quads = Self.quads(of: dictionary) else {
+        throw PDFError(.malformed, "Squiggly markup has no quadrilaterals")
+      }
+      stream = ImportCommentsCommand.squigglyAppearance(
+        quads: quads, rect: rect, color: newColor, opacity: newOpacity)
     case PDFName("Square"), PDFName("Circle"):
       let kind: ShapeKind = subtype == PDFName("Square") ? .square : .circle
       stream = AddShapeCommand.appearance(
@@ -326,7 +332,8 @@ public struct SetAnnotationStyleCommand: PDFEditCommand, Equatable, Sendable {
 
   static func validateGeometry(subtype: PDFName, dictionary: [PDFName: PDFValue]) throws {
     switch subtype {
-    case PDFName("Highlight"), PDFName("Underline"), PDFName("StrikeOut"):
+    case PDFName("Highlight"), PDFName("Underline"), PDFName("StrikeOut"),
+      PDFName("Squiggly"):
       guard quads(of: dictionary) != nil else {
         throw PDFError(.malformed, "Text markup has no quadrilaterals")
       }

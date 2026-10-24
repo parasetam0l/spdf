@@ -1346,10 +1346,9 @@ public struct ImportCommentsCommand: PDFEditCommand, Sendable {
       resources: AnnotationSupport.stateResources(opacity: opacity, blendMultiply: false))
   }
 
-  private static func squigglyAppearance(
+  static func squigglyAppearance(
     quads: [Double], rect: [Double], color: [Double], opacity: Double
-  ) -> PDFStream {
-    var content = "q\n"
+  ) -> PDFStream {    var content = "q\n"
     content += "\(AnnotationSupport.number(color[0])) "
     content += "\(AnnotationSupport.number(color[1])) "
     content += "\(AnnotationSupport.number(color[2])) RG\n"

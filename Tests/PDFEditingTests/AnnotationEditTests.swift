@@ -144,6 +144,30 @@ struct AnnotationEditTests {
     let inkReparsed = try PDFParser.parse(PDFWriter.write(inkStyled))
     #expect(inkReparsed.graph == inkStyled)
 
+    // Squiggly markup regenerates its wavy appearance.
+    let squiggly = try PDFEditingEngine.commit(
+      PDFTransaction([
+        ImportCommentsCommand(
+          entries: [
+            CommentExchangeEntry(
+              identity: "squiggly-1", pageIndex: 0, subtype: PDFName("Squiggly"),
+              rect: [20, 20, 120, 50],
+              quadPoints: [20, 50, 120, 50, 20, 20, 120, 20],
+              contents: "squiggly", color: [1, 0, 0], opacity: 1)
+          ], pageIDs: parsed.pageIDs)
+      ]), to: parsed.graph)
+    let squigglyStyled = try PDFEditingEngine.commit(
+      PDFTransaction([
+        SetAnnotationStyleCommand(
+          pageID: parsed.pageIDs[0], annotationIndex: 0, color: [0.3, 0.6, 0.9],
+          opacity: 0.5)
+      ]), to: squiggly)
+    let squigglyAnnotation = try #require(
+      try AnnotationInventory.annotations(in: squigglyStyled, pageID: parsed.pageIDs[0]).first)
+    let squigglyContent = try appearanceContent(of: squigglyAnnotation, in: squigglyStyled)
+    #expect(squigglyContent.contains("0.3 0.6 0.9 RG"))
+    #expect(squigglyContent.contains("/GS0 gs"))
+
     // Text notes, free text and stamps regenerate their generated appearances.
     let noteStyled = try PDFEditingEngine.commit(
       PDFTransaction([

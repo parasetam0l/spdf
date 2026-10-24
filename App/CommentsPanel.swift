@@ -39,9 +39,9 @@ struct CommentsPanel: View {
   }
 
   private static let styleableSubtypes: Set<PDFName> = [
-    PDFName("Highlight"), PDFName("Underline"), PDFName("StrikeOut"), PDFName("Square"),
-    PDFName("Circle"), PDFName("Line"), PDFName("Ink"), PDFName("Text"),
-    PDFName("FreeText"), PDFName("Stamp"),
+    PDFName("Highlight"), PDFName("Underline"), PDFName("StrikeOut"), PDFName("Squiggly"),
+    PDFName("Square"), PDFName("Circle"), PDFName("Line"), PDFName("Ink"),
+    PDFName("Text"), PDFName("FreeText"), PDFName("Stamp"),
   ]
 
   private static let subtypes: [PDFName] = [
