@@ -294,15 +294,13 @@ enum CapabilityContractAudit {
     "addChoiceField:", "addPushButton:", "addSignatureField:", "editFormFieldProperties:",
     "recalculateForm:", "distributeFormFields:", "cropPages:", "removePageMark:",
     "repairDocument:", "reviewTables:", "previewDOCX:", "convertColors:",
-    "createArchivalCopy:", "exportComments:", "importComments:",
+    "createArchivalCopy:", "exportComments:", "importComments:", "printDocument:",
   ]
 
   /// Selectors whose operation is covered only by an owned-core suite.
   private static let coreSelectors: Set<String> = []
 
-  private static let menuSelectors: Set<String> = [
-    "printDocument:",
-  ]
+  private static let menuSelectors: Set<String> = []
 
   static func run(menu: NSMenu?) -> Report {
     var contracts: [CapabilityContract] = []

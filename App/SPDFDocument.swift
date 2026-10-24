@@ -77,6 +77,8 @@ final class SPDFDocument: NSDocument {
   #if DEBUG
     /// The native diagnostic drives the real Save As panel on disposable files.
     static var diagnosticSavePanelObserver: ((NSSavePanel) -> Void)?
+    /// The native capability smoke observes and cancels the real Print panel.
+    static var printOperationObserver: ((NSPrintOperation) -> Void)?
     override func prepareSavePanel(_ savePanel: NSSavePanel) -> Bool {
       let prepared = super.prepareSavePanel(savePanel)
       Self.diagnosticSavePanelObserver?(savePanel)
@@ -3503,7 +3505,12 @@ final class SPDFDocument: NSDocument {
     guard let graph = editSession.currentGraph else { return }
     do {
       try PDFPrintExport.runPrintPanel(
-        pageIDs: editSession.pageIDs, in: graph, in: windowControllers.first?.window)
+        pageIDs: editSession.pageIDs, in: graph, in: windowControllers.first?.window,
+        onOperation: {
+          #if DEBUG
+            Self.printOperationObserver?($0)
+          #endif
+        })
     } catch {
       presentError(error)
     }

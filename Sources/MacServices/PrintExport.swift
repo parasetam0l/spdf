@@ -110,12 +110,16 @@ public enum PDFPrintExport {
   }
 
   /// Run the native print dialog for the whole document in a window.
+  /// The optional operation hook exists for native acceptance tests: it
+  /// observes the real NSPrintOperation before the system panel runs.
   public static func runPrintPanel(
     pageIDs: [PDFObjectID], in graph: PDFGraph, in window: NSWindow?,
-    options: PDFPrintOptions = .init()
+    options: PDFPrintOptions = .init(),
+    onOperation: ((NSPrintOperation) -> Void)? = nil
   ) throws {
     let view = try pageView(pageIDs: pageIDs, in: graph, options: options)
     let operation = NSPrintOperation(view: view, printInfo: printInfo(paperSize: view.frame.size))
+    onOperation?(operation)
     if let window {
       operation.runModal(
         for: window, delegate: nil, didRun: nil, contextInfo: nil)

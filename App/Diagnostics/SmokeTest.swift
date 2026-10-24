@@ -2765,6 +2765,24 @@
         createdImage.close()
         checkpoint("capability creation services passed")
 
+        #if DEBUG
+          SPDFDocument.printOperationObserver = { _ in
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+              if let cancel = AccessibilityAudit.applicationElement(labeled: "Cancel") {
+                _ = AccessibilityAudit.press(cancel)
+              } else {
+                NSApp.abortModal()
+              }
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+              NSApp.abortModal()
+            }
+          }
+          attachmentDocument.printDocument()
+          SPDFDocument.printOperationObserver = nil
+        #endif
+        checkpoint("capability print service passed")
+
         guard first.repairCurrentDocument()?.report != nil,
           first.docxPreviewText() != nil
         else { throw PDFError(.malformed, "Capability repair or DOCX preview service failed") }
