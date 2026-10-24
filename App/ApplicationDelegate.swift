@@ -1,6 +1,7 @@
 import AppKit
 import DocumentSession
 import MacServices
+import PDFCore
 import PDFEditing
 import SwiftUI
 
@@ -273,6 +274,65 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
   }
   @objc private func rotateRight(_ sender: Any?) {
     currentDocument?.rotateCurrentPage(byDegrees: 90)
+  }
+
+  @objc private func createPDFFromImages(_ sender: Any?) {
+    let panel = NSOpenPanel()
+    panel.allowedContentTypes = [.png, .jpeg, .tiff]
+    panel.allowsMultipleSelection = true
+    panel.message = "Choose images in the order they should become pages."
+    panel.prompt = "Choose"
+    panel.begin { [weak self] response in
+      guard response == .OK, !panel.urls.isEmpty, let self else { return }
+      let layoutPopup = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 200, height: 24))
+      layoutPopup.addItems(withTitles: ImagePDFCreation.PageLayout.allCases.map(\.title))
+      let alert = NSAlert()
+      alert.messageText = "Create PDF from Images"
+      alert.informativeText =
+        "Each image becomes one page. Letter and A4 fit with margins; original keeps "
+        + "the image pixel dimensions at 72 dpi."
+      alert.accessoryView = layoutPopup
+      alert.addButton(withTitle: "Create")
+      alert.addButton(withTitle: "Cancel")
+      guard alert.runModal() == .alertFirstButtonReturn else { return }
+      let layout = ImagePDFCreation.PageLayout.allCases[
+        max(0, layoutPopup.indexOfSelectedItem)]
+      var sources: [ImagePDFCreation.Source] = []
+      var skipped: [String] = []
+      for url in panel.urls {
+        guard let data = try? Data(contentsOf: url),
+          let raster = ImageImport.decode(data)
+        else {
+          skipped.append(url.lastPathComponent)
+          continue
+        }
+        sources.append(
+          ImagePDFCreation.Source(
+            width: raster.width, height: raster.height,
+            rgb8: raster.rgb8, alpha8: raster.alpha8))
+      }
+      guard !sources.isEmpty else {
+        self.documents.presentError(
+          PDFError(.unsupported, "None of the selected images could be read"))
+        return
+      }
+      do {
+        let pdf = try ImagePDFCreation.make(sources: sources, layout: layout)
+        guard let controller = self.documents as? DocumentController else {
+          throw PDFError(.malformed, "The document controller is unavailable")
+        }
+        try controller.newDocument(fromPDFData: pdf)
+        if !skipped.isEmpty {
+          let notice = NSAlert()
+          notice.messageText = "Some images were skipped"
+          notice.informativeText = skipped.joined(separator: ", ")
+          notice.addButton(withTitle: "OK")
+          notice.runModal()
+        }
+      } catch {
+        self.documents.presentError(error)
+      }
+    }
   }
   @objc private func cropPages(_ sender: Any?) {
     currentDocument?.presentCropPages()
@@ -605,6 +665,9 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
     if menuItem.action == #selector(showUpdateSettings) {
       return true
     }
+    if menuItem.action == #selector(createPDFFromImages) {
+      return true
+    }
     guard let document = currentDocument else { return false }
     switch menuItem.action {
     case #selector(togglePageTextBold), #selector(togglePageTextItalic):
@@ -807,6 +870,8 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
     add(
       "New PDF", #selector(NSDocumentController.newDocument(_:)), key: "n",
       target: documents, to: file)
+    add(
+      "Create PDF from Images…", #selector(createPDFFromImages), target: self, to: file)
     add(
       "Open…", #selector(NSDocumentController.openDocument(_:)), key: "o", target: documents,
       to: file)

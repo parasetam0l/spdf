@@ -24,6 +24,19 @@ final class DocumentController: NSDocumentController {
     }
   }
 
+  /// PAG-08: open generated PDF bytes as a new untitled document.
+  @discardableResult
+  func newDocument(fromPDFData data: Data) throws -> SPDFDocument {
+    guard let document = try makeUntitledDocument(ofType: "com.adobe.pdf") as? SPDFDocument
+    else { throw CocoaError(.fileReadUnknown) }
+    try document.read(from: data, ofType: "com.adobe.pdf")
+    document.updateChangeCount(.changeDone)
+    addDocument(document)
+    document.makeWindowControllers()
+    document.showWindows()
+    return document
+  }
+
   override func reviewUnsavedDocuments(
     withAlertTitle title: String?, cancellable: Bool, delegate: Any?,
     didReviewAllSelector selector: Selector?, contextInfo: UnsafeMutableRawPointer?
