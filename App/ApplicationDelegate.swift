@@ -280,6 +280,9 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
   @objc private func addPageMark(_ sender: Any?) {
     currentDocument?.presentAddPageMark()
   }
+  @objc private func splitDocument(_ sender: Any?) {
+    currentDocument?.presentSplitDocument()
+  }
   @objc private func movePageUp(_ sender: Any?) { currentDocument?.moveCurrentPage(by: -1) }
   @objc private func movePageDown(_ sender: Any?) { currentDocument?.moveCurrentPage(by: 1) }
   @objc private func insertBlankPage(_ sender: Any?) {
@@ -939,6 +942,7 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
       to: page)
     add("Crop Pages…", #selector(cropPages), target: self, to: page)
     add("Add Page Mark…", #selector(addPageMark), target: self, to: page)
+    add("Split Document…", #selector(splitDocument), target: self, to: page)
     page.addItem(.separator())
     add("Move Page Up", #selector(movePageUp), target: self, to: page)
     add("Move Page Down", #selector(movePageDown), target: self, to: page)

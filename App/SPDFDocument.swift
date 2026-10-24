@@ -3542,6 +3542,118 @@ final class SPDFDocument: NSDocument {
 
   /// P23-023: the page organizer window. Actions go through the session so
   /// each one is a single compound undo step.
+  /// PAG-03: split the current document into page groups written as separate
+  /// verified PDFs with predictable names. Every page may appear at most once
+  /// across the groups.
+  @discardableResult
+  func splitDocument(
+    to directory: URL, pageGroups: [[PDFObjectID]]
+  ) throws -> [(url: URL, report: DocumentAssemblyReport)] {
+    guard let graph = editSession.currentGraph, !pageGroups.isEmpty else {
+      throw PDFError(.malformed, "Choose at least one page group")
+    }
+    let allPages = Set(editSession.pageIDs)
+    var seen = Set<PDFObjectID>()
+    for group in pageGroups {
+      guard !group.isEmpty else {
+        throw PDFError(.malformed, "A split part has no pages")
+      }
+      for pageID in group {
+        guard allPages.contains(pageID) else {
+          throw PDFError(.malformed, "A split part references a missing page")
+        }
+        guard seen.insert(pageID).inserted else {
+          throw PDFError(.unsupported, "A page appears in more than one split part")
+        }
+      }
+    }
+    let base = fileURL?.deletingPathExtension().lastPathComponent ?? "Document"
+    let width = max(2, String(pageGroups.count).count)
+    var results: [(URL, DocumentAssemblyReport)] = []
+    for (index, group) in pageGroups.enumerated() {
+      let extracted = try DocumentAssembly.extract(
+        graph, pageIDs: group, labels: .preserve, catalogData: .firstDocument)
+      let data = try PDFWriter.write(extracted.graph)
+      let name = String(format: "%@-part-%0\(width)d.pdf", base, index + 1)
+      let url = directory.appendingPathComponent(name)
+      try VerifiedFileWriter.write(
+        data, to: url, expectedGraph: extracted.graph,
+        limits: SPDFDocumentResourcePolicy.parsingLimits)
+      results.append((url, extracted.report))
+    }
+    return results
+  }
+
+  /// PAG-03: choose every-N-pages or explicit comma-separated ranges, then a
+  /// destination folder. Files are named `<document>-part-01.pdf`.
+  func presentSplitDocument() {
+    guard canEditContent, let viewer, viewer.pageCount > 0 else { return }
+    let modePopup = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 170, height: 24))
+    modePopup.addItems(withTitles: ["Every N pages", "Page ranges"])
+    let nField = NSTextField(frame: NSRect(x: 0, y: 0, width: 70, height: 22))
+    nField.stringValue = "1"
+    let rangesField = NSTextField(frame: NSRect(x: 0, y: 0, width: 220, height: 22))
+    rangesField.stringValue = "1-\(viewer.pageCount)"
+    let rows: [[NSView]] = [
+      [NSTextField(labelWithString: "Split:"), modePopup],
+      [NSTextField(labelWithString: "Pages per file:"), nField],
+      [NSTextField(labelWithString: "Ranges:"), rangesField],
+    ]
+    let grid = NSGridView(views: rows)
+    grid.column(at: 0).xPlacement = .trailing
+    grid.frame = NSRect(x: 0, y: 0, width: 340, height: 100)
+    let alert = NSAlert()
+    alert.messageText = "Split Document"
+    alert.informativeText =
+      "Every-N groups pages in order; ranges treat each comma group as one file "
+      + "(for example 1-3, 4-6). A page cannot appear in two parts."
+    alert.accessoryView = grid
+    alert.addButton(withTitle: "Choose Folder…")
+    alert.addButton(withTitle: "Cancel")
+    guard alert.runModal() == .alertFirstButtonReturn else { return }
+    let pageIDs = editSession.pageIDs
+    var groups: [[PDFObjectID]] = []
+    if modePopup.indexOfSelectedItem == 0 {
+      let n = max(1, Int(nField.stringValue) ?? 1)
+      var index = 0
+      while index < pageIDs.count {
+        let end = min(pageIDs.count, index + n)
+        groups.append(Array(pageIDs[index..<end]))
+        index = end
+      }
+    } else {
+      for part in rangesField.stringValue.split(separator: ",") {
+        let indices = pageIndices(from: String(part), count: pageIDs.count)
+        guard !indices.isEmpty else { continue }
+        groups.append(indices.map { pageIDs[$0] })
+      }
+    }
+    guard !groups.isEmpty else {
+      NSSound.beep()
+      return
+    }
+    let panel = NSOpenPanel()
+    panel.canChooseDirectories = true
+    panel.canChooseFiles = false
+    panel.canCreateDirectories = true
+    panel.prompt = "Split Here"
+    panel.begin { [weak self] response in
+      guard response == .OK, let directory = panel.url, let self else { return }
+      do {
+        let results = try self.splitDocument(to: directory, pageGroups: groups)
+        let alert = NSAlert()
+        alert.messageText = "Document Split"
+        alert.informativeText =
+          results.map { "\($0.url.lastPathComponent): \($0.report.report())" }
+          .joined(separator: "\n\n")
+        alert.addButton(withTitle: "OK")
+        alert.runModal()
+      } catch {
+        self.presentError(error)
+      }
+    }
+  }
+
   func organizePages() {
     guard canEditContent, editSession.currentGraph != nil else { return }
     let model = PageOrganizerModel()

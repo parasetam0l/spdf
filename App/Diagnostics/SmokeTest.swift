@@ -1180,6 +1180,24 @@
           guard first.undoEdit(), try first.data(ofType: "com.adobe.pdf") == original else {
             throw PDFError(.malformed, "Page mark undo did not restore the original bytes")
           }
+          // PAG-03: split writes predictable verified parts and leaves the
+          // source session untouched.
+          let splitDirectory = output.appendingPathComponent("split", isDirectory: true)
+          try FileManager.default.createDirectory(
+            at: splitDirectory, withIntermediateDirectories: true)
+          let pageIDs = first.editSession.pageIDs
+          let parts = try first.splitDocument(
+            to: splitDirectory, pageGroups: [[pageIDs[0]], [pageIDs[1], pageIDs[2]]])
+          guard parts.count == 2,
+            parts[0].url.lastPathComponent.hasSuffix("-part-01.pdf"),
+            parts[1].url.lastPathComponent.hasSuffix("-part-02.pdf")
+          else { throw PDFError(.malformed, "Split output names are not predictable") }
+          let partPages = try parts.map {
+            try PDFParser.parse(Data(contentsOf: $0.url)).pageCount
+          }
+          guard partPages == [1, 2],
+            try first.data(ofType: "com.adobe.pdf") == original
+          else { throw PDFError(.malformed, "Split parts or source state are wrong") }
         }
 
         // Owned-core edit pipeline: rotate page 1, verify the edited bytes,
