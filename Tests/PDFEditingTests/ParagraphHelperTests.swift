@@ -207,6 +207,28 @@ struct ParagraphHelperTests {
     #expect(removedText.contains("Third item"))
   }
 
+  @Test func wrappedListItemsKeepMarkerAndContinuationTogether() throws {
+    let graph = fixture(lines: [
+      ("- A long item that wraps across the list width with enough words", 72, 680, 12),
+      ("to make a second line remain with its marker", 72, 660, 12),
+      ("- Next item", 72, 620, 12),
+    ])
+    let pageID = try PDFPageTree.pageIDs(in: graph)[0]
+    let candidates = try ParagraphReconstruction.candidates(pageID: pageID, in: graph)
+    let lists = ParagraphListReconstruction.lists(from: candidates)
+    let list = try #require(lists.first)
+    #expect(list.items.count == 2, "\(list.items.map(\.text)) candidates=\(candidates.map { $0.text })")
+    #expect(list.items[0].text.contains("second line remain"))
+    let edited = try PDFEditingEngine.commit(
+      PDFTransaction(try ParagraphListEditing.commands(
+        pageID: pageID, list: list, itemIndex: 0,
+        operation: .switchToNumbered, in: graph)), to: graph)
+    let text = try pageText(edited, pageID)
+    #expect(text.contains("1. A long item"))
+    #expect(text.contains("second line remain"))
+    #expect(text.contains("2. Next item"))
+  }
+
   @Test func tableCellsFormAGridAndEditIndependently() throws {
     let graph = fixture(lines: [
       ("Table of quarterly results", 72, 720, 14),
