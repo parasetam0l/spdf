@@ -44,11 +44,20 @@ public struct CommentFilter: Sendable, Equatable {
   public var pageIndex: Int?
   public var subtype: PDFName?
   public var state: PDFName?
+  /// Case-insensitive text match across contents, author, and subject.
+  public var text: String?
+  /// Exact, case-insensitive author match.
+  public var author: String?
 
-  public init(pageIndex: Int? = nil, subtype: PDFName? = nil, state: PDFName? = nil) {
+  public init(
+    pageIndex: Int? = nil, subtype: PDFName? = nil, state: PDFName? = nil,
+    text: String? = nil, author: String? = nil
+  ) {
     self.pageIndex = pageIndex
     self.subtype = subtype
     self.state = state
+    self.text = text
+    self.author = author
   }
 }
 
@@ -78,10 +87,22 @@ public enum CommentList {
 
   /// In-memory filtering for an already-listed set, used by the comment panel.
   public static func filter(_ comments: [Comment], by filter: CommentFilter) -> [Comment] {
-    comments.filter { comment in
+    let query = filter.text?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    let author = filter.author?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    return comments.filter { comment in
       if let pageIndex = filter.pageIndex, comment.pageIndex != pageIndex { return false }
       if let subtype = filter.subtype, comment.subtype != subtype { return false }
       if let state = filter.state, comment.reviewState != state { return false }
+      if let author, !author.isEmpty {
+        guard (comment.author ?? "").lowercased() == author else { return false }
+      }
+      if let query, !query.isEmpty {
+        let searchable = [comment.contents, comment.author, comment.subject]
+          .compactMap { $0 }
+          .joined(separator: "\n")
+          .lowercased()
+        guard searchable.contains(query) else { return false }
+      }
       return true
     }
   }

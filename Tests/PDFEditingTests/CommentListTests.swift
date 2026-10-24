@@ -44,6 +44,30 @@ struct CommentListTests {
         == 2)
   }
 
+  @Test func commentFiltersMatchTextAndAuthor() throws {
+    let (graph, pageIDs) = try annotatedDocument()
+    let comments = CommentList.comments(in: graph, pageIDs: pageIDs)
+    #expect(CommentList.filter(comments, by: CommentFilter(text: "NOTE")).count == 1)
+    #expect(CommentList.filter(comments, by: CommentFilter(text: " reviewed ")).isEmpty)
+    #expect(CommentList.filter(comments, by: CommentFilter(author: "ada")).count == 2)
+    #expect(
+      CommentList.filter(
+        comments, by: CommentFilter(pageIndex: 1, text: "ada")
+      ).count == 1)
+    #expect(
+      CommentList.filter(
+        comments, by: CommentFilter(text: "note", author: "Grace")
+      ).count == 1)
+    #expect(
+      CommentList.filter(
+        comments, by: CommentFilter(text: "note", author: "Ada")
+      ).isEmpty)
+    #expect(
+      CommentList.comments(
+        in: graph, pageIDs: pageIDs, filter: CommentFilter(text: "first", author: "Ada")
+      ).count == 1)
+  }
+
   @Test func subjectAuthorTimestampAndPrivacyDefaults() throws {
     let parsed = try PDFParser.parse(PDFFixtures.textWidthsPages())
     let pageID = parsed.pageIDs[0]
@@ -116,6 +140,7 @@ struct CommentListTests {
       PDFName("Rect"): .array([.integer(10), .integer(10), .integer(60), .integer(34)]),
       PDFName("QuadPoints"): .array(quadPoints),
       PDFName("Contents"): .string(Data("first".utf8)),
+      PDFName("T"): .string(Data("Ada".utf8)),
       PDFName("State"): .name(PDFName("Accepted")),
       PDFName("StateModel"): .name(PDFName("Marked")),
     ])
@@ -124,6 +149,7 @@ struct CommentListTests {
       PDFName("Subtype"): .name(PDFName("Text")),
       PDFName("Rect"): .array([.integer(70), .integer(10), .integer(90), .integer(30)]),
       PDFName("Contents"): .string(Data("note".utf8)),
+      PDFName("T"): .string(Data("Grace".utf8)),
     ])
     graph.objects[PDFObjectID(202)] = .dictionary([
       PDFName("Type"): .name(PDFName("Annot")),
@@ -134,6 +160,7 @@ struct CommentListTests {
       PDFName("Type"): .name(PDFName("Annot")),
       PDFName("Subtype"): .name(PDFName("Square")),
       PDFName("Rect"): .array([.integer(5), .integer(5), .integer(25), .integer(25)]),
+      PDFName("T"): .string(Data("Ada".utf8)),
     ])
     graph.objects[PDFObjectID(204)] = .dictionary([
       PDFName("Type"): .name(PDFName("Annot")),

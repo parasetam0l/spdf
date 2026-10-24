@@ -18,6 +18,8 @@ struct CommentsPanel: View {
   @State private var pageIndex: Int?
   @State private var subtype: PDFName?
   @State private var state: PDFName?
+  @State private var author: String?
+  @State private var query = ""
 
   private static let subtypes: [PDFName] = [
     PDFName("Highlight"), PDFName("Underline"), PDFName("StrikeOut"), PDFName("Squiggly"),
@@ -36,16 +38,38 @@ struct CommentsPanel: View {
 
   /// Thread rows with their reply depth, so replies render indented.
   private var rows: [(comment: Comment, depth: Int)] {
-    let filter = CommentFilter(pageIndex: pageIndex, subtype: subtype, state: state)
+    let filter = CommentFilter(
+      pageIndex: pageIndex, subtype: subtype, state: state, text: query, author: author)
     return CommentList.threads(comments, by: filter).flatMap { thread in
       [(thread.root, 0)] + thread.replies.map { ($0, 1) }
     }
+  }
+
+  private var authors: [String] {
+    Array(Set(comments.compactMap(\.author).filter { !$0.isEmpty })).sorted()
   }
 
   var body: some View {
     VStack(spacing: 0) {
       if !comments.isEmpty {
         VStack(alignment: .leading, spacing: 6) {
+          HStack(spacing: 4) {
+            Image(systemName: "magnifyingglass")
+              .foregroundStyle(.secondary)
+            TextField("Search comments", text: $query)
+              .textFieldStyle(.roundedBorder)
+              .accessibilityLabel("Search comments")
+            if !query.isEmpty {
+              Button {
+                query = ""
+              } label: {
+                Image(systemName: "xmark.circle.fill")
+                  .foregroundStyle(.secondary)
+              }
+              .buttonStyle(.plain)
+              .accessibilityLabel("Clear comment search")
+            }
+          }
           filterMenu(
             title: pageIndex == nil ? "All Pages" : "Page \((pageIndex ?? 0) + 1)"
           ) {
@@ -73,6 +97,15 @@ struct CommentsPanel: View {
               Button(Self.stateLabel(for: name)) { state = name }
             }
           }
+          if !authors.isEmpty {
+            filterMenu(title: author ?? "All Authors") {
+              Button("All Authors") { author = nil }
+              Divider()
+              ForEach(authors, id: \.self) { name in
+                Button(name) { author = name }
+              }
+            }
+          }
         }
         .padding(8)
         Divider()
@@ -83,7 +116,7 @@ struct CommentsPanel: View {
           symbol: "text.bubble",
           detail: comments.isEmpty
             ? "Select text on the page, then choose Highlight or Add Note."
-            : "Try another page, type, or status filter.")
+            : "Try another page, type, status, author, or search.")
       } else {
         List {
           ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
