@@ -276,6 +276,59 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
     currentDocument?.rotateCurrentPage(byDegrees: 90)
   }
 
+  @objc private func createPDFFromText(_ sender: Any?) {
+    let textView = NSTextView(frame: NSRect(x: 0, y: 0, width: 440, height: 220))
+    textView.isRichText = false
+    textView.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
+    textView.isVerticallyResizable = true
+    textView.isHorizontallyResizable = false
+    textView.textContainer?.widthTracksTextView = true
+    if let clipboard = NSPasteboard.general.string(forType: .string) {
+      textView.string = clipboard
+    }
+    let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 440, height: 220))
+    scroll.hasVerticalScroller = true
+    scroll.borderType = .bezelBorder
+    scroll.documentView = textView
+    let layoutPopup = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 120, height: 24))
+    layoutPopup.addItems(withTitles: TextPDFCreation.PageLayout.allCases.map(\.title))
+    let sizeField = NSTextField(frame: NSRect(x: 0, y: 0, width: 56, height: 22))
+    sizeField.stringValue = "12"
+    let controls = NSStackView(views: [
+      NSTextField(labelWithString: "Page:"), layoutPopup,
+      NSTextField(labelWithString: "Font size:"), sizeField,
+    ])
+    controls.orientation = .horizontal
+    controls.spacing = 8
+    let stack = NSStackView(views: [scroll, controls])
+    stack.orientation = .vertical
+    stack.alignment = .leading
+    stack.spacing = 8
+    stack.frame = NSRect(x: 0, y: 0, width: 440, height: 260)
+    let alert = NSAlert()
+    alert.messageText = "Create PDF from Text"
+    alert.informativeText =
+      "Text is wrapped and paginated into ordinary editable page content. "
+      + "The clipboard is used as the starting text when it contains plain text."
+    alert.accessoryView = stack
+    alert.addButton(withTitle: "Create")
+    alert.addButton(withTitle: "Cancel")
+    guard alert.runModal() == .alertFirstButtonReturn else { return }
+    let layout = TextPDFCreation.PageLayout.allCases[
+      max(0, layoutPopup.indexOfSelectedItem)]
+    let fontSize = Double(sizeField.stringValue) ?? 12
+    do {
+      let data = try TextPDFCreation.make(
+        text: textView.string, layout: layout, fontSize: fontSize)
+      guard let controller = documents as? DocumentController else {
+        throw PDFError(.malformed, "The document controller is unavailable")
+      }
+      try controller.newDocument(fromPDFData: data)
+    } catch {
+      documents.presentError(error)
+    }
+  }
+
   @objc private func createPDFFromImages(_ sender: Any?) {
     let panel = NSOpenPanel()
     panel.allowedContentTypes = [.png, .jpeg, .tiff]
@@ -668,6 +721,9 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
     if menuItem.action == #selector(createPDFFromImages) {
       return true
     }
+    if menuItem.action == #selector(createPDFFromText) {
+      return true
+    }
     guard let document = currentDocument else { return false }
     switch menuItem.action {
     case #selector(togglePageTextBold), #selector(togglePageTextItalic):
@@ -872,6 +928,8 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
       target: documents, to: file)
     add(
       "Create PDF from Images…", #selector(createPDFFromImages), target: self, to: file)
+    add(
+      "Create PDF from Text…", #selector(createPDFFromText), target: self, to: file)
     add(
       "Open…", #selector(NSDocumentController.openDocument(_:)), key: "o", target: documents,
       to: file)
