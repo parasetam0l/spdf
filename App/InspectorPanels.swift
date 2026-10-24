@@ -8,6 +8,8 @@ struct SelectionInspectorPanel: View {
   var onImageGeometry: ((Int, Int, Double, Double, Double, Double) -> Void)?
   var onImageFlip: ((Int, Int, Bool) -> Void)?
   var onImageRotate: ((Int, Int, Int) -> Void)?
+  var onImageCrop: ((Int, Int) -> Void)?
+  var onImageReplace: ((Int, Int) -> Void)?
 
   var body: some View {
     Form {
@@ -37,8 +39,9 @@ struct SelectionInspectorPanel: View {
         let placementIndex = target.imagePlacementIndex
       {
         ImageInspectorSection(
-          target: target, placementIndex: placementIndex,
-          onGeometry: onImageGeometry, onFlip: onImageFlip, onRotate: onImageRotate)
+          viewer: viewer, target: target, placementIndex: placementIndex,
+          onGeometry: onImageGeometry, onFlip: onImageFlip, onRotate: onImageRotate,
+          onCrop: onImageCrop, onReplace: onImageReplace)
       }
     }
     .formStyle(.grouped)
@@ -46,30 +49,40 @@ struct SelectionInspectorPanel: View {
   }
 }
 
-/// IMG-01: numeric page-space geometry plus rotate/flip for the selected image
-/// placement. Applying uses the document's existing undoable image commands.
+/// IMG-01: numeric page-space geometry, live preview, rotate/flip, crop and
+/// replace for the selected image placement. Apply is the only operation that
+/// commits; Cancel restores the canonical document.
 private struct ImageInspectorSection: View {
+  @ObservedObject var viewer: PDFViewingSession
   let target: AddedGraphicTarget
   let placementIndex: Int
   let onGeometry: ((Int, Int, Double, Double, Double, Double) -> Void)?
   let onFlip: ((Int, Int, Bool) -> Void)?
   let onRotate: ((Int, Int, Int) -> Void)?
+  let onCrop: ((Int, Int) -> Void)?
+  let onReplace: ((Int, Int) -> Void)?
   @State private var x: String
   @State private var y: String
   @State private var width: String
   @State private var height: String
+  @State private var previewing = false
 
   init(
-    target: AddedGraphicTarget, placementIndex: Int,
+    viewer: PDFViewingSession, target: AddedGraphicTarget, placementIndex: Int,
     onGeometry: ((Int, Int, Double, Double, Double, Double) -> Void)?,
     onFlip: ((Int, Int, Bool) -> Void)?,
-    onRotate: ((Int, Int, Int) -> Void)?
+    onRotate: ((Int, Int, Int) -> Void)?,
+    onCrop: ((Int, Int) -> Void)?,
+    onReplace: ((Int, Int) -> Void)?
   ) {
+    self.viewer = viewer
     self.target = target
     self.placementIndex = placementIndex
     self.onGeometry = onGeometry
     self.onFlip = onFlip
     self.onRotate = onRotate
+    self.onCrop = onCrop
+    self.onReplace = onReplace
     let rect = target.rect
     _x = State(initialValue: rect.count == 4 ? String(format: "%.2f", rect[0]) : "")
     _y = State(initialValue: rect.count == 4 ? String(format: "%.2f", rect[1]) : "")
@@ -87,6 +100,57 @@ private struct ImageInspectorSection: View {
     return (x, y, width, height)
   }
 
+  private var canEdit: Bool { viewer.allowsContentEditing && !viewer.isLocked }
+
+  private var previewKey: String { "\(x)|\(y)|\(width)|\(height)" }
+
+  private var canonicalKey: String {
+    guard target.rect.count == 4 else { return "" }
+    return [
+      String(format: "%.2f", target.rect[0]), String(format: "%.2f", target.rect[1]),
+      String(format: "%.2f", target.rect[2] - target.rect[0]),
+      String(format: "%.2f", target.rect[3] - target.rect[1]),
+    ].joined(separator: "|")
+  }
+
+  private func endPreview() {
+    if viewer.isPreviewingGraphic { viewer.endGraphicPreview() }
+    previewing = false
+  }
+
+  private func updatePreview() {
+    guard canEdit, previewKey != canonicalKey, let values, target.rect.count == 4
+    else {
+      endPreview()
+      return
+    }
+    let current = CGRect(
+      x: target.rect[0], y: target.rect[1],
+      width: target.rect[2] - target.rect[0], height: target.rect[3] - target.rect[1])
+    let proposed = CGRect(x: values.0, y: values.1, width: values.2, height: values.3)
+    guard
+      let mapping = GraphicSelectionModel.mapping(
+        member: current, from: current, to: proposed)
+    else {
+      endPreview()
+      return
+    }
+    viewer.previewGraphicTransform([
+      (target: target, dx: mapping.dx, dy: mapping.dy,
+       scaleX: mapping.scaleX, scaleY: mapping.scaleY)
+    ])
+    previewing = true
+  }
+
+  private func cancelPreview() {
+    endPreview()
+    guard target.rect.count == 4 else { return }
+    x = String(format: "%.2f", target.rect[0])
+    y = String(format: "%.2f", target.rect[1])
+    width = String(format: "%.2f", target.rect[2] - target.rect[0])
+    height = String(format: "%.2f", target.rect[3] - target.rect[1])
+  }
+
   var body: some View {
     Section("Image") {
       LabeledContent("Placement") { Text("\(placementIndex + 1)") }
@@ -95,26 +159,52 @@ private struct ImageInspectorSection: View {
       LabeledContent("Y") { TextField("Y", text: $y) }
       LabeledContent("Width") { TextField("Width", text: $width) }
       LabeledContent("Height") { TextField("Height", text: $height) }
+      if previewing {
+        Text("Previewing numeric geometry. Apply commits; Cancel restores.")
+          .font(.caption)
+          .foregroundStyle(.secondary)
+      }
       HStack {
         Button("Apply") {
           guard let values else { return }
+          endPreview()
           onGeometry?(target.pageIndex, placementIndex, values.0, values.1, values.2, values.3)
         }
-        .disabled(values == nil)
+        .disabled(values == nil || !canEdit)
+        Button("Cancel") { cancelPreview() }
+          .disabled(!previewing)
         Button("Rotate −90°") {
+          endPreview()
           onRotate?(target.pageIndex, placementIndex, -90)
         }
+        .disabled(!canEdit)
         Button("Rotate 90°") {
+          endPreview()
           onRotate?(target.pageIndex, placementIndex, 90)
         }
+        .disabled(!canEdit)
       }
       HStack {
         Button("Flip Horizontal") {
+          endPreview()
           onFlip?(target.pageIndex, placementIndex, true)
         }
+        .disabled(!canEdit)
         Button("Flip Vertical") {
+          endPreview()
           onFlip?(target.pageIndex, placementIndex, false)
         }
+        .disabled(!canEdit)
+        Button("Crop…") {
+          endPreview()
+          onCrop?(target.pageIndex, placementIndex)
+        }
+        .disabled(!canEdit)
+        Button("Replace…") {
+          endPreview()
+          onReplace?(target.pageIndex, placementIndex)
+        }
+        .disabled(!canEdit)
       }
       Text("Page-space points. Rotated or clipped placements may refuse a transform.")
         .font(.caption)
@@ -127,6 +217,8 @@ private struct ImageInspectorSection: View {
       width = String(format: "%.2f", rect[2] - rect[0])
       height = String(format: "%.2f", rect[3] - rect[1])
     }
+    .onChange(of: previewKey) { _, _ in updatePreview() }
+    .onDisappear { endPreview() }
   }
 }
 

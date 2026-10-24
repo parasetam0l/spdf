@@ -43,6 +43,8 @@ struct WorkspaceView: View {
   var onImageGeometry: ((Int, Int, Double, Double, Double, Double) -> Void)? = nil
   var onImageFlip: ((Int, Int, Bool) -> Void)? = nil
   var onImageRotate: ((Int, Int, Int) -> Void)? = nil
+  var onImageCrop: ((Int, Int) -> Void)? = nil
+  var onImageReplace: ((Int, Int) -> Void)? = nil
   var onHighlight: () -> Void
   var onNote: () -> Void
   @State private var pageEntry = "1"
@@ -489,7 +491,8 @@ struct WorkspaceView: View {
       case .inspector:
         SelectionInspectorPanel(
           viewer: viewer, onImageGeometry: onImageGeometry,
-          onImageFlip: onImageFlip, onImageRotate: onImageRotate)
+          onImageFlip: onImageFlip, onImageRotate: onImageRotate,
+          onImageCrop: onImageCrop, onImageReplace: onImageReplace)
       case .info:
         DocumentInfoPanel(viewer: viewer)
       case .structure:

@@ -619,6 +619,13 @@ final class SPDFDocument: NSDocument {
           _ = self?.rotateImage(
             pageIndex: page, placementIndex: placement, degrees: degrees)
         },
+        onImageCrop: { [weak self] page, placement in
+          self?.promptCropImage(pageIndex: page, placementIndex: placement)
+        },
+        onImageReplace: { [weak self] page, placement in
+          self?.promptReplaceImage(
+            pageIndex: page, placementIndex: placement, shared: false)
+        },
         onHighlight: { [weak self] in self?.addAnnotationFromSelection(.highlight) },
         onNote: { [weak self] in self?.addAnnotationFromSelection(.note) }))
     // A plain AppKit content view owns the workspace dimensions. Keep the
