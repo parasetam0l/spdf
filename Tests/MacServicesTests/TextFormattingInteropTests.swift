@@ -210,6 +210,77 @@ struct TextFormattingInteropTests {
     #expect(plan.fragments.map { $0.format.sourceFont?.resource } == [tiny.resource])
   }
 
+  @Test @MainActor func extendedCharacterAttributesSurviveNativeRendering() throws {
+    let view = FormatTestTextView(frame: .zero)
+    let format = PageTextFormat(
+      size: 12, characterSpacing: 1, wordSpacing: 3, rise: 2,
+      underline: true, strikeout: true)
+    let formatting = NativeTextFormatting(
+      view: view, fragments: [.init(text: "A B", format: format)], initial: format)
+    formatting.render(scale: 1, minimumLineSpacing: 16)
+    let fragments = formatting.fragments()
+    #expect(fragments.count == 1)
+    #expect(fragments[0].format.underline)
+    #expect(fragments[0].format.strikeout)
+    #expect(abs(fragments[0].format.rise - 2) < 0.001)
+    #expect(abs(fragments[0].format.wordSpacing - 3) < 0.001)
+    let storage = try #require(view.textStorage)
+    #expect((storage.attribute(.underlineStyle, at: 0, effectiveRange: nil) as? Int) != nil)
+    #expect((storage.attribute(.strikethroughStyle, at: 0, effectiveRange: nil) as? Int) != nil)
+    let spaceKern = try #require(
+      storage.attribute(.kern, at: 1, effectiveRange: nil) as? Double)
+    #expect(abs(spaceKern - 4) < 0.01)
+  }
+
+  @Test @MainActor func riseMovesNativeGlyphsWithoutChangingTheStoredPointSize() throws {
+    func origin(raise rise: Double) -> CGFloat {
+      let view = FormatTestTextView(frame: .zero)
+      let format = PageTextFormat(size: 12, rise: rise)
+      let formatting = NativeTextFormatting(
+        view: view, fragments: [.init(text: "A", format: format)], initial: format)
+      formatting.render(scale: 1, minimumLineSpacing: 16)
+      let manager = try! #require(view.layoutManager)
+      _ = try! #require(view.textContainer)
+      manager.ensureLayout(for: view.textContainer!)
+      return manager.location(forGlyphAt: 0).y
+    }
+    let normal = origin(raise: 0)
+    let raised = origin(raise: 4)
+    #expect(abs(normal - raised - 4) < 0.1)
+  }
+
+  @Test @MainActor func richPastePreservesSupportedRunsAndRefusesUnsupportedFonts() throws {
+    let view = FormatTestTextView(frame: .zero)
+    let base = PageTextFormat(size: 12)
+    let formatting = NativeTextFormatting(
+      view: view, fragments: [.init(text: "Keep", format: base)], initial: base)
+    formatting.render(scale: 1, minimumLineSpacing: 16)
+    let attributed = NSMutableAttributedString(string: "AB")
+    let font = try #require(NSFont(name: "Helvetica-Bold", size: 16))
+    attributed.addAttributes([
+      .font: font,
+      .underlineStyle: NSUnderlineStyle.single.rawValue,
+      .foregroundColor: NSColor(srgbRed: 0.8, green: 0.1, blue: 0.2, alpha: 1),
+    ], range: NSRange(location: 0, length: 2))
+    let insertion = formatting.richInsertionPlan(
+      attributed, replacing: NSRange(location: 0, length: 0))
+    #expect(insertion.issue == nil)
+    #expect(insertion.fragments.map(\.text).joined() == "AB")
+    #expect(insertion.fragments[0].format.font == .helveticaBold)
+    #expect(insertion.fragments[0].format.underline)
+    view.insertText(try #require(insertion.attributedText),
+      replacementRange: NSRange(location: 0, length: 0))
+    #expect(view.string == "ABKeep")
+    #expect(formatting.fragments().last?.format == base)
+
+    let unsupported = NSAttributedString(
+      string: "X", attributes: [.font: NSFont(name: "Arial", size: 12) ?? font])
+    let refused = formatting.richInsertionPlan(
+      unsupported, replacing: NSRange(location: 0, length: 0))
+    #expect(refused.issue?.contains("Rich paste") == true)
+    #expect(refused.attributedText == nil)
+  }
+
   @Test func overflowCorrectionClassifiesOnlyCorrectableFailures() {
     let collision = PageTextOverflowCorrection.classify(error: PDFError(
       .unsupported, "This edit would overlap another text block. Shorten the text"))

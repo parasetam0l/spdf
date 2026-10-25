@@ -11,6 +11,13 @@ public enum PageTextFormatChange: Sendable {
   case italic(Bool)
   case size(Double)
   case color([Double])
+  case underline(Bool)
+  case strikeout(Bool)
+  case characterSpacing(Double)
+  case wordSpacing(Double)
+  case rise(Double)
+  case superscript(Bool)
+  case subscripted(Bool)
 }
 
 /// A local insertion plan. Mixed embedded subsets become attributed runs;
@@ -197,6 +204,99 @@ public final class NativeTextFormatting {
       attributedText: attributed, issue: nil)
   }
 
+  /// TXT-08: preserve supported rich-paste character formatting. A run whose
+  /// font or character cannot be represented by this writer is refused with a
+  /// reason instead of silently changing it to the destination style.
+  public func richInsertionPlan(
+    _ attributed: NSAttributedString, replacing range: NSRange
+  ) -> NativeTextInsertionPlan {
+    guard let view else {
+      return .init(usesSourceFontFallback: false, fragments: [], attributedText: nil,
+        issue: "The page text editor is unavailable.")
+    }
+    guard range.location != NSNotFound,
+      range.location >= 0, NSMaxRange(range) <= (view.string as NSString).length
+    else {
+      return .init(usesSourceFontFallback: false, fragments: [], attributedText: nil,
+        issue: "The paste range is no longer available.")
+    }
+    let base = Self.format(view.typingAttributes, fallback: fallback)
+    var fragments: [PageTextFragment] = []
+    var issue: String?
+    attributed.enumerateAttributes(
+      in: NSRange(location: 0, length: attributed.length), options: []
+    ) { attributes, runRange, stop in
+      let text = (attributed.string as NSString).substring(with: runRange)
+      guard !text.isEmpty else { return }
+      var format = base
+      if let font = attributes[.font] as? NSFont {
+        let familyName = font.familyName?.lowercased() ?? ""
+        let family: AddedTextStyle.Family
+        if familyName.contains("times") { family = .times }
+        else if familyName.contains("courier") { family = .courier }
+        else if familyName.contains("helvetica") { family = .helvetica }
+        else {
+          issue = "Rich paste font “\(font.familyName ?? font.fontName)” is not supported. Use Paste and Match Style."
+          stop.pointee = true
+          return
+        }
+        let name = font.fontName.lowercased()
+        let bold = name.contains("bold") || font.fontDescriptor.symbolicTraits.contains(.bold)
+        let italic = name.contains("it") || font.fontDescriptor.symbolicTraits.contains(.italic)
+        format.font = .face(family: family, bold: bold, italic: italic)
+        format.sourceFont = nil
+        format.customFont = nil
+        format.characterSpacing = 0
+        format.size = font.pointSize
+      }
+      if let color = attributes[.foregroundColor] as? NSColor,
+        let rgb = color.usingColorSpace(.sRGB) {
+        format.color = [Double(rgb.redComponent), Double(rgb.greenComponent),
+          Double(rgb.blueComponent)]
+        format.opacity = Double(rgb.alphaComponent)
+      }
+      if let underline = attributes[.underlineStyle] as? Int {
+        format.underline = underline != 0
+      }
+      if let strikeout = attributes[.strikethroughStyle] as? Int {
+        format.strikeout = strikeout != 0
+      }
+      if let rise = attributes[.baselineOffset] as? NSNumber {
+        format.rise = rise.doubleValue
+      }
+      if let spacing = attributes[.kern] as? NSNumber {
+        format.characterSpacing = spacing.doubleValue / max(0.01, scale)
+      }
+      guard format.isValid, StandardTextFont.canEncode(text) else {
+        issue = "Rich paste contains a font size, spacing or character this writer cannot represent. Use Paste and Match Style."
+        stop.pointee = true
+        return
+      }
+      if let last = fragments.last, last.format == format {
+        fragments[fragments.count - 1] = .init(text: last.text + text, format: format)
+      } else {
+        fragments.append(.init(text: text, format: format))
+      }
+    }
+    if let issue {
+      return .init(usesSourceFontFallback: false, fragments: fragments, attributedText: nil,
+        issue: issue)
+    }
+    guard !fragments.isEmpty else {
+      return .init(usesSourceFontFallback: false, fragments: [], attributedText: nil,
+        issue: "The clipboard has no pastable text.")
+    }
+    let result = NSMutableAttributedString(string: "")
+    let paragraphStyle = view.typingAttributes[.paragraphStyle]
+    for fragment in fragments {
+      var attrs = attributes(fragment.format, scale: scale)
+      if let paragraphStyle { attrs[.paragraphStyle] = paragraphStyle }
+      result.append(NSAttributedString(string: fragment.text, attributes: attrs))
+    }
+    return .init(usesSourceFontFallback: false, fragments: fragments,
+      attributedText: result, issue: nil)
+  }
+
   private func replacementSpacing(_ text: String, replacing range: NSRange,
     base: PageTextFormat) -> [Double]? {
     guard range.length > 0, !text.isEmpty,
@@ -311,6 +411,13 @@ public final class NativeTextFormatting {
       if format.font.isItalic != first.font.isItalic { mixed.insert("italic") }
       if format.size != first.size { mixed.insert("size") }
       if format.color != first.color { mixed.insert("color") }
+      if format.underline != first.underline { mixed.insert("underline") }
+      if format.strikeout != first.strikeout { mixed.insert("strikeout") }
+      if abs(format.rise - first.rise) > 1e-6 { mixed.insert("rise") }
+      if abs(format.characterSpacing - first.characterSpacing) > 1e-6 {
+        mixed.insert("characterSpacing")
+      }
+      if abs(format.wordSpacing - first.wordSpacing) > 1e-6 { mixed.insert("wordSpacing") }
     }
     return (first, mixed, isTyping ? "Selected characters" : "Whole text box",
       formats.contains { $0.sourceFont != nil || $0.customFont != nil })
@@ -403,7 +510,9 @@ public final class NativeTextFormatting {
         }) else {
         return "This licensed font cannot safely embed or preview every selected character. The format was kept."
       }
-    case .size, .color: break
+    case .size, .color, .underline, .strikeout, .characterSpacing, .wordSpacing, .rise,
+      .superscript, .subscripted:
+      break
     }
     func changed(_ source: PageTextFormat) -> PageTextFormat {
       var result = source
@@ -426,6 +535,27 @@ public final class NativeTextFormatting {
         result.font = .face(family: source.font.family, bold: source.font.isBold, italic: enabled)
       case .size(let size): result.size = size
       case .color(let color): result.color = color
+      case .underline(let enabled): result.underline = enabled
+      case .strikeout(let enabled): result.strikeout = enabled
+      case .characterSpacing(let value): result.characterSpacing = value
+      case .wordSpacing(let value): result.wordSpacing = value
+      case .rise(let value): result.rise = value
+      case .superscript(let enabled):
+        if enabled {
+          result.rise = source.size * 0.35
+          result.size = max(2, source.size * 0.65)
+        } else if source.rise > 0.01 {
+          result.size = max(2, source.size / 0.65)
+          result.rise = 0
+        }
+      case .subscripted(let enabled):
+        if enabled {
+          result.rise = -source.size * 0.20
+          result.size = max(2, source.size * 0.65)
+        } else if source.rise < -0.01 {
+          result.size = max(2, source.size / 0.65)
+          result.rise = 0
+        }
       }
       return result
     }
@@ -556,6 +686,14 @@ public final class NativeTextFormatting {
     storage.beginEditing()
     for (range, format) in pieces {
       storage.addAttributes(attributes(format, scale: scale), range: range)
+      if abs(format.wordSpacing) > 1e-9 {
+        let text = (storage.string as NSString).substring(with: range) as NSString
+        for offset in 0..<text.length where text.character(at: offset) == 0x20 {
+          storage.addAttribute(
+            .kern, value: (format.characterSpacing + format.wordSpacing) * scale,
+            range: NSRange(location: range.location + offset, length: 1))
+        }
+      }
       if let font = storage.attribute(.font, at: range.location, effectiveRange: nil) as? NSFont {
         NativeParagraphEditing.applySourceAdvances(to: storage, range: range, format: format,
           font: font, profiles: profiles, scale: scale)
@@ -594,6 +732,9 @@ public final class NativeTextFormatting {
     if abs(format.obliqueness) > 1e-9 {
       result[.obliqueness] = CGFloat(format.obliqueness)
     }
+    if format.underline { result[.underlineStyle] = NSUnderlineStyle.single.rawValue }
+    if format.strikeout { result[.strikethroughStyle] = NSUnderlineStyle.single.rawValue }
+    if abs(format.rise) > 1e-9 { result[.baselineOffset] = format.rise * scale }
     if format.syntheticBoldStrokeWidth > 0, format.size > 0 {
       result[.strokeWidth] = -(format.syntheticBoldStrokeWidth / format.size * 100)
       result[.strokeColor] = result[.foregroundColor]
@@ -603,7 +744,8 @@ public final class NativeTextFormatting {
   private static func dictionary(_ format: PageTextFormat) -> NSDictionary {
     var result: [String: Any] = ["font": format.font.rawValue, "size": format.size,
       "color": format.color, "spacing": format.characterSpacing, "opacity": format.opacity,
-      "obliqueness": format.obliqueness]
+      "obliqueness": format.obliqueness, "wordSpacing": format.wordSpacing,
+      "rise": format.rise, "underline": format.underline, "strikeout": format.strikeout]
     if let source = format.sourceFont {
       result["resource"] = String(decoding: source.resource.bytes, as: UTF8.self)
       result["sourceName"] = source.name
@@ -642,7 +784,11 @@ public final class NativeTextFormatting {
       customFont: custom,
       characterSpacing: dictionary["spacing"] as? Double ?? 0,
       opacity: dictionary["opacity"] as? Double ?? 1,
-      obliqueness: dictionary["obliqueness"] as? Double ?? fallback.obliqueness)
+      obliqueness: dictionary["obliqueness"] as? Double ?? fallback.obliqueness,
+      wordSpacing: dictionary["wordSpacing"] as? Double ?? fallback.wordSpacing,
+      rise: dictionary["rise"] as? Double ?? fallback.rise,
+      underline: dictionary["underline"] as? Bool ?? fallback.underline,
+      strikeout: dictionary["strikeout"] as? Bool ?? fallback.strikeout)
   }
 
   private static func nativeFont(_ font: CustomTextFont, size: Double) -> NSFont? {

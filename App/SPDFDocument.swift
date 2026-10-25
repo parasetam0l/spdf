@@ -1584,6 +1584,23 @@ final class SPDFDocument: NSDocument {
 
   /// Text Format → Bold/Italic service entry point. The menu handlers call
   /// these same methods.
+  func togglePageTextUnderline() {
+    guard let viewer, viewer.canFormatPageText else { return }
+    viewer.pageTextFormattingApplier?(
+      .underline(
+        viewer.pageTextMixedFormatting.contains("underline") || !viewer.pageTextStyle.underline))
+  }
+
+  func togglePageTextSuperscript() {
+    guard let viewer, viewer.canFormatPageText else { return }
+    viewer.pageTextFormattingApplier?(.superscript(!(viewer.pageTextStyle.rise > 0.01)))
+  }
+
+  func togglePageTextSubscript() {
+    guard let viewer, viewer.canFormatPageText else { return }
+    viewer.pageTextFormattingApplier?(.subscripted(!(viewer.pageTextStyle.rise < -0.01)))
+  }
+
   func toggleSelectedTextBold() {
     guard let viewer,
       let face = StandardTextFont(rawValue: viewer.pageTextStyle.fontFamily)

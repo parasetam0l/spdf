@@ -1766,6 +1766,15 @@
         throw PDFError(.malformed, "Missing character-formatting canvas")
       }
       formatted.beginTyping()
+      guard formatted.textView.isContinuousSpellCheckingEnabled,
+        !formatted.textView.isAutomaticSpellingCorrectionEnabled else {
+        throw PDFError(.malformed, "Spell suggestions were unavailable or automatic correction was on")
+      }
+      viewer.pageTextSpellCheckingApplier?(false)
+      guard !formatted.textView.isContinuousSpellCheckingEnabled else {
+        throw PDFError(.malformed, "Spell-check toggle did not disable native checking")
+      }
+      viewer.pageTextSpellCheckingApplier?(true)
       checkpoint("character formatting typing started")
       let styledText = "\nKeep these words in a different style. The rest of this paragraph keeps its own font and wraps naturally.\n\nNext paragraph keeps its blank line."
       formatted.textView.insertText(styledText, replacementRange:
@@ -1825,6 +1834,32 @@
         throw PDFError(.malformed, "Inline-format Redo did not restore all traits")
       }
       checkpoint("document Undo and Redo routed to the pending inline-format draft")
+      formatted.textView.setSelectedRange((styledText as NSString).range(of: "different style"))
+      viewer.pageTextFormattingApplier?(.underline(true))
+      viewer.pageTextFormattingApplier?(.strikeout(true))
+      viewer.pageTextFormattingApplier?(.characterSpacing(0.5))
+      viewer.pageTextFormattingApplier?(.wordSpacing(2))
+      func extendedSegments() -> [PageTextSegment] {
+        formatted.pageLines().flatMap(\.segments).filter { $0.text.contains("different") }
+      }
+      guard let extended = extendedSegments().first,
+        extended.format.underline, extended.format.strikeout,
+        abs(extended.format.characterSpacing - 0.5) < 0.001,
+        abs(extended.format.wordSpacing - 2) < 0.001 else {
+        throw PDFError(.malformed, "Extended character formatting was not applied")
+      }
+      viewer.pageTextFormattingApplier?(.superscript(true))
+      guard let raised = extendedSegments().first,
+        raised.format.rise > 0.01, raised.format.size < 16 else {
+        throw PDFError(.malformed, "Superscript formatting was not applied")
+      }
+      viewer.pageTextFormattingApplier?(.superscript(false))
+      guard let normalScript = extendedSegments().first,
+        abs(normalScript.format.rise) < 0.001,
+        abs(normalScript.format.size - 16) < 0.01,
+        normalScript.format.underline, normalScript.format.strikeout else {
+        throw PDFError(.malformed, "Removing superscript lost other character formatting")
+      }
       formatted.textView.setSelectedRange((styledText as NSString).range(of: "\n\n"))
       viewer.pageTextFormattingApplier?(.size(26))
       checkpoint("character formatting blank paragraph styled")
@@ -1832,7 +1867,10 @@
       let styledBox = formatted.pageBox()
       guard styledLines.contains(where: { $0.text.isEmpty && $0.endsParagraph }),
         styledLines.flatMap(\.segments).filter({ !$0.text.contains("these words") })
-          .allSatisfy({ $0.format.font == .helvetica && $0.format.size == 16 }) else {
+          .allSatisfy({ $0.format.font == .helvetica && $0.format.size == 16 }),
+        styledLines.flatMap(\.segments).contains(where: {
+          $0.format.underline && $0.format.strikeout && ($0.width ?? 0) > 0
+        }) else {
         throw PDFError(.malformed, "Formatting changed neighbors or lost the blank paragraph")
       }
       try JSONSerialization.data(withJSONObject: [
@@ -1860,6 +1898,10 @@
         abs(styledTarget.rect[2] - styledTarget.rect[0] - 287.125) < 0.001,
         styledTarget.paragraph?.fragments.contains(where: {
           $0.text == "these words" && $0.format == emphasized.format
+        }) == true,
+        styledTarget.paragraph?.fragments.contains(where: {
+          $0.text.contains("different") && $0.format.underline && $0.format.strikeout
+            && abs($0.format.wordSpacing - 2) < 0.001
         }) == true else {
         throw PDFError(.malformed, "Saved formatted box lost text, styles, breaks or exact width")
       }

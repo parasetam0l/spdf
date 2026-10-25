@@ -457,6 +457,9 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
   }
   @objc private func showFind(_ sender: Any?) { currentDocument?.showFind() }
   @objc private func showFindReplace(_ sender: Any?) { currentDocument?.showFindReplace() }
+  @objc private func togglePageTextUnderline(_ sender: Any?) { currentDocument?.togglePageTextUnderline() }
+  @objc private func togglePageTextSuperscript(_ sender: Any?) { currentDocument?.togglePageTextSuperscript() }
+  @objc private func togglePageTextSubscript(_ sender: Any?) { currentDocument?.togglePageTextSubscript() }
   @objc private func findNext(_ sender: Any?) { currentDocument?.findNext() }
   @objc private func findPrevious(_ sender: Any?) { currentDocument?.findPrevious() }
   @objc private func showPagesSidebar(_ sender: Any?) { currentDocument?.viewer?.showPages() }
@@ -767,7 +770,9 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
     }
     guard let document = currentDocument else { return false }
     switch menuItem.action {
-    case #selector(togglePageTextBold), #selector(togglePageTextItalic):
+    case #selector(togglePageTextBold), #selector(togglePageTextItalic),
+      #selector(togglePageTextUnderline), #selector(togglePageTextSuperscript),
+      #selector(togglePageTextSubscript):
       return document.viewer?.canFormatPageText == true
     case #selector(showFind), #selector(showFindReplace):
       guard let viewer = document.viewer else { return false }
@@ -1023,6 +1028,12 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
     add("Cut", #selector(NSText.cut(_:)), key: "x", to: edit)
     add("Copy", #selector(NSText.copy(_:)), key: "c", to: edit)
     add("Paste", #selector(NSText.paste(_:)), key: "v", to: edit)
+    add(
+      "Paste and Match Style", #selector(NSTextView.pasteAsPlainText(_:)), key: "v",
+      modifiers: [.command, .option], to: edit)
+    add(
+      "Paste Rich Text", #selector(NSTextView.pasteAsRichText(_:)), key: "v",
+      modifiers: [.command, .shift], to: edit)
     add("Copy as Rich Text", #selector(copyAsRichText), target: self, to: edit)
     add("Select All", #selector(NSText.selectAll(_:)), key: "a", to: edit)
     add("Select Next Page Object", #selector(selectNextPageObject(_:)), key: "\u{F701}",
@@ -1032,6 +1043,11 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
     let format = submenu("Text Format", in: edit)
     add("Bold", #selector(togglePageTextBold), key: "b", target: self, to: format)
     add("Italic", #selector(togglePageTextItalic), key: "i", target: self, to: format)
+    add("Underline", #selector(togglePageTextUnderline), key: "u", target: self, to: format)
+    add("Superscript", #selector(togglePageTextSuperscript), key: "+",
+      modifiers: [.command, .shift], target: self, to: format)
+    add("Subscript", #selector(togglePageTextSubscript), key: "-",
+      modifiers: [.command, .shift], target: self, to: format)
     edit.addItem(.separator())
     add("Find…", #selector(showFind), key: "f", target: self, to: edit)
     add(

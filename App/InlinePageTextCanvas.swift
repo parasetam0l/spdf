@@ -60,11 +60,26 @@ final class InlinePageTextView: NSTextView {
   var onMagnify: ((NSEvent) -> Void)?
   var toggleBold: (() -> Void)?
   var toggleItalic: (() -> Void)?
+  var toggleUnderline: (() -> Void)?
   /// Return true when the canvas inserted attributed text to preserve source
   /// character spacing or use another verified font from the paragraph.
   var insertWithSourceFallback: ((Any, NSRange) -> Bool)?
   override var undoManager: UndoManager? { typingUndo }
   override func paste(_ sender: Any?) { pasteAsPlainText(sender) }
+  /// Explicit rich-paste route. The canvas refuses unsupported rich styles
+  /// rather than letting AppKit substitute a font or drop characters.
+  override func pasteAsRichText(_ sender: Any?) {
+    if let value = NSPasteboard.general.readObjects(
+      forClasses: [NSAttributedString.self], options: nil)?.first as? NSAttributedString,
+      insertWithSourceFallback?(value, selectedRange()) == true {
+      return
+    }
+    super.pasteAsRichText(sender)
+  }
+
+  func insertPlannedText(_ value: Any, replacementRange: NSRange) {
+    super.insertText(value, replacementRange: replacementRange)
+  }
 
   override func insertText(_ string: Any, replacementRange: NSRange) {
     if insertWithSourceFallback?(string, replacementRange) == true { return }
@@ -88,13 +103,15 @@ final class InlinePageTextView: NSTextView {
     // Turkish input sources can report dotless ı or dotted capital İ for
     // the same command. Keep the text command usable in those layouts.
     case "i", "ı", "i\u{0307}": return "i"
+    case "u": return "u"
     default: return nil
     }
   }
 
   private func performFormattingKey(_ event: NSEvent) -> Bool {
     let action = Self.formattingKey(event) == "b" ? toggleBold
-      : Self.formattingKey(event) == "i" ? toggleItalic : nil
+      : Self.formattingKey(event) == "i" ? toggleItalic
+      : Self.formattingKey(event) == "u" ? toggleUnderline : nil
     guard let action else { return false }
     action()
     return true
@@ -298,7 +315,8 @@ final class InlinePageTextCanvas: NSView, NSTextViewDelegate {
     textView.isAutomaticQuoteSubstitutionEnabled = false
     textView.isAutomaticDashSubstitutionEnabled = false
     textView.isAutomaticTextReplacementEnabled = false
-    textView.isContinuousSpellCheckingEnabled = false
+    textView.isAutomaticSpellingCorrectionEnabled = false
+    textView.isContinuousSpellCheckingEnabled = viewer.pageTextSpellChecking
     textView.textContainerInset = .zero
     textView.textContainer?.lineFragmentPadding = 0
     textView.acceptsLineBreaks = wrapsText
@@ -312,6 +330,7 @@ final class InlinePageTextCanvas: NSView, NSTextViewDelegate {
       formatting?.onChange = { [weak self] in self?.formattingChanged() }
       textView.toggleBold = { [weak self] in self?.toggleFormat(italic: false) }
       textView.toggleItalic = { [weak self] in self?.toggleFormat(italic: true) }
+      textView.toggleUnderline = { [weak self] in self?.toggleUnderlineFormat() }
     }
     textView.delegate = self
     textView.finish = { [weak self] in _ = self?.commit() }
@@ -320,7 +339,22 @@ final class InlinePageTextCanvas: NSView, NSTextViewDelegate {
     textView.onMagnify = { [weak viewer] event in viewer?.view.magnify(with: event) }
     textView.insertWithSourceFallback = { [weak self, weak textView] value, range in
       guard let self, let textView, let formatting = self.formatting,
-        !textView.hasMarkedText(), !(value is NSAttributedString) else { return false }
+        !textView.hasMarkedText() else { return false }
+      if let attributed = value as? NSAttributedString {
+        let plan = formatting.richInsertionPlan(attributed, replacing: range)
+        if let issue = plan.issue {
+          self.viewer?.pageTextFormattingIssue = issue
+          NSSound.beep()
+          return true
+        }
+        guard let planned = plan.attributedText else {
+          self.viewer?.pageTextFormattingIssue = "The rich paste could not be represented."
+          NSSound.beep()
+          return true
+        }
+        textView.insertPlannedText(planned, replacementRange: range)
+        return true
+      }
       guard let text = value as? String else { return false }
       let plan = formatting.insertionPlan(text, replacing: range)
       if let issue = plan.issue {
@@ -329,7 +363,7 @@ final class InlinePageTextCanvas: NSView, NSTextViewDelegate {
         return true
       }
       guard let attributed = plan.attributedText else { return false }
-      textView.insertText(attributed, replacementRange: range)
+      textView.insertPlannedText(attributed, replacementRange: range)
       return true
     }
     addSubview(textView)
@@ -370,6 +404,9 @@ final class InlinePageTextCanvas: NSView, NSTextViewDelegate {
       guard let self else { return }
       self.viewer?.pageTextFormattingIssue = self.formatting?.apply(change, isTyping: self.isTyping)
       self.updateClippingIssue()
+    }
+    viewer.pageTextSpellCheckingApplier = { [weak self] enabled in
+      self?.textView.isContinuousSpellCheckingEnabled = enabled
     }
     viewer.pageTextFitOverflow = formatting == nil ? nil : { [weak self] in
       self?.fitOverflowText() ?? false
@@ -594,6 +631,19 @@ final class InlinePageTextCanvas: NSView, NSTextViewDelegate {
       }
       if requested.fontSize != style.fontSize { _ = formatting.apply(.size(requested.fontSize), isTyping: isTyping) }
       if requested.color != style.color { _ = formatting.apply(.color(requested.color), isTyping: isTyping) }
+      if requested.characterSpacing != style.characterSpacing {
+        _ = formatting.apply(.characterSpacing(requested.characterSpacing), isTyping: isTyping)
+      }
+      if requested.wordSpacing != style.wordSpacing {
+        _ = formatting.apply(.wordSpacing(requested.wordSpacing), isTyping: isTyping)
+      }
+      if requested.rise != style.rise { _ = formatting.apply(.rise(requested.rise), isTyping: isTyping) }
+      if requested.underline != style.underline {
+        _ = formatting.apply(.underline(requested.underline), isTyping: isTyping)
+      }
+      if requested.strikeout != style.strikeout {
+        _ = formatting.apply(.strikeout(requested.strikeout), isTyping: isTyping)
+      }
       return
     }
     style = requested
@@ -762,6 +812,13 @@ final class InlinePageTextCanvas: NSView, NSTextViewDelegate {
     publishFormattingSelection()
   }
 
+  private func toggleUnderlineFormat() {
+    guard let viewer else { return }
+    let enabled = viewer.pageTextMixedFormatting.contains("underline")
+      || !viewer.pageTextStyle.underline
+    viewer.pageTextFormattingApplier?(.underline(enabled))
+  }
+
   private func toggleFormat(italic: Bool) {
     guard let formatting else { return }
     let selection = formatting.selection(isTyping: isTyping)
@@ -776,7 +833,12 @@ final class InlinePageTextCanvas: NSView, NSTextViewDelegate {
     guard let selection = formatting?.selection(isTyping: isTyping), let viewer else { return }
     style = PageTextStyle(fontFamily: selection.format.fontName,
       fontSize: selection.format.size, color: selection.format.color,
-      opacity: selection.format.opacity)
+      opacity: selection.format.opacity,
+      characterSpacing: selection.format.characterSpacing,
+      wordSpacing: selection.format.wordSpacing,
+      rise: selection.format.rise,
+      underline: selection.format.underline,
+      strikeout: selection.format.strikeout)
     if viewer.pageTextStyle != style { viewer.pageTextStyle = style }
     if viewer.pageTextMixedFormatting != selection.mixed { viewer.pageTextMixedFormatting = selection.mixed }
     let availableFonts = formatting?.availableSourceFonts(isTyping: isTyping) ?? []
@@ -1076,6 +1138,7 @@ final class InlinePageTextCanvas: NSView, NSTextViewDelegate {
     viewer?.pageTextStyleApplier = nil
     viewer?.pageTextWidthApplier = nil
     viewer?.pageTextFormattingApplier = nil
+    viewer?.pageTextSpellCheckingApplier = nil
     viewer?.pageTextFitOverflow = nil
     viewer?.pageTextWidenOverflowBox = nil
     viewer?.pageTextMoveOverflowInside = nil
@@ -1144,16 +1207,28 @@ final class InlinePageTextCanvas: NSView, NSTextViewDelegate {
           if !cleaned.isEmpty {
             let glyph = manager.glyphIndexForCharacter(at: offset)
             let origin = manager.location(forGlyphAt: glyph)
-            let native = textView.convert(NSPoint(x: rect.minX + origin.x, y: rect.minY + origin.y), to: viewer.view)
+            let glyphRange = manager.glyphRange(
+              forCharacterRange: NSRange(location: offset, length: raw.length),
+              actualCharacterRange: nil)
+            let measured = manager.boundingRect(forGlyphRange: glyphRange, in: container).width
+            let native = textView.convert(
+              NSPoint(x: rect.minX + origin.x, y: rect.minY + origin.y), to: viewer.view)
             let mapped = viewer.view.convert(native, to: page)
-            segments.append(.init(text: cleaned, x: mapped.x, format: fragment.format))
+            let width = measured / max(0.01, viewer.view.scaleFactor)
+            segments.append(.init(
+              text: cleaned, x: mapped.x, format: fragment.format,
+              width: width.isFinite ? max(0, width) : nil))
           }
           offset += raw.length
         }
       }
       let breakFormat = hard ? formatting?.fragments(in:
         NSRange(location: NSMaxRange(range) - 1, length: 1)).first?.format : nil
-      lines.append(PageTextLine(text: value, x: point.x, baseline: point.y,
+      // TextKit has already applied .baselineOffset to the glyph origin. The
+      // saved line baseline is the common baseline; the writer adds each
+      // segment's rise exactly once when it emits Ts.
+      let baseRise = segments.first?.format.rise ?? 0
+      lines.append(PageTextLine(text: value, x: point.x, baseline: point.y - baseRise,
         segments: segments, endsParagraph: hard, breakFormat: breakFormat))
     }
     return lines

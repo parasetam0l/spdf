@@ -60,16 +60,28 @@ public struct PageTextStyle: Sendable, Equatable {
   public var fontSize: Double
   public var color: [Double]
   public var opacity: Double
+  public var characterSpacing: Double
+  public var wordSpacing: Double
+  public var rise: Double
+  public var underline: Bool
+  public var strikeout: Bool
 
   public init(
     fontFamily: String = "Helvetica", fontSize: Double = 12,
-    color: [Double] = [0, 0, 0], opacity: Double = 1
+    color: [Double] = [0, 0, 0], opacity: Double = 1,
+    characterSpacing: Double = 0, wordSpacing: Double = 0, rise: Double = 0,
+    underline: Bool = false, strikeout: Bool = false
   )
   {
     self.fontFamily = fontFamily
     self.fontSize = fontSize
     self.color = color
     self.opacity = opacity
+    self.characterSpacing = characterSpacing
+    self.wordSpacing = wordSpacing
+    self.rise = rise
+    self.underline = underline
+    self.strikeout = strikeout
   }
 }
 
@@ -286,6 +298,9 @@ public final class PDFViewingSession: NSObject, ObservableObject, PDFViewDelegat
   @Published public var canFormatPageText = false
   @Published public var pageTextMixedFormatting = Set<String>()
   @Published public var pageTextSelectionScope = "Whole text box"
+  /// TXT-08: native spelling suggestions with automatic replacement disabled.
+  @Published public var pageTextSpellChecking = true
+  public var pageTextSpellCheckingApplier: ((Bool) -> Void)?
   @Published public var pageTextFormattingIssue: String?
   /// TXT-06: non-mutating overflow/collision correction offered while the
   /// inline draft remains open. The issue string above mirrors the message for
@@ -534,6 +549,7 @@ public final class PDFViewingSession: NSObject, ObservableObject, PDFViewDelegat
     pageTextWidthApplier = nil
     pageTextStyleApplier = nil
     pageTextFormattingApplier = nil
+    pageTextSpellCheckingApplier = nil
     pageTextOverflow = nil
     pageTextFitOverflow = nil
     pageTextWidenOverflowBox = nil
@@ -544,6 +560,7 @@ public final class PDFViewingSession: NSObject, ObservableObject, PDFViewDelegat
     pageTextAvailableSourceFonts = []
     pageTextAvailableLicensedFonts = []
     pageTextFormattingIssue = nil
+    pageTextSpellCheckingApplier = nil
     editingRestrictionNotice = nil
     graphicEditRefusal = nil
     textEditRefusal = nil

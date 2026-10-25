@@ -89,6 +89,13 @@ public struct PageTextFormat: Sendable, Equatable {
   /// Existing PDF fonts remain represented by `sourceFont` and are reused.
   public var customFont: CustomTextFont?
   public var characterSpacing: Double
+  /// PDF word spacing (`Tw`) added after space characters. Kept separate from
+  /// character spacing so a wide space does not kern every glyph.
+  public var wordSpacing: Double
+  /// Positive moves the glyphs above the line baseline; negative below.
+  public var rise: Double
+  public var underline: Bool
+  public var strikeout: Bool
   public var fontName: String { customFont?.faceName ?? sourceFont?.name ?? font.rawValue }
   /// A custom regular face has no weight axis in the PDF subset writer. Use a
   /// small text stroke to preserve a bold source face without changing its
@@ -102,19 +109,27 @@ public struct PageTextFormat: Sendable, Equatable {
   public var opacity: Double
   public init(font: StandardTextFont = .helvetica, size: Double = 12, color: [Double] = [0, 0, 0],
     sourceFont: PageTextSourceFont? = nil, customFont: CustomTextFont? = nil,
-    characterSpacing: Double = 0, opacity: Double = 1, obliqueness: Double = 0) {
+    characterSpacing: Double = 0, opacity: Double = 1, obliqueness: Double = 0,
+    wordSpacing: Double = 0, rise: Double = 0, underline: Bool = false,
+    strikeout: Bool = false) {
     self.font = font
     self.sourceFont = sourceFont
     self.obliqueness = obliqueness
     self.customFont = customFont
     self.characterSpacing = characterSpacing
+    self.wordSpacing = wordSpacing
+    self.rise = rise
+    self.underline = underline
+    self.strikeout = strikeout
     self.size = size
     self.color = color
     self.opacity = opacity
   }
   public var isValid: Bool {
     size.isFinite && (2...144).contains(size) && characterSpacing.isFinite
-      && abs(characterSpacing) <= 144 && color.count == 3
+      && abs(characterSpacing) <= 144 && wordSpacing.isFinite
+      && abs(wordSpacing) <= 144 && rise.isFinite && abs(rise) <= 1_000
+      && color.count == 3
       && color.allSatisfy { $0.isFinite && (0...1).contains($0) }
       && obliqueness.isFinite && abs(obliqueness) <= 0.35
       && opacity.isFinite && (0...1).contains(opacity)
@@ -134,10 +149,14 @@ public struct PageTextSegment: Sendable, Equatable {
   public let text: String
   public let x: Double
   public let format: PageTextFormat
-  public init(text: String, x: Double, format: PageTextFormat) {
+  /// Measured page-space advance, used for underline/strikeout decorations.
+  /// Optional so legacy callers and reopened metadata remain valid.
+  public let width: Double?
+  public init(text: String, x: Double, format: PageTextFormat, width: Double? = nil) {
     self.text = text
     self.x = x
     self.format = format
+    self.width = width
   }
 }
 
@@ -378,6 +397,7 @@ enum PageTextLineWriter {
         guard line.segments.map(\.text).joined() == line.text,
           line.segments.allSatisfy({
             $0.x.isFinite && abs($0.x) <= 1_000_000 && $0.format.isValid
+              && $0.width.map { $0.isFinite && $0 >= 0 } ?? true
               && !$0.text.contains("\n") && !$0.text.contains("\r")
               && !($0.format.sourceFont != nil && $0.format.customFont != nil)
               && ($0.format.sourceFont != nil || $0.format.customFont != nil
@@ -432,8 +452,26 @@ enum PageTextLineWriter {
     bytes += Array("BT\n0 Tc 0 Tw 100 Tz 0 Ts 0 Tr\n".utf8)
     var lineRecords: [PDFValue] = []
     var customFontResources: [String: PDFName] = [:]
+    var decorations: [(x: Double, y: Double, width: Double, color: [Double],
+      opacityName: PDFName?, thickness: Double)] = []
     for line in lines {
       var count = 0
+      var emittedStyles: [(format: PageTextFormat, width: Double?)] = []
+      func captureDecoration(_ segment: PageTextSegment, baseline: Double) throws {
+        guard segment.format.underline || segment.format.strikeout,
+          let width = segment.width, width.isFinite, width > 0.001
+        else { return }
+        let opacityName = try registerOpacity(segment.format.opacity)
+        let thickness = max(0.5, min(2, segment.format.size * 0.055))
+        if segment.format.underline {
+          decorations.append((segment.x, baseline + segment.format.rise - segment.format.size * 0.10,
+            width, segment.format.color, opacityName, thickness))
+        }
+        if segment.format.strikeout {
+          decorations.append((segment.x, baseline + segment.format.rise + segment.format.size * 0.30,
+            width, segment.format.color, opacityName, thickness))
+        }
+      }
       if line.segments.isEmpty, !line.text.isEmpty, let font = defaultFont,
         let codes = font.encode(line.text)
       {
@@ -441,6 +479,8 @@ enum PageTextLineWriter {
           codes, x: line.x, baseline: line.baseline, resource: font.resource,
           size: defaultSize, color: defaultColor,
           opacityName: try registerOpacity(defaultOpacity), to: &bytes)
+        emittedStyles.append((PageTextFormat(font: .helvetica, size: defaultSize,
+          color: defaultColor), nil))
         count = 1
       } else {
         for segment in line.segments where !segment.text.isEmpty {
@@ -464,10 +504,13 @@ enum PageTextLineWriter {
               try emit(
                 codes, x: segment.x, baseline: line.baseline, resource: source.resource,
                 size: segment.format.size, color: segment.format.color,
-                spacing: segment.format.characterSpacing, opacityName: opacityName,
-                obliqueness: segment.format.obliqueness,
+                spacing: segment.format.characterSpacing,
+                wordSpacing: segment.format.wordSpacing, rise: segment.format.rise,
+                opacityName: opacityName, obliqueness: segment.format.obliqueness,
                 syntheticBoldStrokeWidth: segment.format.syntheticBoldStrokeWidth, to: &bytes)
               count += 1
+              emittedStyles.append((segment.format, segment.width))
+              try captureDecoration(segment, baseline: line.baseline)
             } else {
               let availableFonts = indexedPageFonts(page: page, in: graph)
               var groupResource: PDFName?
@@ -479,11 +522,13 @@ enum PageTextLineWriter {
                 try emit(
                   groupCodes, x: groupX, baseline: line.baseline, resource: resource,
                   size: segment.format.size, color: segment.format.color,
-                  spacing: segment.format.characterSpacing, opacityName: opacityName,
-                  obliqueness: segment.format.obliqueness,
+                  spacing: segment.format.characterSpacing,
+                  wordSpacing: segment.format.wordSpacing, rise: segment.format.rise,
+                  opacityName: opacityName, obliqueness: segment.format.obliqueness,
                   syntheticBoldStrokeWidth: segment.format.syntheticBoldStrokeWidth,
                   to: &bytes)
                 count += 1
+                emittedStyles.append((segment.format, max(0, pagePen - groupX)))
                 groupCodes.removeAll(keepingCapacity: true)
               }
               for scalar in segment.text.unicodeScalars {
@@ -509,6 +554,7 @@ enum PageTextLineWriter {
                 }
               }
               try emitGroup()
+              try captureDecoration(segment, baseline: line.baseline)
             }
           } else {
             let resource: PDFName
@@ -532,10 +578,13 @@ enum PageTextLineWriter {
               codes, x: segment.x, baseline: line.baseline, resource: resource,
               size: segment.format.size, color: segment.format.color,
               spacing: segment.format.characterSpacing,
+              wordSpacing: segment.format.wordSpacing, rise: segment.format.rise,
               opacityName: try registerOpacity(segment.format.opacity),
               obliqueness: segment.format.obliqueness,
               syntheticBoldStrokeWidth: segment.format.syntheticBoldStrokeWidth, to: &bytes)
             count += 1
+            emittedStyles.append((segment.format, segment.width))
+            try captureDecoration(segment, baseline: line.baseline)
           }
         }
       }
@@ -557,13 +606,32 @@ enum PageTextLineWriter {
       } else {
         breakStyle = .null
       }
+      let segmentStyles = emittedStyles.map { emitted in
+        PDFValue.array([
+          .boolean(emitted.format.underline), .boolean(emitted.format.strikeout),
+          .real(emitted.format.rise), .real(emitted.format.wordSpacing),
+          emitted.width.map { PDFValue.real($0) } ?? .null,
+        ])
+      }
       lineRecords.append(
         .array([
           .integer(Int64(count)), .boolean(line.endsParagraph),
-          .real(line.x), .real(line.baseline), breakStyle,
+          .real(line.x), .real(line.baseline), breakStyle, .array(segmentStyles),
         ]))
     }
-    bytes += Array("ET\nQ\n".utf8)
+    bytes += Array("ET\n".utf8)
+    for decoration in decorations {
+      bytes += Array("q\n".utf8)
+      if let opacityName = decoration.opacityName {
+        bytes += Array("/\(String(decoding: opacityName.bytes, as: UTF8.self)) gs\n".utf8)
+      }
+      let color = decoration.color.map(AnnotationSupport.number).joined(separator: " ")
+      bytes += Array((color + " rg\n").utf8)
+      bytes += Array(([
+        decoration.x, decoration.y, decoration.width, decoration.thickness,
+      ].map(AnnotationSupport.number).joined(separator: " ") + " re f\nQ\n").utf8)
+    }
+    bytes += Array("Q\n".utf8)
     try AddedContent.append(
       String(decoding: bytes, as: UTF8.self), pageID: pageID, toFront: true, in: &graph)
     let streamID: PDFObjectID? = {
@@ -592,8 +660,8 @@ enum PageTextLineWriter {
 
   private static func emit(
     _ codes: [UInt8], x: Double, baseline: Double, resource: PDFName,
-    size: Double, color: [Double], spacing: Double = 0, opacityName: PDFName? = nil,
-    obliqueness: Double = 0,
+    size: Double, color: [Double], spacing: Double = 0, wordSpacing: Double = 0,
+    rise: Double = 0, opacityName: PDFName? = nil, obliqueness: Double = 0,
     syntheticBoldStrokeWidth: Double = 0,
     to bytes: inout [UInt8]
   ) throws {
@@ -601,6 +669,8 @@ enum PageTextLineWriter {
       bytes += Array("/\(String(decoding: opacityName.bytes, as: UTF8.self)) gs\n".utf8)
     }
     bytes += Array("\(AnnotationSupport.number(spacing)) Tc\n".utf8)
+    bytes += Array("\(AnnotationSupport.number(wordSpacing)) Tw\n".utf8)
+    bytes += Array("\(AnnotationSupport.number(rise)) Ts\n".utf8)
     bytes += Array(try PDFWriter.serializedValue(.name(resource)))
     bytes += Array(" \(AnnotationSupport.number(size)) Tf\n".utf8)
     let colorOperands = color.map(AnnotationSupport.number).joined(separator: " ")
@@ -656,7 +726,7 @@ public enum AuthoredPageTextBoxes {
       var original: [Int: String] = [:]
       var valid = true
       for record in records {
-        guard case .array(let fields) = record, (4...5).contains(fields.count),
+        guard case .array(let fields) = record, (4...6).contains(fields.count),
           case .integer(let count) = fields[0], count >= 0, count <= 4_000,
           case .boolean(let hard) = fields[1], let lineX = number(fields[2]),
           let lineY = number(fields[3]), lineX.isFinite, lineY.isFinite,
@@ -667,7 +737,7 @@ public enum AuthoredPageTextBoxes {
           break
         }
         var breakFormat: PageTextFormat?
-        if fields.count == 5, fields[4] != .null {
+        if fields.count >= 5, fields[4] != .null {
           guard hard, case .array(let style) = fields[4], [3, 5].contains(style.count),
             case .name(let name) = style[0],
             let font = StandardTextFont(rawValue: String(decoding: name.bytes, as: UTF8.self)),
@@ -712,6 +782,45 @@ public enum AuthoredPageTextBoxes {
               format: format))
         }
         cursor += Int(count)
+        if let first = segments.first, abs(first.x - lineX) >= 0.005 { valid = false }
+        if fields.count == 6 {
+          guard case .array(let styles) = fields[5], styles.count == segments.count else {
+            valid = false
+            break
+          }
+          for offset in segments.indices {
+            guard case .array(let values) = styles[offset], values.count == 5,
+              case .boolean(let underline) = values[0],
+              case .boolean(let strikeout) = values[1],
+              let rise = number(values[2]), let wordSpacing = number(values[3]),
+              rise.isFinite, wordSpacing.isFinite
+            else {
+              valid = false
+              break
+            }
+            var width: Double?
+            if case .null = values[4] {
+              width = nil
+            } else if let value = number(values[4]), value.isFinite, value >= 0 {
+              width = value
+            } else {
+              valid = false
+              break
+            }
+            var format = segments[offset].format
+            format.underline = underline
+            format.strikeout = strikeout
+            format.rise = rise
+            format.wordSpacing = wordSpacing
+            guard format.isValid else {
+              valid = false
+              break
+            }
+            segments[offset] = .init(
+              text: segments[offset].text, x: segments[offset].x, format: format, width: width)
+          }
+          if !valid { break }
+        }
         if let first = segments.first, abs(first.x - lineX) >= 0.005 { valid = false }
         lines.append(
           .init(

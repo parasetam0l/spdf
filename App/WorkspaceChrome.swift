@@ -133,6 +133,28 @@ struct WorkspaceTextInspector: View {
                     traitButton("Italic", symbol: "italic", field: "italic", selected: face.isItalic) {
                       apply(.italic(viewer.pageTextMixedFormatting.contains("italic") || !face.isItalic))
                     }
+                    traitButton(
+                      "Underline", symbol: "underline", field: "underline",
+                      selected: viewer.pageTextStyle.underline
+                    ) {
+                      apply(.underline(
+                        viewer.pageTextMixedFormatting.contains("underline")
+                          || !viewer.pageTextStyle.underline))
+                    }
+                    traitButton(
+                      "Strikeout", symbol: "strikethrough", field: "strikeout",
+                      selected: viewer.pageTextStyle.strikeout
+                    ) {
+                      apply(.strikeout(
+                        viewer.pageTextMixedFormatting.contains("strikeout")
+                          || !viewer.pageTextStyle.strikeout))
+                    }
+                    Button("A↑") { apply(.superscript(!(viewer.pageTextStyle.rise > 0.01))) }
+                      .buttonStyle(.bordered).controlSize(.small)
+                      .help("Superscript")
+                    Button("A↓") { apply(.subscripted(!(viewer.pageTextStyle.rise < -0.01))) }
+                      .buttonStyle(.bordered).controlSize(.small)
+                      .help("Subscript")
                     Spacer()
                   }
                   .disabled(viewer.isEditingPageText && !viewer.canChangePageTextTraits)
@@ -159,6 +181,35 @@ struct WorkspaceTextInspector: View {
                     .font(.caption).foregroundStyle(.secondary)
                   colorMenu
                 }
+              }
+              HStack(alignment: .bottom, spacing: 10) {
+                VStack(alignment: .leading, spacing: 5) {
+                  Text("Tracking").font(.caption).foregroundStyle(.secondary)
+                  WorkspacePointField(
+                    label: "Character spacing",
+                    value: Binding(
+                      get: { viewer.pageTextStyle.characterSpacing },
+                      set: { value in apply(.characterSpacing(value)) }))
+                }
+                VStack(alignment: .leading, spacing: 5) {
+                  Text("Word space").font(.caption).foregroundStyle(.secondary)
+                  WorkspacePointField(
+                    label: "Word spacing",
+                    value: Binding(
+                      get: { viewer.pageTextStyle.wordSpacing },
+                      set: { value in apply(.wordSpacing(value)) }))
+                }
+              }
+              if viewer.isEditingPageText {
+                Toggle("Check spelling while typing", isOn: Binding(
+                  get: { viewer.pageTextSpellChecking },
+                  set: { enabled in
+                    viewer.pageTextSpellChecking = enabled
+                    viewer.pageTextSpellCheckingApplier?(enabled)
+                  }))
+                  .toggleStyle(.checkbox)
+                  .font(.caption)
+                  .help("Show native spelling suggestions. Automatic spelling replacement stays off so text is never changed silently.")
               }
               if viewer.pageTextOverflow != nil {
                 WorkspacePageTextOverflowView(viewer: viewer)
@@ -325,6 +376,12 @@ struct WorkspaceTextInspector: View {
     case .italic(let enabled): font = .face(family: font.family, bold: font.isBold, italic: enabled)
     case .size(let size): style.fontSize = size
     case .color(let color): style.color = color
+    case .underline(let enabled): style.underline = enabled
+    case .strikeout(let enabled): style.strikeout = enabled
+    case .characterSpacing(let value): style.characterSpacing = value
+    case .wordSpacing(let value): style.wordSpacing = value
+    case .rise(let value): style.rise = value
+    case .superscript, .subscripted: break
     }
     style.fontFamily = font.rawValue
     viewer.pageTextStyle = style
