@@ -396,9 +396,12 @@ struct FormDesignPanelView: View {
           Button("Accept All Eligible") { model.acceptAll() }
           Button("Reject All") { model.rejectAll() }
           Spacer()
-          Text(
+          // Keep this expression split: the single concatenation timed out the
+          // type checker on the CI toolchain (Xcode 26.6).
+          let reviewSummary: String =
             String(model.acceptedCount) + " accepted · " + String(model.pendingCount)
-              + " pending · " + String(model.rejectedCount) + " rejected")
+            + " pending · " + String(model.rejectedCount) + " rejected"
+          Text(reviewSummary)
             .font(.caption).foregroundStyle(.secondary)
         }
         ForEach(model.rows) { row in
