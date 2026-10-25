@@ -1860,14 +1860,20 @@
         normalScript.format.underline, normalScript.format.strikeout else {
         throw PDFError(.malformed, "Removing superscript lost other character formatting")
       }
+      viewer.pageTextFormattingApplier?(.superscript(true))
+      guard let persistedScript = extendedSegments().first,
+        persistedScript.format.rise > 0.01, persistedScript.format.size < 16 else {
+        throw PDFError(.malformed, "Superscript could not be persisted")
+      }
       formatted.textView.setSelectedRange((styledText as NSString).range(of: "\n\n"))
       viewer.pageTextFormattingApplier?(.size(26))
       checkpoint("character formatting blank paragraph styled")
       let styledLines = formatted.pageLines()
       let styledBox = formatted.pageBox()
       guard styledLines.contains(where: { $0.text.isEmpty && $0.endsParagraph }),
-        styledLines.flatMap(\.segments).filter({ !$0.text.contains("these words") })
-          .allSatisfy({ $0.format.font == .helvetica && $0.format.size == 16 }),
+        styledLines.flatMap(\.segments).filter({
+          !$0.text.contains("these words") && !$0.text.contains("different")
+        }).allSatisfy({ $0.format.font == .helvetica && $0.format.size == 16 }),
         styledLines.flatMap(\.segments).contains(where: {
           $0.format.underline && $0.format.strikeout && ($0.width ?? 0) > 0
         }) else {
@@ -1892,16 +1898,19 @@
       let styledBytes = try document.editSession.bytesForSave()
       try styledBytes.write(to: output.appendingPathComponent("formatting-after.pdf"))
       let styledParsed = try PDFParser.parse(styledBytes)
-      guard let styledReader = PDFDocument(data: styledBytes), let styledPage = styledReader.page(at: 0),
-        let styledTarget = NativeParagraphEditing.targets(from: [], pageID: styledParsed.pageIDs[0],
-          graph: styledParsed.graph, page: styledPage).first(where: { $0.text == styledText }),
+      guard let styledReader = PDFDocument(data: styledBytes), let styledPage = styledReader.page(at: 0)
+      else { throw PDFError(.malformed, "Saved formatted PDF did not reopen") }
+      let savedTargets = NativeParagraphEditing.targets(from: [], pageID: styledParsed.pageIDs[0],
+        graph: styledParsed.graph, page: styledPage)
+      let savedTarget = savedTargets.first(where: { $0.text == styledText })
+      guard let styledTarget = savedTarget,
         abs(styledTarget.rect[2] - styledTarget.rect[0] - 287.125) < 0.001,
         styledTarget.paragraph?.fragments.contains(where: {
           $0.text == "these words" && $0.format == emphasized.format
         }) == true,
         styledTarget.paragraph?.fragments.contains(where: {
           $0.text.contains("different") && $0.format.underline && $0.format.strikeout
-            && abs($0.format.wordSpacing - 2) < 0.001
+            && abs($0.format.wordSpacing - 2) < 0.001 && $0.format.rise > 0.01
         }) == true else {
         throw PDFError(.malformed, "Saved formatted box lost text, styles, breaks or exact width")
       }

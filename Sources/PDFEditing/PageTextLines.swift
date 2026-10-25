@@ -532,7 +532,8 @@ public struct RewritePageTextCommand: PDFEditCommand, Equatable, Sendable {
         TextCanvasSupport.inlineObliqueness(for: transform) != nil,
         run.charSpacing.isFinite, abs(run.charSpacing) <= 144,
         run.wordSpacing.isFinite, abs(run.wordSpacing) <= 144,
-        abs(run.horizontalScale - 100) < 1e-6, abs(run.rise) < 1e-6,
+        abs(run.horizontalScale - 100) < 1e-6,
+        run.rise.isFinite, abs(run.rise) <= 1_000,
         let font = analysis.fonts[run.fontResource],
         font.isInlineEditable,
         let instructionSegments = content.segmentIndices(
