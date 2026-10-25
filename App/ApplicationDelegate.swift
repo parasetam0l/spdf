@@ -456,6 +456,7 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
     }
   }
   @objc private func showFind(_ sender: Any?) { currentDocument?.showFind() }
+  @objc private func showFindReplace(_ sender: Any?) { currentDocument?.showFindReplace() }
   @objc private func findNext(_ sender: Any?) { currentDocument?.findNext() }
   @objc private func findPrevious(_ sender: Any?) { currentDocument?.findPrevious() }
   @objc private func showPagesSidebar(_ sender: Any?) { currentDocument?.viewer?.showPages() }
@@ -768,7 +769,7 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
     switch menuItem.action {
     case #selector(togglePageTextBold), #selector(togglePageTextItalic):
       return document.viewer?.canFormatPageText == true
-    case #selector(showFind):
+    case #selector(showFind), #selector(showFindReplace):
       guard let viewer = document.viewer else { return false }
       return !viewer.isLocked && viewer.pageCount > 0
     case #selector(findNext), #selector(findPrevious):
@@ -1033,6 +1034,9 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
     add("Italic", #selector(togglePageTextItalic), key: "i", target: self, to: format)
     edit.addItem(.separator())
     add("Find…", #selector(showFind), key: "f", target: self, to: edit)
+    add(
+      "Find and Replace…", #selector(showFindReplace), key: "f",
+      modifiers: [.command, .option], target: self, to: edit)
     add("Find Next", #selector(findNext), key: "g", target: self, to: edit)
     add(
       "Find Previous", #selector(findPrevious), key: "g", modifiers: [.command, .shift],

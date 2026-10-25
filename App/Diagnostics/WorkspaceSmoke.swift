@@ -1231,6 +1231,61 @@
       return bytes
     }
 
+    /// TXT-07: exercise the real viewer callbacks, a document-scope preview,
+    /// one atomic replace transaction and exact document Undo/Redo.
+    private static func checkFindReplaceWorkflow(output: URL) async throws {
+      let controller = NSDocumentController.shared
+      let prior = Set(controller.documents.map(ObjectIdentifier.init))
+      controller.newDocument(nil)
+      guard let document = controller.documents.first(where: {
+        !prior.contains(ObjectIdentifier($0))
+      }) as? SPDFDocument, let viewer = document.viewer,
+        let window = document.windowControllers.first?.window else {
+        throw PDFError(.malformed, "Missing Find and Replace workspace")
+      }
+      defer { document.close() }
+      window.makeKeyAndOrderFront(nil)
+      guard document.addPageText(
+        pageIndex: 0, rect: [72, 300, 430, 340], text: "Replace me replace me",
+        style: PageTextStyle(fontSize: 14)) else {
+        throw PDFError(.malformed, "Find and Replace fixture could not be added")
+      }
+      let baseline = try document.editSession.bytesForSave()
+      viewer.searchText = "replace"
+      viewer.replaceText = "swap"
+      viewer.findReplaceScope = .document
+      viewer.showFindReplace()
+      guard viewer.isFindReplaceVisible else {
+        throw PDFError(.malformed, "Find and Replace panel did not open")
+      }
+      viewer.previewFindReplace()
+      guard let preview = viewer.findReplacePreview,
+        preview.eligibleCount == 2, preview.refusedCount == 0,
+        preview.matches.count == 2 else {
+        throw PDFError(.malformed,
+          "Find and Replace preview did not identify both matches: "
+            + String(describing: viewer.findReplacePreview))
+      }
+      viewer.applyFindReplace()
+      guard let result = viewer.findReplaceResult, result.replacedCount == 2,
+        result.refusedCount == 0,
+        viewer.view.document?.string?.contains("swap me swap me") == true else {
+        throw PDFError(.malformed,
+          "Find and Replace did not apply as one transaction: "
+            + String(describing: viewer.findReplaceResult))
+      }
+      let edited = try document.editSession.bytesForSave()
+      let findReplaceURL = output.appendingPathComponent("find-replace.pdf")
+      try edited.write(to: findReplaceURL, options: .atomic)
+      guard let reopened = PDFDocument(url: findReplaceURL),
+        reopened.string?.contains("swap me swap me") == true,
+        try Data(contentsOf: findReplaceURL).count > 0,
+        document.undoEdit(), try document.editSession.bytesForSave() == baseline,
+        document.redoEdit(), try document.editSession.bytesForSave() == edited else {
+        throw PDFError(.malformed, "Find and Replace Undo/Redo did not restore exact bytes")
+      }
+    }
+
     private static func checkTextEditRefusal(output: URL) async throws {
       let controller = NSDocumentController.shared
       let url = output.appendingPathComponent("clipping-text-refusal.pdf")
@@ -1993,12 +2048,14 @@
       try await checkNestedImageWorkflow(output: output)
       try await checkClippedImageWorkflow(output: output)
       try await checkTextEditRefusal(output: output)
+      try await checkFindReplaceWorkflow(output: output)
       try await checkReadOnlyExplanation(output: output)
       return [
         "graphicWorkflow": "insert, properties, preview, selection, shared resize, cancel, keyboard, delete, alignment, save/reopen",
         "nestedImageWorkflow": "Images explains reusable-form refusal; Edit PDF selects overlapping page text; cancel preserves bytes",
         "clippedImageWorkflow": "rectangular clips narrow point/rubber-band targets; unsupported clips refuse safely",
         "textEditRestrictions": "visible clipping-mode text explains inline refusal before editing and preserves source bytes",
+        "findReplace": "document preview, two eligible matches, one atomic replacement and exact Undo/Redo",
         "readOnlyRestrictions": "password-permission editing block is visible and accessible; source bytes remain unchanged",
         "directTextSelection":
           "single-click selection, body move/cancel, double-click typing, marked-text Save veto",

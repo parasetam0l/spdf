@@ -1518,6 +1518,19 @@ struct ImportedParagraphInteropTests {
     #expect(reopened.text == "CBA ABC")
   }
 
+  @Test @MainActor func ligatureFindReplaceMatchIsIndividuallyRefused() throws {
+    var (graph, pageID, _) = try compositeLigatureFixture()
+    let preview = try FindReplace.preview(
+      FindReplaceRequest(
+        scope: .page, pageIDs: [pageID], currentPageIndex: 0,
+        query: "fi", replacement: "XX"), in: graph)
+    #expect(preview.eligibleCount == 0)
+    #expect(preview.matches.contains { match in
+      match.eligibility.reason?.contains("ligature") == true
+    })
+    #expect(preview.command == nil)
+  }
+
   @Test @MainActor func offsetImportedLinesStaySeparateUntilIndentationIsRepresentable() throws {
     var (graph, pageID) = try fixture(composite: false)
     graph.objects[PDFObjectID(5)] = .stream(PDFStream(bytes: Data("""

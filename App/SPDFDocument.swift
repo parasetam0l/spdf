@@ -498,6 +498,14 @@ final class SPDFDocument: NSDocument {
     viewer.pageTextDraftIssue = { [weak self] target, lines, box, style in
       self?.paragraphDraftIssue(target, lines: lines, box: box, style: style)
     }
+    viewer.findReplacePreviewProvider = {
+      [weak self] scope, pageIndex, selectionRects, query, replacement, options in
+      self?.findReplacePreview(scope: scope, pageIndex: pageIndex, selectionRects: selectionRects,
+        query: query, replacement: replacement, options: options)
+    }
+    viewer.findReplaceApplyProvider = { [weak self] preview in
+      self?.applyFindReplace(preview)
+    }
     viewer.onNewTextBlockCommit = { [weak self] pageIndex, rect, text, style, lines, box in
       guard let self, self.requireContentEditing(for: "Add Text"),
         self.editSession.pageIDs.indices.contains(pageIndex)
@@ -1532,8 +1540,47 @@ final class SPDFDocument: NSDocument {
   }
 
   func showFind() { viewer?.showSearch() }
+  func showFindReplace() { viewer?.showFindReplace() }
   func findNext() { viewer?.searchNext() }
   func findPrevious() { viewer?.searchPrevious() }
+
+  /// TXT-07: preview and apply over the current immutable graph. The command
+  /// is one transaction, so every eligible match shares one Undo step.
+  private func findReplacePreview(
+    scope: FindReplaceScope, pageIndex: Int, selectionRects: [[Double]]?,
+    query: String, replacement: String, options: TextSearchOptions
+  ) -> FindReplacePreview? {
+    guard let graph = editSession.currentGraph else { return nil }
+    let request = FindReplaceRequest(
+      scope: scope, pageIDs: editSession.pageIDs, currentPageIndex: pageIndex,
+      selectionRects: selectionRects, query: query, replacement: replacement, options: options)
+    do {
+      return try FindReplace.preview(request, in: graph)
+    } catch {
+      viewer?.findReplaceError = error.localizedDescription
+      return nil
+    }
+  }
+
+  private func applyFindReplace(_ preview: FindReplacePreview) -> FindReplaceResult? {
+    guard requireContentEditing(for: "Replace Text") else { return nil }
+    guard let command = preview.command else {
+      viewer?.findReplaceError = "No eligible matches to replace."
+      return nil
+    }
+    do {
+      try editSession.apply(PDFTransaction([command]))
+      noteUserEdit()
+      refreshViewer(preservingPage: viewer?.pageNumber ?? 1)
+      let pages = Set(preview.matches.filter(\.eligibility.isEligible).map(\.pageID)).count
+      return FindReplaceResult(
+        replacedCount: preview.eligibleCount, refusedCount: preview.refusedCount,
+        pageCount: pages)
+    } catch {
+      viewer?.findReplaceError = error.localizedDescription
+      return nil
+    }
+  }
 
   /// Text Format → Bold/Italic service entry point. The menu handlers call
   /// these same methods.

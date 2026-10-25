@@ -115,6 +115,12 @@ struct WorkspaceView: View {
     }
     .onAppear { pageEntry = String(max(1, viewer.pageNumber)) }
     .onChange(of: viewer.pageNumber) { _, page in pageEntry = String(page) }
+    .sheet(isPresented: Binding(
+      get: { viewer.isFindReplaceVisible },
+      set: { if !$0 { viewer.hideFindReplace() } }
+    )) {
+      WorkspaceFindReplaceView(viewer: viewer)
+    }
   }
 
   private func commandBar(wide: Bool) -> some View {
@@ -138,6 +144,10 @@ struct WorkspaceView: View {
       Divider().frame(height: 18)
       iconButton("Find", symbol: "magnifyingglass") { viewer.showSearch() }
         .help("Find in document (⌘F)")
+      Button("Replace…") { viewer.showFindReplace() }
+        .buttonStyle(.borderless).font(.system(size: 11))
+        .help("Preview find and replace (⌥⌘F)")
+        .accessibilityLabel("Find and Replace")
       if let onEditList {
         iconButton("Lists", symbol: "list.bullet", action: onEditList)
           .disabled(!canEdit)

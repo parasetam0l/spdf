@@ -237,6 +237,18 @@ public final class PDFViewingSession: NSObject, ObservableObject, PDFViewDelegat
   @Published public private(set) var scale = 1.0
   @Published public private(set) var isLocked = false
   @Published public var searchText = ""
+  /// TXT-07: replace query, scope and preview state.
+  @Published public var replaceText = ""
+  @Published public var findReplaceScope: FindReplaceScope = .page
+  @Published public var findReplaceCaseSensitive = false
+  @Published public var findReplaceWholeWord = false
+  @Published public private(set) var findReplacePreview: FindReplacePreview?
+  @Published public private(set) var findReplaceResult: FindReplaceResult?
+  @Published public var findReplaceError: String?
+  @Published public private(set) var isFindReplaceVisible = false
+  public var findReplacePreviewProvider:
+    ((FindReplaceScope, Int, [[Double]]?, String, String, TextSearchOptions) -> FindReplacePreview?)?
+  public var findReplaceApplyProvider: ((FindReplacePreview) -> FindReplaceResult?)?
   @Published public private(set) var searchedText: String?
   @Published public private(set) var searchMatchCount = 0
   @Published public private(set) var searchIndex = 0
@@ -577,7 +589,84 @@ public final class PDFViewingSession: NSObject, ObservableObject, PDFViewDelegat
 
   public func hideSearch() {
     isSearchVisible = false
+    isFindReplaceVisible = false
     clearSearch()
+  }
+
+  public func showFindReplace() {
+    isSearchVisible = true
+    isFindReplaceVisible = true
+  }
+
+  public func hideFindReplace() {
+    isFindReplaceVisible = false
+    findReplacePreview = nil
+    findReplaceError = nil
+  }
+
+  /// TXT-07: build a non-mutating preview for the current selection/page or
+  /// the whole document. The app owns the edit session and supplies the
+  /// preview/apply closures.
+  public func previewFindReplace() {
+    findReplacePreview = nil
+    findReplaceResult = nil
+    findReplaceError = nil
+    guard let provider = findReplacePreviewProvider else {
+      findReplaceError = "Find and Replace is unavailable in this view."
+      return
+    }
+    guard !searchText.isEmpty else {
+      findReplaceError = "Enter text to find."
+      return
+    }
+    guard let document = view.document, pageCount > 0 else {
+      findReplaceError = "Open a document before replacing text."
+      return
+    }
+    let fallbackIndex = max(0, min(pageNumber - 1, pageCount - 1))
+    var selectedIndex = fallbackIndex
+    var selectionRects: [[Double]]?
+    if let selection = view.currentSelection, let selectedPage = selection.pages.first {
+      let index = document.index(for: selectedPage)
+      if index >= 0, findReplaceScope == .selection { selectedIndex = index }
+      let bounds = selection.bounds(for: selectedPage)
+      if bounds.width > 0.5, bounds.height > 0.5 {
+        selectionRects = [[bounds.minX, bounds.minY, bounds.maxX, bounds.maxY]]
+      }
+    }
+    if findReplaceScope == .selection, selectionRects == nil {
+      findReplaceError = "Select text in the page before using selection replace."
+      return
+    }
+    let options = TextSearchOptions(
+      caseSensitive: findReplaceCaseSensitive, wholeWord: findReplaceWholeWord)
+    findReplacePreview = provider(
+      findReplaceScope, selectedIndex, selectionRects, searchText, replaceText, options)
+    if findReplacePreview == nil, findReplaceError == nil {
+      findReplaceError = "Find and Replace could not build a preview."
+    }
+  }
+
+  public func applyFindReplace() {
+    guard let preview = findReplacePreview else { return }
+    guard !isEditingPageText else {
+      findReplaceError = "Finish or cancel the open text draft before replacing across the document."
+      return
+    }
+    guard let apply = findReplaceApplyProvider else {
+      findReplaceError = "Find and Replace is unavailable in this view."
+      return
+    }
+    findReplaceError = nil
+    guard let result = apply(preview) else {
+      if findReplaceError == nil {
+        findReplaceError = "The replacements could not be committed."
+      }
+      return
+    }
+    findReplacePreview = nil
+    findReplaceResult = result
+    runSearch()
   }
 
   public func runSearch() {
@@ -618,6 +707,9 @@ public final class PDFViewingSession: NSObject, ObservableObject, PDFViewDelegat
 
   private func clearSearch() {
     searchedText = nil
+    findReplacePreview = nil
+    findReplaceResult = nil
+    findReplaceError = nil
     searchMatches = []
     searchMatchCount = 0
     searchIndex = 0
