@@ -174,7 +174,8 @@ enum CapabilityContractAudit {
   private static let extraDocumentSelectors: Set<String> = [
     "documentMetadata:", "printDocument:",
     "copyAsRichText:", "copyTextBox:", "pasteTextBox:", "duplicateTextBox:",
-    "showRedactionMarks:", "showFind:", "findNext:", "findPrevious:",
+    "showRedactionMarks:", "signExistingSignatureField:", "showSignatureDetails:",
+    "showFind:", "findNext:", "findPrevious:",
     "editSelectedText:", "reflowParagraph:", "redactSelection:",
     "togglePageTextBold:", "togglePageTextItalic:",
     "selectNextPageObject:", "selectPreviousPageObject:",
@@ -183,6 +184,7 @@ enum CapabilityContractAudit {
   /// Critical tools whose contract must be more specific than its group.
   private static let specificSelectors: Set<String> = [
     "saveSanitizedCopy:", "exportEncryptedCopy:", "redactSelection:", "showRedactionMarks:",
+    "signExistingSignatureField:", "showSignatureDetails:",
     "exportComments:", "importComments:", "createPDFFromImages:",
     "createPDFFromText:", "exportAttachments:", "manageAttachments:",
     "manageBookmarks:", "splitDocument:", "combineDocuments:",
@@ -197,6 +199,10 @@ enum CapabilityContractAudit {
       "Re-encrypts through the derivative gate; protected input is allowed only because output re-encrypts.",
     "redactSelection:":
       "Applied redaction forces a verified full rewrite and never appears secure through an incremental save.",
+    "signExistingSignatureField:":
+      "Fills an existing empty signature field as an incremental update; earlier signed bytes stay byte-identical; DocMDP/FieldMDP permissions and field locks are enforced; source is never modified in place.",
+    "showSignatureDetails:":
+      "Read-only signed-revision inspection (coverage, signer identity, crypto/trust, changes between signatures); changes no bytes.",
     "showRedactionMarks:":
       "Staged marks are review-only and change no bytes; Apply removes reviewed text/regions in one transaction and the save barrier prevents unapplied marks from reading as secure; hidden/OCR scope is explicit.",
     "exportComments:":
@@ -235,6 +241,8 @@ enum CapabilityContractAudit {
     "saveSanitizedCopy:": "SPDFDocument.saveSanitizedCopy()",
     "exportEncryptedCopy:": "SPDFDocument.exportEncryptedCopy()",
     "redactSelection:": "SPDFDocument.redactSelection()",
+    "signExistingSignatureField:": "SPDFDocument.presentSignatureSigningFlow()",
+    "showSignatureDetails:": "SPDFDocument.presentSignatureRevisionDetails()",
     "showRedactionMarks:": "SPDFDocument.showRedactionMarks()",
     "exportComments:": "SPDFDocument.exportComments()",
     "importComments:": "SPDFDocument.importComments()",
@@ -257,6 +265,8 @@ enum CapabilityContractAudit {
     "saveSanitizedCopy:": "Chosen sanitized PDF with hidden data removed; source unchanged.",
     "exportEncryptedCopy:": "Encrypted copy PDF.",
     "redactSelection:": "Applied redactions in a secure-rewrite session.",
+    "signExistingSignatureField:": "Signed copy with one added incremental signature; earlier signatures preserved.",
+    "showSignatureDetails:": "Signed-revision report and signer identities; no document changes.",
     "showRedactionMarks:": "Reviewable pending marks plus applied secure-rewrite redactions.",
     "exportComments:": "XFDF comment file.",
     "importComments:": "Merged comments and thread links in the open document.",
@@ -299,7 +309,11 @@ enum CapabilityContractAudit {
     "documentMetadata:", "addTextField:", "addCheckbox:", "addRadioGroup:",
     "addChoiceField:", "addPushButton:", "addSignatureField:", "editFormFieldProperties:",
     "recalculateForm:", "distributeFormFields:", "cropPages:", "removePageMark:",
-    "batesNumberingBatch:", "showRedactionMarks:",
+    "batesNumberingBatch:", "showRedactionMarks:", "showOCRReview:", "showOCRBatch:",
+    "signExistingSignatureField:", "showSignatureDetails:",
+    "showReviewReports:", "exportReviewSummaryPDF:", "exportComparisonReportPDF:",
+    "toggleArrangeObjects:", "arrangeSelectedObjects:",
+    "showFormDesignPanel:", "detectFormFields:",
     "repairDocument:", "reviewTables:", "previewDOCX:", "convertColors:",
     "createArchivalCopy:", "exportComments:", "importComments:", "printDocument:",
   ]

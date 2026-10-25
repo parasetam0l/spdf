@@ -246,7 +246,16 @@ struct TestSigningMaterial {
     try? FileManager.default.removeItem(at: directory)
   }
 
-  static func make() throws -> TestSigningMaterial? {
+  enum Algorithm: String, Sendable {
+    case rsa2048
+    case ecP256
+  }
+
+  static func make(
+    algorithm: Algorithm = .rsa2048,
+    commonName: String = "sPDF Test Signer",
+    organization: String = "sPDF Editor"
+  ) throws -> TestSigningMaterial? {
     let openssl = "/usr/bin/openssl"
     guard FileManager.default.isExecutableFile(atPath: openssl) else { return nil }
     let directory = FileManager.default.temporaryDirectory
@@ -270,14 +279,25 @@ struct TestSigningMaterial {
     let leafCSR = directory.appendingPathComponent("leaf.csr").path
     let leafPEM = directory.appendingPathComponent("leaf.pem").path
     let p12Path = directory.appendingPathComponent("identity.p12").path
+    let subject = "/CN=\(commonName)/O=\(organization)"
     try run([
       "req", "-x509", "-newkey", "rsa:2048", "-keyout", caKey, "-out", caPEMPath, "-days", "2",
       "-nodes", "-sha256", "-subj", "/CN=sPDF Test CA/O=sPDF Editor",
     ])
-    try run([
-      "req", "-newkey", "rsa:2048", "-keyout", leafKey, "-out", leafCSR, "-nodes", "-sha256",
-      "-subj", "/CN=sPDF Test Signer/O=sPDF Editor",
-    ])
+    switch algorithm {
+    case .rsa2048:
+      try run([
+        "req", "-newkey", "rsa:2048", "-keyout", leafKey, "-out", leafCSR, "-nodes", "-sha256",
+        "-subj", subject,
+      ])
+    case .ecP256:
+      try run([
+        "ecparam", "-name", "prime256v1", "-genkey", "-noout", "-out", leafKey,
+      ])
+      try run([
+        "req", "-new", "-key", leafKey, "-out", leafCSR, "-nodes", "-sha256", "-subj", subject,
+      ])
+    }
     try run([
       "x509", "-req", "-in", leafCSR, "-CA", caPEMPath, "-CAkey", caKey, "-CAcreateserial",
       "-out", leafPEM, "-days", "2", "-sha256",

@@ -55,8 +55,12 @@ enum CMSSigner {
   static let rsaEncryptionOID = "1.2.840.113549.1.1.1"
   static let ecdsaWithSHA256OID = "1.2.840.10045.4.3.2"
 
+  /// - Parameter signerIdentifierCertificate: test-only seam: name a
+  ///   different certificate in the SignerInfo identifier while signing with
+  ///   the identity's key, to prove validation rejects mismatched identities.
   static func detachedSignature(
-    signedBytes: Data, identity: SecIdentity, signingTime: Date, limits: PDFLimits = PDFLimits()
+    signedBytes: Data, identity: SecIdentity, signingTime: Date,
+    signerIdentifierCertificate: SecCertificate? = nil, limits: PDFLimits = PDFLimits()
   ) throws -> Data {
     guard let certificate = PDFSigningIdentity.certificate(of: identity) else {
       throw PDFError(.unsupported, "The signing identity has no certificate")
@@ -76,11 +80,17 @@ enum CMSSigner {
       throw PDFError(.unsupported, "Only RSA and EC signing keys are supported")
     }
 
-    // Signed attributes: contentType, messageDigest, signingTime.
+    // Signed attributes: contentType, messageDigest, signingTime. A SET OF
+    // must carry its elements in DER (byte-lexicographic) order; strict CMS
+    // parsers such as NSS used by independent readers reject unsorted sets
+    // even when lenient ones accept the signature.
     let digest = Data(SHA256.hash(data: signedBytes))
-    let attributeContent = DER.concatenated([
+    let signedAttributeElements: [Data] = [
+      // AttributeValue for contentType is the ContentType OID itself; wrapping
+      // it in a SEQUENCE is accepted by OpenSSL but rejected as malformed by
+      // strict independent CMS parsers (NSS, as used by poppler/pdfsig).
       DER.sequence([
-        DER.oid(contentTypeAttributeOID), DER.set([DER.sequence([DER.oid(dataOID)])]),
+        DER.oid(contentTypeAttributeOID), DER.set([DER.oid(dataOID)]),
       ]),
       DER.sequence([
         DER.oid(messageDigestAttributeOID), DER.set([DER.octetString(digest)]),
@@ -88,7 +98,8 @@ enum CMSSigner {
       DER.sequence([
         DER.oid(signingTimeAttributeOID), DER.set([DER.utcTime(signingTime)]),
       ]),
-    ])
+    ].sorted { $0.lexicographicallyPrecedes($1) }
+    let attributeContent = DER.concatenated(signedAttributeElements)
     let signedAttributes = DER.element(tag: 0x31, attributeContent)
 
     let algorithm: SecKeyAlgorithm =
@@ -102,15 +113,30 @@ enum CMSSigner {
     }
     let signatureOID = isRSA ? rsaEncryptionOID : ecdsaWithSHA256OID
 
-    guard let (issuerDER, serialDER) = issuerAndSerial(certificate: certificate) else {
+    let identifierCertificate = signerIdentifierCertificate ?? certificate
+    guard
+      let (issuerDER, serialDER) = issuerAndSerial(certificate: identifierCertificate)
+    else {
       throw PDFError(.malformed, "The signer certificate could not be parsed")
+    }
+    // SIG-01: RFC 3279 requires rsaEncryption parameters to be an explicit
+    // NULL. Some independent CMS parsers (NSS/poppler) reject an absent
+    // parameter set even though lenient ones default it; ECDSA parameters
+    // must stay absent.
+    let signatureAlgorithm: Data
+    if isRSA {
+      signatureAlgorithm = DER.sequence([
+        DER.oid(signatureOID), DER.element(tag: 0x05, Data()),
+      ])
+    } else {
+      signatureAlgorithm = DER.sequence([DER.oid(signatureOID)])
     }
     let signerInfo = DER.sequence([
       DER.integer(1),
       DER.sequence([issuerDER, serialDER]),
       DER.sequence([DER.oid(sha256OID), DER.element(tag: 0x05, Data())]),
       DER.element(tag: 0xA0, attributeContent),
-      DER.sequence([DER.oid(signatureOID)]),
+      signatureAlgorithm,
       DER.octetString(signature as Data),
     ])
 

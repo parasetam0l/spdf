@@ -32,6 +32,8 @@ Supported images already present in the PDF can also be selected and dragged or 
 
 ## Annotate, fill forms, and organize pages
 
+Tools → **Review Reports…** exports a printable review summary (page context, numbered comment anchors, reply threads and filters) or, while a comparison is open, a portable comparison report (chosen options, page mapping, change entries with page-space bounds and region images, uncertainty records). Both are local files that never modify the document; larger sets are bounded and refused rather than written partially.
+
 Click **Comments** for Highlight, Add Note and Draw controls. The comments sidebar supports navigation, replies, and review state. The Edit and Annotate menus retain advanced annotation commands and drawn signatures. Common form fields can be filled in the page or Forms sidebar; press Return to commit a text value. Form properties and authoring commands are available in the Form menu.
 
 Click **Pages** for Organize Pages, Insert Blank Page and Rotate Right. The Page menu includes importing, reordering, rotation and deletion. Operations that would damage references are refused or require a supported resolution.

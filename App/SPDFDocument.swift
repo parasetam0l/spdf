@@ -433,6 +433,8 @@ final class SPDFDocument: NSDocument {
         try? revert(toContentsOf: fileURL, ofType: type)
         // RED-01: review geometry belongs to the previous revision.
         resetRedactionMarksAfterReload()
+        // FRM-01/FRM-02: design/review state belongs to the previous revision.
+        resetFormDesignAfterReload()
         sourceFingerprint = SourceFingerprint.capture(of: fileURL)
       }
       return false
@@ -6530,6 +6532,8 @@ final class SPDFDocument: NSDocument {
       alert.addButton(withTitle: "OK")
       alert.runModal()
     }
+    // OCR-03: turn the fresh confidence/provenance into the review queue.
+    presentOCRReview(after: results, level: level)
   }
 
   /// P26-010: apply a searchable text layer from caller-provided lines (used

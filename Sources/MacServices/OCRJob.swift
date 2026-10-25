@@ -10,11 +10,18 @@ public struct OCRObservation: Sendable, Equatable {
   public let text: String
   public let confidence: Double
   public let boundingBox: CGRect
+  /// OCR-03: word-level boxes for the same line when the recognizer supplies
+  /// them. Empty means the review derives word boxes proportionally.
+  public let words: [OCRWordObservation]
 
-  public init(text: String, confidence: Double, boundingBox: CGRect) {
+  public init(
+    text: String, confidence: Double, boundingBox: CGRect,
+    words: [OCRWordObservation] = []
+  ) {
     self.text = text
     self.confidence = confidence
     self.boundingBox = boundingBox
+    self.words = words
   }
 }
 
@@ -80,7 +87,8 @@ public struct VisionTextRecognizer: TextRecognizing {
       guard let candidate = observation.topCandidates(1).first else { return nil }
       return OCRObservation(
         text: candidate.string, confidence: Double(candidate.confidence),
-        boundingBox: observation.boundingBox)
+        boundingBox: observation.boundingBox,
+        words: Self.reviewWordObservations(for: candidate))
     }
   }
 
@@ -219,6 +227,18 @@ public struct OCRTextLine: Sendable, Equatable {
   public let text: String
   public let rect: [Double]
   public let confidence: Double
+  /// OCR-03: recognized words in reading order when the recognizer supplied
+  /// word-level detail; otherwise empty.
+  public let words: [OCRTextWord]
+
+  public init(
+    text: String, rect: [Double], confidence: Double, words: [OCRTextWord] = []
+  ) {
+    self.text = text
+    self.rect = rect
+    self.confidence = confidence
+    self.words = words
+  }
 }
 
 public struct OCRPageResult: Sendable, Equatable {
@@ -226,6 +246,12 @@ public struct OCRPageResult: Sendable, Equatable {
   public let lines: [OCRTextLine]
   /// OCR-01: true when the requested Accurate level failed and Fast was used.
   public let usedFastFallback: Bool
+
+  public init(pageIndex: Int, lines: [OCRTextLine], usedFastFallback: Bool) {
+    self.pageIndex = pageIndex
+    self.lines = lines
+    self.usedFastFallback = usedFastFallback
+  }
 }
 
 /// P26-003/P26-018/P26-019/P26-020/P26-028: a local, sequential OCR job over
@@ -286,7 +312,16 @@ public enum OCRJob {
       guard !text.isEmpty else { return nil }
       let rect = transform.pageRect(forNormalizedBox: observation.boundingBox)
       guard rect[2] > rect[0], rect[3] > rect[1] else { return nil }
-      return OCRTextLine(text: text, rect: rect, confidence: observation.confidence)
+      let words = observation.words.compactMap { word -> OCRTextWord? in
+        let wordText = word.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !wordText.isEmpty else { return nil }
+        let wordRect = transform.pageRect(forNormalizedBox: word.boundingBox)
+        guard wordRect[2] > wordRect[0], wordRect[3] > wordRect[1] else { return nil }
+        return OCRTextWord(
+          text: wordText, rect: wordRect, confidence: word.confidence)
+      }
+      return OCRTextLine(
+        text: text, rect: rect, confidence: observation.confidence, words: words)
     }
     return mapped.sorted { lhs, rhs in
       if abs(lhs.rect[3] - rhs.rect[3]) > 2 { return lhs.rect[3] > rhs.rect[3] }

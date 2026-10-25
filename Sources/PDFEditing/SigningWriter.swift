@@ -14,19 +14,24 @@ public struct PDFSigningOptions: Sendable, Equatable {
   /// Reserved /Contents bytes (hex space is twice this).
   public let reservationBytes: Int
   public let signingTime: Date
+  /// SIG-06: fill this existing empty signature field instead of creating a
+  /// new one. When set, the field's own page, rectangle and name are used and
+  /// the update is necessarily incremental (earlier bytes stay untouched).
+  public let existingFieldName: String?
 
   public init(
     fieldName: String = "Signature1", pageIndex: Int = 0, rect: [Double] = [72, 72, 272, 112],
     reason: String? = nil, location: String? = nil, reservationBytes: Int = 16_384,
-    signingTime: Date = Date()
+    signingTime: Date = Date(), existingFieldName: String? = nil
   ) {
-    self.fieldName = fieldName
+    self.fieldName = existingFieldName ?? fieldName
     self.pageIndex = pageIndex
     self.rect = rect
     self.reason = reason
     self.location = location
     self.reservationBytes = reservationBytes
     self.signingTime = signingTime
+    self.existingFieldName = existingFieldName
   }
 }
 
@@ -51,7 +56,17 @@ public enum PDFSigningWriter {
     _ graph: PDFGraph, identity: SecIdentity, options: PDFSigningOptions,
     limits: PDFLimits = PDFLimits()
   ) throws -> Data {
-    let plan = try prepare(graph, options: options, limits: limits)
+    // SIG-06: a full rewrite cannot preserve earlier signatures. Adding a
+    // signature to a signed document must be an incremental update.
+    if (try? PDFSignatureInventory.signatures(in: graph, limits: limits)).map({ !$0.isEmpty })
+      == true
+    {
+      throw PDFError(
+        .unsupported,
+        "This document is already signed; add the signature as an incremental update")
+    }
+    let plan = try prepare(
+      graph, identity: identity, options: options, limits: limits)
     let data = try PDFWriter.serialize(plan.graph, limits: limits)
     return try embed(
       data, signatureID: plan.signatureID, identity: identity, options: options, limits: limits)
@@ -67,7 +82,18 @@ public enum PDFSigningWriter {
     guard source.graph.trailer[PDFName("Encrypt")] == nil else {
       throw PDFError(.unsupported, "Signing encrypted documents is not supported")
     }
-    let plan = try prepare(source.graph, options: options, limits: limits)
+    // SIG-06: adding a signature must respect the document's existing
+    // certification (DocMDP) permissions and field locks.
+    let target: PDFSignatureSigningTarget = options.existingFieldName.map {
+      .existingField(name: $0)
+    } ?? .newField(name: options.fieldName)
+    if case .refused(let reason) = try PDFSignatureSigningPolicy.decision(
+      in: source.graph, target: target, limits: limits)
+    {
+      throw PDFError(.unsupported, reason)
+    }
+    let plan = try prepare(
+      source.graph, identity: identity, options: options, limits: limits)
     let previousStartXRef = try finalStartXRef(in: source.source)
 
     var output = source.source
@@ -109,13 +135,23 @@ public enum PDFSigningWriter {
   // MARK: - Preparation (P30-017)
 
   static func prepare(
-    _ graph: PDFGraph, options: PDFSigningOptions, limits: PDFLimits
+    _ graph: PDFGraph, identity: SecIdentity, options: PDFSigningOptions, limits: PDFLimits
   ) throws -> Plan {
     guard options.reservationBytes >= 512, options.reservationBytes <= 1_048_576 else {
       throw PDFError(.malformed, "The signature reservation is out of bounds")
     }
-    try AnnotationSupport.validateRect(options.rect)
     let pageIDs = try PDFPageTree.pageIDs(in: graph)
+    let signerName = PDFSigningIdentity.certificate(of: identity)
+      .flatMap { PDFSignatureSignerIdentity.certificateDetails($0)?.commonName }
+    // SIG-06: an explicit field selection signs that existing empty field in
+    // place; the widget, page and name stay untouched and the update is
+    // sequential (the caller writes it incrementally).
+    if let existingFieldName = options.existingFieldName {
+      return try prepareExistingField(
+        graph, fieldName: existingFieldName, options: options, pageIDs: pageIDs,
+        signerName: signerName, limits: limits)
+    }
+    try AnnotationSupport.validateRect(options.rect)
     guard options.pageIndex >= 0, options.pageIndex < pageIDs.count else {
       throw PDFError(.malformed, "The signature page does not exist")
     }
@@ -155,6 +191,11 @@ public enum PDFSigningWriter {
     }
     if let location = options.location {
       signatureDictionary[PDFName("Location")] = .string(Data(location.utf8))
+    }
+    if let signerName, !signerName.isEmpty {
+      // SIG-06: readers and the signatures panel can name the signer without
+      // re-verifying the embedded CMS certificate.
+      signatureDictionary[PDFName("Name")] = .string(Data(signerName.utf8))
     }
     graph.objects[signatureID] = .dictionary(signatureDictionary)
 
@@ -231,6 +272,141 @@ public enum PDFSigningWriter {
     return Plan(
       graph: graph, signatureID: signatureID, widgetID: widgetID,
       changedIDs: Array(Set(changedIDs)))
+  }
+
+  private static func prepareExistingField(
+    _ graph: PDFGraph, fieldName: String, options: PDFSigningOptions,
+    pageIDs: [PDFObjectID], signerName: String?, limits: PDFLimits
+  ) throws -> Plan {
+    let fields = try FormInventory.fields(in: graph, pageIDs: pageIDs)
+    guard let field = fields.first(where: { $0.name == fieldName }) else {
+      throw PDFError(.malformed, "Signature field \(fieldName) does not exist")
+    }
+    guard field.kind == .signature else {
+      throw PDFError(.unsupported, "Field \(fieldName) is not a signature field")
+    }
+    guard field.flags & 1 == 0 else {
+      throw PDFError(.unsupported, "Signature field \(fieldName) is read-only")
+    }
+    if case .dictionary? = FontValue.resolve(field.value, in: graph) {
+      throw PDFError(.malformed, "Signature field \(fieldName) is already signed")
+    }
+    guard let widget = field.widgets.first, let widgetID = widget.objectID,
+      let pageIndex = widget.pageIndex, pageIDs.indices.contains(pageIndex),
+      let rect = widget.rect, rect.count == 4, rect[2] > rect[0], rect[3] > rect[1]
+    else {
+      throw PDFError(.malformed, "Signature field \(fieldName) has no usable widget")
+    }
+    var graph = graph
+    let highest = graph.objects.keys.map(\.number).max() ?? 0
+    let fontID = PDFObjectID(highest + 1)
+    let appearanceID = PDFObjectID(highest + 2)
+    let signatureID = PDFObjectID(highest + 3)
+    var changedIDs: [PDFObjectID] = [fontID, appearanceID, signatureID, widgetID]
+    graph.objects[fontID] = .dictionary([
+      PDFName("Type"): .name(PDFName("Font")),
+      PDFName("Subtype"): .name(PDFName("Type1")),
+      PDFName("BaseFont"): .name(PDFName("Helvetica")),
+    ])
+    graph.objects[signatureID] = .dictionary(
+      signatureDictionary(options: options, signerName: signerName))
+    graph.objects[appearanceID] = .stream(appearanceStream(rect: rect, fontID: fontID))
+    guard case .dictionary(var widgetDictionary)? = graph.objects[widgetID] else {
+      throw PDFError(.malformed, "The signature widget is missing")
+    }
+    widgetDictionary[PDFName("AP")] = .dictionary([
+      PDFName("N"): .reference(appearanceID)
+    ])
+    widgetDictionary[PDFName("V")] = .reference(signatureID)
+    if widgetDictionary[PDFName("F")] == nil {
+      widgetDictionary[PDFName("F")] = .integer(132)
+    }
+    graph.objects[widgetID] = .dictionary(widgetDictionary)
+
+    // The AcroForm may be reachable as an indirect object or inline in the
+    // catalog (the form-authoring commands write it inline).
+    guard case .reference(let rootID)? = graph.trailer[PDFName("Root")],
+      case .dictionary(var catalog)? = graph.objects[rootID]
+    else {
+      throw PDFError(.malformed, "The catalog is missing for an existing signature field")
+    }
+    var acroFormID: PDFObjectID?
+    var acroForm: [PDFName: PDFValue]
+    switch catalog[PDFName("AcroForm")] {
+    case .dictionary(let dictionary)?:
+      acroForm = dictionary
+    case .reference(let id)?:
+      guard case .dictionary(let dictionary)? = graph.objects[id] else {
+        throw PDFError(.malformed, "The AcroForm is missing for an existing signature field")
+      }
+      acroForm = dictionary
+      acroFormID = id
+    default:
+      throw PDFError(.malformed, "The AcroForm is missing for an existing signature field")
+    }
+    var dr: [PDFName: PDFValue] = [:]
+    if case .dictionary(let existing)? = FontValue.resolve(acroForm[PDFName("DR")], in: graph) {
+      dr = existing
+    }
+    var fonts: [PDFName: PDFValue] = [:]
+    if case .dictionary(let existing)? = FontValue.resolve(dr[PDFName("Font")], in: graph) {
+      fonts = existing
+    }
+    fonts[PDFName("Helv")] = .reference(fontID)
+    dr[PDFName("Font")] = .dictionary(fonts)
+    acroForm[PDFName("DR")] = .dictionary(dr)
+    acroForm[PDFName("SigFlags")] = .integer(3)
+    if let acroFormID {
+      graph.objects[acroFormID] = .dictionary(acroForm)
+      changedIDs.append(acroFormID)
+    } else {
+      catalog[PDFName("AcroForm")] = .dictionary(acroForm)
+      graph.objects[rootID] = .dictionary(catalog)
+      changedIDs.append(rootID)
+    }
+
+    return Plan(
+      graph: graph, signatureID: signatureID, widgetID: widgetID,
+      changedIDs: Array(Set(changedIDs)))
+  }
+
+  private static func signatureDictionary(
+    options: PDFSigningOptions, signerName: String?
+  ) -> [PDFName: PDFValue] {
+    var dictionary: [PDFName: PDFValue] = [
+      PDFName("Type"): .name(PDFName("Sig")),
+      PDFName("Filter"): .name(PDFName("Adobe.PPKLite")),
+      PDFName("SubFilter"): .name(PDFName("adbe.pkcs7.detached")),
+      PDFName("ByteRange"): .array([
+        .integer(0), .integer(Int64(byteRangeSentinel)), .integer(Int64(byteRangeSentinel)),
+        .integer(Int64(byteRangeSentinel)),
+      ]),
+      PDFName("Contents"): .string(Data(repeating: 0, count: options.reservationBytes)),
+      PDFName("M"): .string(Data(pdfDate(options.signingTime).utf8)),
+    ]
+    if let reason = options.reason {
+      dictionary[PDFName("Reason")] = .string(Data(reason.utf8))
+    }
+    if let location = options.location {
+      dictionary[PDFName("Location")] = .string(Data(location.utf8))
+    }
+    if let signerName, !signerName.isEmpty {
+      dictionary[PDFName("Name")] = .string(Data(signerName.utf8))
+    }
+    return dictionary
+  }
+
+  private static func appearanceStream(rect: [Double], fontID: PDFObjectID) -> PDFStream {
+    let width = rect[2] - rect[0]
+    let height = rect[3] - rect[1]
+    let content = """
+      q 0.8 w 0.5 0.5 \(width - 1) \(height - 1) re S Q
+      BT /Helv 9 Tf 4 \(height / 2 - 4) Td (Digitally signed) Tj ET
+
+      """
+    return AnnotationSupport.formAppearance(
+      rect: rect, content: content,
+      resources: [PDFName("Font"): .dictionary([PDFName("Helv"): .reference(fontID)])])
   }
 
   // MARK: - Embedding (P30-018/P30-019/P30-021)

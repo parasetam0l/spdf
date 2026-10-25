@@ -162,6 +162,11 @@ struct CMSSignedData {
     let messageDigest: Data?
     let signingTime: Date?
     let hasTimestampToken: Bool
+    /// SIG-01: the SignerInfo certificate identifier (issuerAndSerialNumber).
+    let issuerDER: Data?
+    let serialDER: Data?
+    /// SIG-01: a subjectKeyIdentifier SignerInfo identifier, when used.
+    let subjectKeyIdentifier: Data?
   }
 
   let certificates: [[UInt8]]
@@ -252,6 +257,22 @@ struct CMSSignedData {
     guard sid.tag == 0x30 || sid.tag == 0x80 else {
       throw PDFError(.malformed, "Signer identifier is malformed")
     }
+    var sidIssuerDER: Data?
+    var sidSerialDER: Data?
+    var sidKeyIdentifier: Data?
+    if sid.tag == 0x30 {
+      var sidReader = DERReader(
+        bytes: bytes, offset: sid.content.startIndex, end: sid.content.endIndex)
+      let issuer = try sidReader.readElement(limits: limits)
+      let serial = try sidReader.readElement(limits: limits)
+      guard issuer.tag == 0x30, serial.tag == 0x02 else {
+        throw PDFError(.malformed, "Signer identifier is malformed")
+      }
+      sidIssuerDER = Data(bytes[issuer.start..<issuer.content.endIndex])
+      sidSerialDER = Data(bytes[serial.start..<serial.content.endIndex])
+    } else {
+      sidKeyIdentifier = Data(bytes[sid.content.startIndex..<sid.content.endIndex])
+    }
     let digestAlgorithm = try reader.readElement(limits: limits)
     try DERReader.expect(digestAlgorithm, tag: 0x30, "Digest algorithm is malformed")
     var digestReader = DERReader(
@@ -304,7 +325,8 @@ struct CMSSignedData {
       signatureOID: DERReader.oid(signatureOID.content),
       signedAttributesDER: signedAttributesDER, signature: signature,
       messageDigest: messageDigest, signingTime: signingTime,
-      hasTimestampToken: hasTimestampToken)
+      hasTimestampToken: hasTimestampToken, issuerDER: sidIssuerDER,
+      serialDER: sidSerialDER, subjectKeyIdentifier: sidKeyIdentifier)
   }
 
   private static func parseAttributes(
@@ -395,6 +417,14 @@ public struct PDFSignatureValidation: Sendable, Equatable {
   public let unsignedChanges: Bool
   public let changedObjectCount: Int
   public let details: [String]
+  /// SIG-06: identity decoded from the certificate named by the CMS
+  /// SignerInfo identifier (present even when cryptographic verification
+  /// fails, so the UI can still identify the claimed signer).
+  public var signerIdentity: PDFSignatureSignerIdentity? = nil
+  /// SIG-01: bytes after the last signed range that no signature covers.
+  public var uncoveredTrailingBytes: Int = 0
+  /// SIG-01: true when the signed ranges reach the end of the file.
+  public var signatureCoversWholeFile: Bool = true
 }
 
 /// P30-004–P30-014: validation of one signature against the source bytes and
@@ -406,6 +436,20 @@ public enum PDFSignatureValidator {
   ) -> PDFSignatureValidation {
     var details: [String] = []
     let bytes = [UInt8](source)
+
+    // SIG-01: this profile supports exactly one contents gap (the standard
+    // 4-integer ByteRange). Multiple gaps are structurally different; report
+    // them as indeterminate rather than guessing which bytes are covered.
+    if signature.byteRange.count != 4, signature.byteRange.count >= 4,
+      signature.byteRange.count.isMultiple(of: 2)
+    {
+      details.append(
+        "ByteRange uses \(signature.byteRange.count / 2) ranges; only the single-gap profile is supported")
+      return PDFSignatureValidation(
+        crypto: .indeterminate, trust: .unknown, digestAlgorithm: nil, signatureAlgorithm: nil,
+        signerName: nil, signerNotAfter: nil, revocationChecked: false, unsignedChanges: false,
+        changedObjectCount: 0, details: details)
+    }
 
     // P30-004: ByteRange structure.
     guard let gap = validateByteRange(signature, bytes: bytes, details: &details) else {
@@ -426,6 +470,12 @@ public enum PDFSignatureValidator {
     let (unsignedChanges, changedCount) = compareRevisions(
       gap: gap, signature: signature, bytes: bytes, finalGraph: finalGraph, limits: limits,
       details: &details)
+    let uncoveredTrailingBytes = max(0, bytes.count - gap.coverageEnd)
+    let signatureCoversWholeFile = uncoveredTrailingBytes == 0
+    if uncoveredTrailingBytes > 0 {
+      details.append(
+        "\(uncoveredTrailingBytes) byte(s) after the signed ranges are not covered by this signature")
+    }
 
     // P30-006/P30-007: CMS structure.
     let cms: CMSSignedData
@@ -481,6 +531,37 @@ public enum PDFSignatureValidator {
         details: details)
     }
 
+    // SIG-01: the SignerInfo certificate identifier must name the
+    // certificate that verifies the signature. A signature that verifies under
+    // an unrelated embedded certificate is not evidence for the claimed
+    // signer, so identification happens before verification.
+    var matchedCertificates: [(certificate: SecCertificate, identity: PDFSignatureSignerIdentity)] =
+      []
+    for certificateDER in cms.certificates {
+      guard let certificate = SecCertificateCreateWithData(
+        nil, Data(certificateDER) as CFData),
+        let identity = PDFSignatureSignerIdentity.certificateDetails(certificate)
+      else { continue }
+      if let issuerDER = signer.issuerDER, let serialDER = signer.serialDER {
+        guard identity.issuerDER == issuerDER, identity.serialDER == serialDER else { continue }
+      } else if let keyIdentifier = signer.subjectKeyIdentifier {
+        guard identity.subjectKeyIdentifier == keyIdentifier else { continue }
+      } else {
+        continue
+      }
+      matchedCertificates.append((certificate, identity))
+    }
+    guard let matchedIdentity = matchedCertificates.first?.identity else {
+      details.append(
+        "No embedded certificate matches the SignerInfo certificate identifier; "
+          + "the claimed signer cannot be established")
+      return PDFSignatureValidation(
+        crypto: .indeterminate, trust: .unknown, digestAlgorithm: digest.name,
+        signatureAlgorithm: keyAlgorithm.name, signerName: nil, signerNotAfter: nil,
+        revocationChecked: false, unsignedChanges: unsignedChanges,
+        changedObjectCount: changedCount, details: details)
+    }
+
     // Signed bytes: every ByteRange pair concatenated.
     var signedBytes = Data()
     var rangeIndex = 0
@@ -504,9 +585,11 @@ public enum PDFSignatureValidator {
         details.append("The signed bytes do not match the signature's message digest")
         return PDFSignatureValidation(
           crypto: .invalid, trust: .unknown, digestAlgorithm: digest.name,
-          signatureAlgorithm: signer.signatureOID, signerName: nil, signerNotAfter: nil,
-          revocationChecked: false, unsignedChanges: unsignedChanges,
-          changedObjectCount: changedCount, details: details)
+          signatureAlgorithm: signer.signatureOID, signerName: matchedIdentity.displayName,
+          signerNotAfter: matchedIdentity.notAfter, revocationChecked: false,
+          unsignedChanges: unsignedChanges, changedObjectCount: changedCount, details: details,
+          signerIdentity: matchedIdentity, uncoveredTrailingBytes: uncoveredTrailingBytes,
+          signatureCoversWholeFile: signatureCoversWholeFile)
       }
     } else {
       details.append("The signature has no signed attributes; the digest is implicit")
@@ -516,25 +599,25 @@ public enum PDFSignatureValidator {
     // when no attributes are present) with the embedded certificates.
     let verificationData = signer.signedAttributesDER.map { Data($0) } ?? signedBytes
     var verifiedCertificate: SecCertificate?
-    for certificateDER in cms.certificates {
-      guard let certificate = SecCertificateCreateWithData(
-        nil, Data(certificateDER) as CFData), let key = SecCertificateCopyKey(certificate)
-      else { continue }
+    for candidate in matchedCertificates {
+      guard let key = SecCertificateCopyKey(candidate.certificate) else { continue }
       var error: Unmanaged<CFError>?
       if SecKeyVerifySignature(
         key, keyAlgorithm.algorithm, verificationData as CFData, signer.signature as CFData, &error)
       {
-        verifiedCertificate = certificate
+        verifiedCertificate = candidate.certificate
         break
       }
     }
     guard let certificate = verifiedCertificate else {
-      details.append("No embedded certificate verifies the signature")
+      details.append("The certificate named by the SignerInfo does not verify the signature")
       return PDFSignatureValidation(
         crypto: .invalid, trust: .unknown, digestAlgorithm: digest.name,
-        signatureAlgorithm: signer.signatureOID, signerName: nil, signerNotAfter: nil,
-        revocationChecked: false, unsignedChanges: unsignedChanges, changedObjectCount: changedCount,
-        details: details)
+        signatureAlgorithm: signer.signatureOID, signerName: matchedIdentity.displayName,
+        signerNotAfter: matchedIdentity.notAfter, revocationChecked: false,
+        unsignedChanges: unsignedChanges, changedObjectCount: changedCount, details: details,
+        signerIdentity: matchedIdentity, uncoveredTrailingBytes: uncoveredTrailingBytes,
+        signatureCoversWholeFile: signatureCoversWholeFile)
     }
 
     // P30-010/P30-011: chain evaluation with an explicit offline policy.
@@ -546,9 +629,11 @@ public enum PDFSignatureValidator {
     return PDFSignatureValidation(
       crypto: .valid, trust: trust, digestAlgorithm: digest.name,
       signatureAlgorithm: keyAlgorithm.name,
-      signerName: SecCertificateCopySubjectSummary(certificate) as String?,
+      signerName: matchedIdentity.displayName,
       signerNotAfter: notAfter, revocationChecked: false, unsignedChanges: unsignedChanges,
-      changedObjectCount: changedCount, details: details)
+      changedObjectCount: changedCount, details: details,
+      signerIdentity: matchedIdentity, uncoveredTrailingBytes: uncoveredTrailingBytes,
+      signatureCoversWholeFile: signatureCoversWholeFile)
   }
 
   // MARK: ByteRange (P30-004)
@@ -558,6 +643,8 @@ public enum PDFSignatureValidator {
     let gapEnd: Int
     /// End offset of the signed coverage (the last range's end).
     let coverageEnd: Int
+    /// SIG-01: bytes after the signed coverage.
+    let uncoveredTrailingBytes: Int
   }
 
   static func validateByteRange(
@@ -566,6 +653,10 @@ public enum PDFSignatureValidator {
     let ranges = signature.byteRange
     guard ranges.count >= 2, ranges.count % 2 == 0 else {
       details.append("The signature has no valid ByteRange")
+      return nil
+    }
+    guard ranges[0] == 0 else {
+      details.append("The ByteRange does not begin at the start of the file")
       return nil
     }
     var previousEnd = 0
@@ -601,7 +692,9 @@ public enum PDFSignatureValidator {
       details.append("The ByteRange has no contents gap")
       return nil
     }
-    let gap = ByteRangeInfo(gapStart: gapStart, gapEnd: gapEnd, coverageEnd: previousEnd)
+    let gap = ByteRangeInfo(
+      gapStart: gapStart, gapEnd: gapEnd, coverageEnd: previousEnd,
+      uncoveredTrailingBytes: max(0, bytes.count - previousEnd))
     // The gap must hold exactly the /Contents value (angle brackets optional).
     var contentStart = gap.gapStart
     var contentEnd = gap.gapEnd
@@ -628,29 +721,44 @@ public enum PDFSignatureValidator {
 
   // MARK: Revision comparison (P30-013)
 
+  /// SIG-01/SIG-06: reconstruct the document as it existed when this
+  /// signature was applied: truncate at the signed coverage end and zero the
+  /// contents gap so the prefix parses as a standalone PDF. Later revisions
+  /// are absent by construction.
+  static func signedRevisionGraph(
+    gap: ByteRangeInfo, signature: PDFSignature, bytes: [UInt8], limits: PDFLimits
+  ) -> PDFGraph? {
+    guard gap.coverageEnd <= bytes.count, gap.gapStart >= 0, gap.gapEnd <= gap.coverageEnd,
+      gap.gapStart < gap.gapEnd
+    else { return nil }
+    var signedBytes = Array(bytes[0..<gap.coverageEnd])
+    // The gap holds "<hex>" or a literal string; zero every byte except the
+    // delimiters so a parseable but unsigned placeholder remains.
+    for position in gap.gapStart..<gap.gapEnd
+    where signedBytes[position] != 0x3C && signedBytes[position] != 0x3E
+    {
+      signedBytes[position] = 0x30
+    }
+    return (try? PDFParser.parse(Data(signedBytes), limits: limits))?.graph
+  }
+
   static func compareRevisions(
     gap: ByteRangeInfo, signature: PDFSignature, bytes: [UInt8], finalGraph: PDFGraph,
     limits: PDFLimits, details: inout [String]
   ) -> (Bool, Int) {
-    // Reconstruct the signed revision: truncate at the covered end and
-    // replace the contents gap with zero hex digits so it parses as a
-    // standalone document. Bytes after the coverage are later revisions and
-    // must not appear in the signed graph.
-    var signedBytes = Array(bytes[0..<gap.coverageEnd])
-    for position in gap.gapStart..<gap.gapEnd where signedBytes[position] != 0x3C && signedBytes[position] != 0x3E {
-      signedBytes[position] = 0x30
-    }
-    guard let signedParsed = try? PDFParser.parse(Data(signedBytes), limits: limits) else {
+    guard let signedParsed = signedRevisionGraph(
+      gap: gap, signature: signature, bytes: bytes, limits: limits)
+    else {
       details.append("The signed revision could not be reconstructed for change comparison")
       return (true, 0)
     }
     var changed = 0
     var ids: Set<PDFObjectID> = []
-    for (id, value) in signedParsed.graph.objects { ids.insert(id) }
-    for (id, value) in finalGraph.objects { ids.insert(id) }
+    for (id, _) in signedParsed.objects { ids.insert(id) }
+    for (id, _) in finalGraph.objects { ids.insert(id) }
     for id in ids {
       if id == signature.objectID { continue }  // contents differ by construction
-      if signedParsed.graph.objects[id] != finalGraph.objects[id] { changed += 1 }
+      if signedParsed.objects[id] != finalGraph.objects[id] { changed += 1 }
     }
     if changed > 0 {
       details.append("\(changed) object(s) changed after signing")

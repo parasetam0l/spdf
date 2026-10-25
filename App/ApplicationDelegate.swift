@@ -538,6 +538,41 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
   @objc private func runOCRAllPages(_ sender: Any?) {
     currentDocument?.runOCRAllPages()
   }
+  @objc private func showReviewReports(_ sender: Any?) {
+    currentDocument?.showReviewReports()
+  }
+  @objc private func showFormDesignPanel(_ sender: Any?) {
+    currentDocument?.showFormDesign()
+  }
+  @objc private func detectFormFields(_ sender: Any?) {
+    guard let document = currentDocument else { return }
+    document.showFormDesign()
+    _ = document.runFormFieldDetection(allPages: false)
+  }
+  @objc private func toggleArrangeObjects(_ sender: Any?) {
+    currentDocument?.togglePageObjectArrangeMode()
+  }
+  @objc private func arrangeSelectedObjects(_ sender: Any?) {
+    currentDocument?.presentPageObjectArrangePanel()
+  }
+  @objc private func exportReviewSummaryPDF(_ sender: Any?) {
+    currentDocument?.exportReviewSummaryPDF()
+  }
+  @objc private func exportComparisonReportPDF(_ sender: Any?) {
+    currentDocument?.exportComparisonReportPDF()
+  }
+  @objc private func showOCRReview(_ sender: Any?) {
+    currentDocument?.showOCRReview()
+  }
+  @objc private func showOCRBatch(_ sender: Any?) {
+    currentDocument?.showOCRBatch()
+  }
+  @objc private func signExistingSignatureField(_ sender: Any?) {
+    currentDocument?.presentSignatureSigningFlow()
+  }
+  @objc private func showSignatureDetails(_ sender: Any?) {
+    currentDocument?.presentSignatureRevisionDetails()
+  }
   @objc private func exportText(_ sender: Any?) {
     currentDocument?.exportText()
   }
@@ -871,6 +906,29 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
       return document.canRunOCR
     case #selector(runOCRAllPages):
       return document.canRunOCRAllPages
+    case #selector(showOCRReview):
+      return document.canShowOCRReviewPanel
+    case #selector(showReviewReports):
+      return document.canShowReviewReports
+    case #selector(showFormDesignPanel):
+      return document.canShowFormDesign
+    case #selector(detectFormFields):
+      return document.canDetectFormFields
+    case #selector(toggleArrangeObjects):
+      menuItem.state = document.pageObjectSelectionController.isArrangeMode ? .on : .off
+      return document.canUsePageObjectArrangement
+    case #selector(arrangeSelectedObjects):
+      return document.canUsePageObjectArrangement
+    case #selector(exportReviewSummaryPDF):
+      return document.canExportReviewSummaryReport
+    case #selector(exportComparisonReportPDF):
+      return document.canExportComparisonReport
+    case #selector(showOCRBatch):
+      return document.canShowOCRBatchPanel
+    case #selector(signExistingSignatureField):
+      return document.canSignDocument
+    case #selector(showSignatureDetails):
+      return document.viewer != nil
     case #selector(exportText):
       return document.canExportText
     case #selector(exportPageImages):
@@ -1064,6 +1122,13 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
     add(
       "Export Review Summary…", #selector(exportReviewSummary), key: "e",
       modifiers: [.command, .shift], target: self, to: exports)
+    // REV-04/REV-07: printable review summaries and portable comparison reports.
+    add(
+      "Export Review Summary (PDF)…", #selector(exportReviewSummaryPDF), target: self,
+      to: exports)
+    add(
+      "Export Comparison Report (PDF)…", #selector(exportComparisonReportPDF), target: self,
+      to: exports)
     file.addItem(.separator())
     add("Print…", #selector(printDocument), key: "p", target: self, to: file)
 
@@ -1097,6 +1162,12 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
       modifiers: [.command, .option], target: self, to: edit)
     add("Select Previous Page Object", #selector(selectPreviousPageObject(_:)), key: "\u{F700}",
       modifiers: [.command, .option], target: self, to: edit)
+    // IMG-04/IMG-05: mixed object selection and arrangement.
+    let arrange = submenu("Arrange", in: edit)
+    add(
+      "Arrange Mode", #selector(toggleArrangeObjects), key: "a",
+      modifiers: [.command, .option], target: self, to: arrange)
+    add("Arrange Objects…", #selector(arrangeSelectedObjects), target: self, to: arrange)
     let format = submenu("Text Format", in: edit)
     add("Bold", #selector(togglePageTextBold), key: "b", target: self, to: format)
     add("Italic", #selector(togglePageTextItalic), key: "i", target: self, to: format)
@@ -1239,6 +1310,10 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
     add("Add Push Button…", #selector(addPushButton), target: self, to: form)
     add("Add Signature Field…", #selector(addSignatureField), target: self, to: form)
     form.addItem(.separator())
+    // FRM-01/FRM-02: detected-field review and direct design canvas.
+    add("Form Design…", #selector(showFormDesignPanel), target: self, to: form)
+    add("Detect Form Fields…", #selector(detectFormFields), target: self, to: form)
+    form.addItem(.separator())
     add("Rename Field…", #selector(renameFormField), target: self, to: form)
     add("Delete Field…", #selector(deleteFormField), target: self, to: form)
     form.addItem(.separator())
@@ -1292,6 +1367,10 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
     annotate.addItem(.separator())
     add("Recognize Text (OCR)…", #selector(runOCR), target: self, to: annotate)
     add("Recognize Text in All Pages…", #selector(runOCRAllPages), target: self, to: annotate)
+    annotate.addItem(.separator())
+    // OCR-03/OCR-07: suspect-word review and multi-file OCR jobs.
+    add("Review OCR Text…", #selector(showOCRReview), target: self, to: annotate)
+    add("OCR Files…", #selector(showOCRBatch), target: self, to: annotate)
 
     let tools = submenu("Tools", in: bar)
     add("Manage Attachments…", #selector(manageAttachments), target: self, to: tools)
@@ -1299,6 +1378,8 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
     add("Optimize Document…", #selector(optimizeDocument), target: self, to: tools)
     add("Repair Document…", #selector(repairDocument), target: self, to: tools)
     add("Review Tables…", #selector(reviewTables), target: self, to: tools)
+    // REV-04/REV-07: visual review summary / comparison report exports.
+    add("Review Reports…", #selector(showReviewReports), target: self, to: tools)
     add("Preview DOCX Reconstruction…", #selector(previewDOCX), target: self, to: tools)
     let security = submenu("Security", in: tools)
     add("Unlock Document…", #selector(unlockDocument), target: self, to: security)
@@ -1311,6 +1392,10 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
     add("Save Sanitized Copy…", #selector(saveSanitizedCopy), target: self, to: security)
     add("Export Encrypted Copy…", #selector(exportEncryptedCopy), target: self, to: security)
     add("Sign Document…", #selector(signDocument), target: self, to: security)
+    // SIG-06: existing-field signing and signed-revision inspection.
+    add(
+      "Sign Existing Field…", #selector(signExistingSignatureField), target: self, to: security)
+    add("Signature Details…", #selector(showSignatureDetails), target: self, to: security)
     let production = submenu("Print Production", in: tools)
     add("Compatibility Report…", #selector(showCompatibilityReport), target: self, to: production)
     add("Create Archival Copy…", #selector(createArchivalCopy), target: self, to: production)

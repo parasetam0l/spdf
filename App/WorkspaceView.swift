@@ -583,6 +583,9 @@ struct WorkspaceView: View {
             }
           PageEditOverlay(viewer: viewer)
           GraphicSelectionOverlay(viewer: viewer)
+          // IMG-04/IMG-05: mixed object selection/arrange sits above the image
+          // overlay so Arrange mode can claim image clicks first.
+          PageObjectSelectionOverlay(viewer: viewer)
           if viewer.areGuidesVisible {
             ZStack {
               GuideOverlayView(viewer: viewer)
