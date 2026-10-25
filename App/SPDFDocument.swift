@@ -110,6 +110,8 @@ final class SPDFDocument: NSDocument {
   private var textBlockCacheRevision: UInt64?
   private var textBlockCache: [Int: [PageTextTarget]] = [:]
   private var textEditRefusalCache: [Int: [PageTextEditRefusalTarget]] = [:]
+  private var rotatedTextCacheRevision: UInt64?
+  private var rotatedTextCache: [Int: [PageTextTarget]] = [:]
   private nonisolated let pendingPageText = PendingPageTextState()
   private nonisolated let pendingFormText = PendingFormTextState()
 
@@ -465,6 +467,9 @@ final class SPDFDocument: NSDocument {
     }
     viewer.textTargetsProvider = { [weak self] pageIndex in
       self?.textRunTargets(pageIndex: pageIndex) ?? []
+    }
+    viewer.rotatedTextTargetsProvider = { [weak self] pageIndex in
+      self?.rotatedTextTargets(pageIndex: pageIndex) ?? []
     }
     viewer.onTextRunCommit = { [weak self] pageIndex, runIndex, text in
       self?.replaceText(pageIndex: pageIndex, runIndex: runIndex, with: text) ?? false
@@ -1967,6 +1972,52 @@ final class SPDFDocument: NSDocument {
 
   /// P18-021: resolve editable document text targets for keyboard traversal
   /// and pointer hit testing, sharing the revision-scoped cache.
+  /// TXT-09: visible page text drawn with a 90/180/270-degree text matrix.
+  /// The overlay opens the single-run editor for these runs; the replacement
+  /// keeps the run's text-show matrix and compensates only the advance.
+  private func rotatedTextTargets(pageIndex: Int) -> [PageTextTarget] {
+    guard canEditContent, pageIndex >= 0, pageIndex < editSession.pageIDs.count,
+      let graph = editSession.currentGraph,
+      let page = viewer?.view.document?.page(at: pageIndex)
+    else { return [] }
+    if rotatedTextCacheRevision != editSession.documentRevision {
+      rotatedTextCache.removeAll()
+      rotatedTextCacheRevision = editSession.documentRevision
+    }
+    if let cached = rotatedTextCache[pageIndex] { return cached }
+    let pageID = editSession.pageIDs[pageIndex]
+    let runs = (try? PageTextEditing.rotatedTextRuns(pageID: pageID, in: graph)) ?? []
+    let string = (page.string ?? "") as NSString
+    var used = Set<Int>()
+    var targets: [PageTextTarget] = []
+    for run in runs {
+      var rect = run.rect
+      // PDFKit knows how rotated glyph boxes map to page space; the core
+      // layout bounds are only the fallback for text PDFKit cannot select.
+      let needle = run.text
+      if !needle.isEmpty {
+        var remaining = NSRange(location: 0, length: string.length)
+        while remaining.length > 0 {
+          let found = string.range(of: needle, range: remaining)
+          guard found.location != NSNotFound else { break }
+          if !used.contains(found.location), let selection = page.selection(for: found) {
+            let bounds = selection.bounds(for: page)
+            rect = [bounds.minX, bounds.minY, bounds.maxX, bounds.maxY]
+            used.insert(found.location)
+            break
+          }
+          let next = NSMaxRange(found)
+          remaining = NSRange(location: next, length: string.length - next)
+        }
+      }
+      guard rect.count == 4, rect[2] > rect[0], rect[3] > rect[1] else { continue }
+      targets.append(PageTextTarget(
+        pageIndex: pageIndex, runIndex: run.runIndex, rect: rect, text: run.text))
+    }
+    rotatedTextCache[pageIndex] = targets
+    return targets
+  }
+
   private func textRunTargets(pageIndex: Int) -> [PageTextTarget] {
     guard canEditContent, pageIndex >= 0, pageIndex < editSession.pageIDs.count,
       let graph = editSession.currentGraph
@@ -5333,12 +5384,22 @@ final class SPDFDocument: NSDocument {
       let page = selection.pages.first, let document = viewer.view.document
     else { return }
     let bounds = selection.bounds(for: page)
-    guard
-      let target = textRunTarget(
-        pageIndex: document.index(for: page),
-        pagePoint: [bounds.midX, bounds.midY]), viewer.activateTool(.textEdit)
-    else { return }
-    viewer.textBlockEditStarter?(target)
+    let pageIndex = document.index(for: page)
+    let pagePoint = [Double(bounds.midX), Double(bounds.midY)]
+    guard viewer.activateTool(.textEdit) else { return }
+    if let target = textRunTarget(pageIndex: pageIndex, pagePoint: pagePoint) {
+      viewer.textBlockEditStarter?(target)
+      return
+    }
+    // TXT-09: rotated page-space text uses the single-run field editor.
+    let midX = Double(bounds.midX), midY = Double(bounds.midY)
+    if let rotated = viewer.rotatedTextTargetsProvider?(pageIndex).first(where: { target in
+      let rect = target.rect
+      return rect.count == 4 && midX >= rect[0] - 2 && midX <= rect[2] + 2
+        && midY >= rect[1] - 2 && midY <= rect[3] + 2
+    }) {
+      viewer.rotatedTextEditStarter?(rotated)
+    }
   }
 
   // MARK: - Page import (P17-021)

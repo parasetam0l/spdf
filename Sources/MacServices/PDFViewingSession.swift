@@ -390,6 +390,10 @@ public final class PDFViewingSession: NSObject, ObservableObject, PDFViewDelegat
   /// Editable text blocks on a page, in any order; the viewer sorts these by
   /// their visible position before keyboard traversal.
   public var textTargetsProvider: ((Int) -> [PageTextTarget])?
+  /// TXT-09: page-space text drawn at a whole-quarter-turn rotation. These runs
+  /// use the single-run editor, which preserves the text-show matrix.
+  public var rotatedTextTargetsProvider: ((Int) -> [PageTextTarget])?
+  public var rotatedTextEditStarter: ((PageTextTarget) -> Void)?
   /// P18-021: commit an in-place text-run replacement.
   public var onTextRunCommit: ((Int, Int, String) -> Bool)?
   /// Add real page text at a rectangle chosen in the workspace.

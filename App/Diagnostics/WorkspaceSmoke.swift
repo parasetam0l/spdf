@@ -2120,6 +2120,80 @@
       window.makeKeyAndOrderFront(nil)
       try await Task.sleep(for: .milliseconds(200))
 
+      // TXT-09: page-space text drawn with a 90-degree text matrix is edited
+      // through the single-run field editor, which keeps the matrix and leaves
+      // the neighboring scaled line untouched.
+      let rotatedTextSource = output.appendingPathComponent("rotated-text-source.pdf")
+      try? FileManager.default.removeItem(at: rotatedTextSource)
+      try FileManager.default.copyItem(
+        at: URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+          .appendingPathComponent("Tests/Fixtures/transformed-text.pdf"),
+        to: rotatedTextSource)
+      let (rotatedTextOpened, _) = try await controller.openDocument(
+        withContentsOf: rotatedTextSource, display: true)
+      guard let rotatedTextDocument = rotatedTextOpened as? SPDFDocument,
+        let rotatedTextViewer = rotatedTextDocument.viewer,
+        let rotatedTextWindow = rotatedTextDocument.windowControllers.first?.window,
+        let rotatedTextContent = rotatedTextWindow.contentView,
+        let rotatedTextPage = rotatedTextViewer.view.document?.page(at: 0)
+      else { throw PDFError(.malformed, "Could not open the rotated-text source") }
+      rotatedTextWindow.makeKeyAndOrderFront(nil)
+      try await Task.sleep(for: .milliseconds(200))
+      _ = rotatedTextViewer.activateTool(.textEdit)
+      try await Task.sleep(for: .milliseconds(100))
+      guard let rotatedTextOverlay = findOverlay(rotatedTextContent),
+        let rotatedTextTargets = rotatedTextViewer.rotatedTextTargetsProvider?(0),
+        let rotatedLine = rotatedTextTargets.first(where: { $0.text.contains("Rotated") })
+      else { throw PDFError(.malformed, "No rotated text target on the transformed-text page") }
+      let rotatedLineRect = CGRect(
+        x: rotatedLine.rect[0], y: rotatedLine.rect[1],
+        width: rotatedLine.rect[2] - rotatedLine.rect[0],
+        height: rotatedLine.rect[3] - rotatedLine.rect[1])
+      let rotatedLineViewPoint = rotatedTextViewer.view.convert(
+        NSPoint(x: rotatedLineRect.midX, y: rotatedLineRect.midY), from: rotatedTextPage)
+      let rotatedLinePointer = rotatedTextViewer.view.convert(rotatedLineViewPoint, to: nil)
+      let rotatedTextBaseline = try rotatedTextDocument.editSession.bytesForSave()
+      rotatedTextOverlay.mouseDown(with: try mouse(.leftMouseDown, point: rotatedLinePointer))
+      rotatedTextOverlay.mouseUp(with: try mouse(.leftMouseUp, point: rotatedLinePointer))
+      guard let rotatedField = rotatedTextOverlay.subviews.compactMap({ $0 as? NSTextField })
+        .first(where: { $0.identifier?.rawValue == "spdf-rotated-text-editor" }),
+        rotatedField.stringValue.contains("Rotated line")
+      else {
+        throw PDFError(
+          .malformed,
+          "Clicking rotated text did not open the single-run editor "
+            + "(targets=\(rotatedTextTargets.map(\.text)), rect=\(rotatedLine.rect))")
+      }
+      rotatedField.stringValue = "Rotated edits"
+      guard rotatedTextOverlay.commitEditing() else {
+        throw PDFError(.malformed, "The rotated text edit did not commit")
+      }
+      let rotatedTextBytes = try rotatedTextDocument.editSession.bytesForSave()
+      guard let rotatedTextReader = PDFDocument(data: rotatedTextBytes),
+        rotatedTextReader.string?.contains("Rotated edits") == true,
+        rotatedTextReader.string?.contains("Scaled line") == true else {
+        throw PDFError(.malformed, "The rotated text edit lost text or damaged the other line")
+      }
+      let rotatedTextParsed = try PDFParser.parse(rotatedTextBytes)
+      guard let rotatedTextPageID = rotatedTextParsed.pageIDs.first,
+        try PageTextEditing.rotatedTextRuns(pageID: rotatedTextPageID, in: rotatedTextParsed.graph)
+          .contains(where: { run in
+            run.text.contains("Rotated edits") && abs(run.rotationDegrees - 90) < 0.01
+          })
+      else {
+        throw PDFError(.malformed, "The rotated text replacement changed the text matrix")
+      }
+      rotatedTextDocument.undoEdit()
+      guard try rotatedTextDocument.editSession.bytesForSave() == rotatedTextBaseline,
+        PDFDocument(data: try rotatedTextDocument.editSession.bytesForSave())?
+          .string?.contains("Rotated line") == true else {
+        throw PDFError(.malformed, "Undo after the rotated text edit did not restore the source")
+      }
+      checkpoint("rotated text run edit and undo passed")
+      rotatedTextDocument.close()
+      window.makeKeyAndOrderFront(nil)
+      try await Task.sleep(for: .milliseconds(200))
+
       window.setContentSize(NSSize(width: 960, height: 650))
       try await Task.sleep(for: .milliseconds(150))
       let originalFrame = window.frame

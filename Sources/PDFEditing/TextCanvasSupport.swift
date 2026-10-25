@@ -274,6 +274,12 @@ public enum PageTextEditing {
     let grouped = Dictionary(grouping: runs.indices, by: { runs[$0].instructionIndex })
     return grouped.keys.sorted().compactMap { instruction in
       guard let indices = grouped[instruction], let first = indices.first,
+        // TXT-09: the inline paragraph profile is horizontal page text. Text
+        // drawn at a quarter-turn is handled by the single-run editor instead.
+        indices.allSatisfy({
+          TextCanvasSupport.inlineObliqueness(
+            for: TextCanvasSupport.concatenate(runs[$0].ctm, runs[$0].matrix)) != nil
+        }),
         let font = fonts[runs[first].fontResource], font.isInlineEditable || font.simple?.isEditable == true,
         let segments = content.segmentIndices(
           for: TextStyleSupport.fullSpan(of: content.instructions[instruction])),
@@ -304,9 +310,14 @@ public enum PageTextEditing {
     let runs = try TextRunIndexer.runs(in: content, graph: graph)
     let layout = try PageTextLayout.build(pageID: pageID, in: graph)
     let writableRuns = Set(try blocks(pageID: pageID, in: graph).flatMap(\.runIndices))
+    // Quarter-turned runs are editable through the single-run editor, so they
+    // are not refusals.
+    let singleRunRotated = Set(
+      try rotatedTextRuns(pageID: pageID, in: graph).map(\.runIndex))
     let clustersByRun = Dictionary(grouping: layout.clusters, by: \.runIndex)
     return clustersByRun.keys.sorted().compactMap { runIndex in
-      guard !writableRuns.contains(runIndex), runs.indices.contains(runIndex),
+      guard !writableRuns.contains(runIndex), !singleRunRotated.contains(runIndex),
+        runs.indices.contains(runIndex),
         let clusters = clustersByRun[runIndex], !clusters.isEmpty,
         TextCanvasSupport.renderingMode(at: runs[runIndex].instructionIndex, in: content) != 3
       else { return nil }
@@ -411,6 +422,67 @@ public enum PageTextEditing {
         (range.upperBound..<range.upperBound, Array("\n0 Tr\n".utf8)),
       ], in: graph, limits: PDFLimits())
   }
+
+  /// TXT-09: single-run text drawn with a rotated page-space text matrix.
+  ///
+  /// These runs are outside the inline paragraph profile because the editor
+  /// lays out horizontal text. The single-run editor can still replace their
+  /// characters in place: the text-show matrix and text state are preserved
+  /// and only the operand (plus TJ advance compensation) changes.
+  public static func rotatedTextRuns(
+    pageID: PDFObjectID, in graph: PDFGraph
+  ) throws -> [RotatedTextRun] {
+    let content = try PageContent.load(pageID: pageID, in: graph)
+    let runs = try TextRunIndexer.runs(in: content, graph: graph)
+    let layout = try PageTextLayout.build(pageID: pageID, in: graph)
+    let clustersByRun = Dictionary(grouping: layout.clusters, by: \.runIndex)
+    return runs.indices.compactMap { index -> RotatedTextRun? in
+      // Only whole quarter turns; horizontal runs stay with the inline
+      // paragraph profile, which refuses rotated transforms itself.
+      guard TextCanvasSupport.renderingMode(at: runs[index].instructionIndex, in: content) == 0,
+        let clusters = clustersByRun[index] else { return nil }
+      let visible = clusters.filter { !$0.isWhitespace }
+      guard !visible.isEmpty,
+        !runs[index].text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+      else { return nil }
+      let transform = TextCanvasSupport.concatenate(runs[index].ctm, runs[index].matrix)
+      guard let degrees = TextCanvasSupport.quarterTurnDegrees(for: transform) else { return nil }
+      let xs = visible.flatMap { [$0.bounds[0], $0.bounds[2]] }
+      let ys = visible.flatMap { [$0.bounds[1], $0.bounds[3]] }
+      guard let minX = xs.min(), let maxX = xs.max(),
+        let minY = ys.min(), let maxY = ys.max(),
+        [minX, maxX, minY, maxY].allSatisfy(\.isFinite)
+      else { return nil }
+      let padding = max(2, runs[index].fontSize * 0.08)
+      return RotatedTextRun(
+        runIndex: index,
+        rect: [minX - padding, minY - padding, maxX + padding, maxY + padding],
+        text: runs[index].text, rotationDegrees: degrees,
+        fontSize: runs[index].fontSize * (TextCanvasSupport.quarterTurnScale(for: transform) ?? 1))
+    }
+  }
+}
+
+/// TXT-09: one page-space run drawn at a whole-quarter-turn (90/180/270)
+/// rotation, offered to the single-run in-place editor.
+public struct RotatedTextRun: Sendable, Equatable {
+  public let runIndex: Int
+  /// Page-space bounds of the run's visible glyphs, lightly padded.
+  public let rect: [Double]
+  public let text: String
+  /// Page-space text direction in degrees, normalized to 0..<360.
+  public let rotationDegrees: Double
+  public let fontSize: Double
+
+  public init(
+    runIndex: Int, rect: [Double], text: String, rotationDegrees: Double, fontSize: Double
+  ) {
+    self.runIndex = runIndex
+    self.rect = rect
+    self.text = text
+    self.rotationDegrees = rotationDegrees
+    self.fontSize = fontSize
+  }
 }
 
 /// TXT-09: display-only upright copy of a rotated page for inline editing.
@@ -460,6 +532,33 @@ enum TextCanvasSupport {
       a[0] * b[2] + a[2] * b[3], a[1] * b[2] + a[3] * b[3],
       a[0] * b[4] + a[2] * b[5] + a[4], a[1] * b[4] + a[3] * b[5] + a[5],
     ]
+  }
+
+  /// TXT-09: page-space direction in degrees when the composed text matrix is
+  /// a positive uniform scale plus a whole quarter turn (90/180/270). Anything
+  /// else returns nil and keeps the inline refusal.
+  static func quarterTurnDegrees(for transform: [Double]) -> Double? {
+    guard transform.count == 6, transform.allSatisfy(\.isFinite) else { return nil }
+    let scale = hypot(transform[0], transform[1])
+    guard scale > 1e-6 else { return nil }
+    let tolerance = max(1e-4, scale * 1e-3)
+    guard abs(hypot(transform[2], transform[3]) - scale) <= tolerance,
+      abs(transform[0] * transform[2] + transform[1] * transform[3]) <= tolerance * scale,
+      transform[0] * transform[3] - transform[1] * transform[2] > 0
+    else { return nil }
+    var degrees = atan2(transform[1], transform[0]) * 180 / .pi
+    degrees = degrees.truncatingRemainder(dividingBy: 360)
+    if degrees < 0 { degrees += 360 }
+    let quarter = (degrees / 90).rounded()
+    guard abs(degrees - quarter * 90) <= 1e-3, abs(quarter) >= 0.5 else { return nil }
+    let normalized = (quarter * 90).truncatingRemainder(dividingBy: 360)
+    return normalized < 0 ? normalized + 360 : normalized
+  }
+
+  /// The uniform page-space scale of a supported quarter-turn transform.
+  static func quarterTurnScale(for transform: [Double]) -> Double? {
+    guard quarterTurnDegrees(for: transform) != nil else { return nil }
+    return hypot(transform[0], transform[1])
   }
 
   /// Inline paragraph output uses a page-space baseline and can faithfully

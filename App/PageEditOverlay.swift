@@ -15,6 +15,7 @@ struct PageEditOverlay: NSViewRepresentable {
     view.viewer = viewer
     viewer.pendingEditFinisher = { [weak view] in view?.commitEditing() ?? true }
     viewer.textBlockEditStarter = { [weak view] target in view?.editTextBlock(target) }
+    viewer.rotatedTextEditStarter = { [weak view] target in view?.editRotatedTextBlock(target) }
     return view
   }
 
@@ -22,6 +23,7 @@ struct PageEditOverlay: NSViewRepresentable {
     nsView.viewer = viewer
     viewer.pendingEditFinisher = { [weak nsView] in nsView?.commitEditing() ?? true }
     viewer.textBlockEditStarter = { [weak nsView] target in nsView?.editTextBlock(target) }
+    viewer.rotatedTextEditStarter = { [weak nsView] target in nsView?.editRotatedTextBlock(target) }
     // P12-013: leaving the text tool finishes the pending edit instead of
     // abandoning it behind the new tool.
     if viewer.activeTool != .textEdit && viewer.activeTool != .addText {
@@ -56,7 +58,10 @@ final class PageEditOverlayView: NSView, NSTextFieldDelegate {
     guard viewer?.activeTool == .textEdit, textCanvas == nil else { return }
     let point = convert(event.locationInWindow, from: nil)
     let found: PageTextTarget?
-    if case .textRun(let text)? = target(at: point) { found = text } else { found = nil }
+    switch target(at: point) {
+    case .textRun(let text)?, .rotatedText(let text)?: found = text
+    default: found = nil
+    }
     if hoverTarget != found {
       hoverTarget = found
       needsDisplay = true
@@ -84,12 +89,16 @@ final class PageEditOverlayView: NSView, NSTextFieldDelegate {
   enum EditTarget {
     case form(FormFieldTarget)
     case textRun(PageTextTarget)
+    /// TXT-09: a page-space run drawn at a quarter-turn rotation, edited by the
+    /// single-run field editor so the text-show matrix is preserved.
+    case rotatedText(PageTextTarget)
     case newText(pageIndex: Int, rect: [Double])
 
     var pageIndex: Int {
       switch self {
       case .form(let target): return target.pageIndex
       case .textRun(let target): return target.pageIndex
+      case .rotatedText(let target): return target.pageIndex
       case .newText(let pageIndex, _): return pageIndex
       }
     }
@@ -98,6 +107,7 @@ final class PageEditOverlayView: NSView, NSTextFieldDelegate {
       switch self {
       case .form(let target): return target.rect
       case .textRun(let target): return target.rect
+      case .rotatedText(let target): return target.rect
       case .newText(_, let rect): return rect
       }
     }
@@ -106,6 +116,7 @@ final class PageEditOverlayView: NSView, NSTextFieldDelegate {
       switch self {
       case .form(let target): return target.value
       case .textRun(let target): return target.text
+      case .rotatedText(let target): return target.text
       case .newText: return ""
       }
     }
@@ -116,6 +127,7 @@ final class PageEditOverlayView: NSView, NSTextFieldDelegate {
       switch self {
       case .form: return nil
       case .textRun(let target): return target.style
+      case .rotatedText: return nil
       case .newText: return nil
       }
     }
@@ -124,6 +136,7 @@ final class PageEditOverlayView: NSView, NSTextFieldDelegate {
       switch self {
       case .form: return "spdf-form-editor"
       case .textRun: return "spdf-text-editor"
+      case .rotatedText: return "spdf-rotated-text-editor"
       case .newText: return "spdf-new-text-editor"
       }
     }
@@ -160,7 +173,7 @@ final class PageEditOverlayView: NSView, NSTextFieldDelegate {
     switch target {
     case .form:
       return self
-    case .textRun:
+    case .textRun, .rotatedText:
       return viewer?.activeTool == .textEdit ? self : nil
     case .newText:
       return self
@@ -253,6 +266,13 @@ final class PageEditOverlayView: NSView, NSTextFieldDelegate {
     if let run = viewer.textRunProvider?(index, values) {
       return .textRun(run)
     }
+    if let rotated = viewer.rotatedTextTargetsProvider?(index).first(where: { target in
+      let rect = target.rect
+      return rect.count == 4 && pagePoint.x >= rect[0] - 2 && pagePoint.x <= rect[2] + 2
+        && pagePoint.y >= rect[1] - 2 && pagePoint.y <= rect[3] + 2
+    }) {
+      return .rotatedText(rotated)
+    }
     return nil
   }
 
@@ -297,20 +317,27 @@ final class PageEditOverlayView: NSView, NSTextFieldDelegate {
       target.rect.count == 4
     else { return }
     if case .form(let form) = target, form.isReadOnly { return }
+    let isRotatedRun: Bool
+    if case .rotatedText = target { isRotatedRun = true } else { isRotatedRun = false }
     var pageRect = CGRect(
       x: target.rect[0], y: target.rect[1], width: target.rect[2] - target.rect[0],
       height: target.rect[3] - target.rect[1])
     // Conservative metrics can produce zero-width run bounds; widen the
-    // editor so native input stays usable over the line.
-    if pageRect.width < 8 {
+    // editor so native input stays usable over the line. A quarter-turned line
+    // is intentionally narrow across its glyphs and gets a separate field.
+    if pageRect.width < 8, !isRotatedRun {
       pageRect.size.width = max(60, Double(target.value.count) * pageRect.height * 0.55)
     }
     let viewRect = viewer.view.convert(pageRect, from: page)
     let localRect = convert(viewRect, from: viewer.view)
-    guard localRect.width > 4, localRect.height > 4 else { return }
+    guard isRotatedRun || (localRect.width > 4 && localRect.height > 4) else { return }
 
-    if case .form = target {
-    } else {
+    let usesFieldEditor: Bool
+    switch target {
+    case .form, .rotatedText: usesFieldEditor = true
+    case .textRun, .newText: usesFieldEditor = false
+    }
+    if !usesFieldEditor {
       let run: PageTextTarget?
       if case .textRun(let text) = target { run = text } else { run = nil }
       guard
@@ -337,7 +364,17 @@ final class PageEditOverlayView: NSView, NSTextFieldDelegate {
       return
     }
 
-    let field = NSTextField(frame: localRect)
+    var fieldFrame = localRect
+    if case .rotatedText = target {
+      // The run itself is drawn vertically or upside down on the page; the
+      // in-place field stays horizontal and readable next to it.
+      let width = max(220, min(460, localRect.width + 240))
+      fieldFrame = NSRect(
+        x: min(max(4, localRect.midX - width / 2), max(4, bounds.maxX - width - 4)),
+        y: max(4, min(localRect.midY - 12, bounds.maxY - 28)),
+        width: width, height: 24)
+    }
+    let field = NSTextField(frame: fieldFrame)
     field.identifier = NSUserInterfaceItemIdentifier(target.editorIdentifier)
     field.stringValue = target.value
     field.font = .systemFont(ofSize: max(9, min(28, localRect.height * 0.62)))
@@ -368,7 +405,7 @@ final class PageEditOverlayView: NSView, NSTextFieldDelegate {
     switch target {
     case .form(let form):
       accepted = viewer?.onFormFieldCommit?(form.fieldName, text) ?? false
-    case .textRun(let run):
+    case .textRun(let run), .rotatedText(let run):
       accepted = viewer?.onTextRunCommit?(run.pageIndex, run.runIndex, text) ?? false
     case .newText(let pageIndex, let rect):
       if text.isEmpty {
@@ -393,6 +430,17 @@ final class PageEditOverlayView: NSView, NSTextFieldDelegate {
       needsDisplay = true
     }
   }
+  /// TXT-09: open the single-run field editor for a rotated page-space run.
+  func editRotatedTextBlock(_ target: PageTextTarget) {
+    guard let viewer, let page = viewer.view.document?.page(at: target.pageIndex),
+      commitEditing()
+    else { return }
+    let rect = target.rect
+    let point = viewer.view.convert(
+      NSPoint(x: (rect[0] + rect[2]) / 2, y: (rect[1] + rect[3]) / 2), from: page)
+    beginEditing(.rotatedText(target), at: convert(point, from: viewer.view))
+  }
+
   func editTextBlock(_ target: PageTextTarget) {
     guard let viewer, let page = viewer.view.document?.page(at: target.pageIndex),
       commitEditing()
