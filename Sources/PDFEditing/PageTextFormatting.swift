@@ -458,9 +458,10 @@ enum PageTextLineWriter {
       var count = 0
       var emittedStyles: [(format: PageTextFormat, width: Double?)] = []
       func captureDecoration(_ segment: PageTextSegment, baseline: Double) throws {
-        guard segment.format.underline || segment.format.strikeout,
-          let width = segment.width, width.isFinite, width > 0.001
-        else { return }
+        guard segment.format.underline || segment.format.strikeout else { return }
+        let width = segment.width
+          ?? max(0.1, Double(segment.text.unicodeScalars.count) * segment.format.size * 0.5)
+        guard width.isFinite, width > 0.001 else { return }
         let opacityName = try registerOpacity(segment.format.opacity)
         let thickness = max(0.5, min(2, segment.format.size * 0.055))
         if segment.format.underline {

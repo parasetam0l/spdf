@@ -1591,6 +1591,13 @@ final class SPDFDocument: NSDocument {
         viewer.pageTextMixedFormatting.contains("underline") || !viewer.pageTextStyle.underline))
   }
 
+  func togglePageTextStrikeout() {
+    guard let viewer, viewer.canFormatPageText else { return }
+    viewer.pageTextFormattingApplier?(
+      .strikeout(
+        viewer.pageTextMixedFormatting.contains("strikeout") || !viewer.pageTextStyle.strikeout))
+  }
+
   func togglePageTextSuperscript() {
     guard let viewer, viewer.canFormatPageText else { return }
     viewer.pageTextFormattingApplier?(.superscript(!(viewer.pageTextStyle.rise > 0.01)))

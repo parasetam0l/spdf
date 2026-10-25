@@ -2104,7 +2104,7 @@
         "paragraphWorkflow":
           "longer native text, width reflow, move, exact saved lines, atomic Undo/Redo, reselection",
         "characterFormatting":
-          "selected words, family/bold/italic/size/color, native shortcuts, formatting and document Undo/Redo, saved exact width and blank paragraph",
+          "selected words, family/bold/italic/underline/strikeout/superscript, tracking/word spacing, native shortcuts, saved exact width, metadata round-trip and blank paragraph",
         "commandScrollZoom": "native wheel events, both directions, pointer anchor and pending typing preserved",
         "status": "passed", "blankAuthoring": "created, real text, saved, undo/redo",
         "sidebarModes": SidebarMode.allCases.map(\.rawValue),

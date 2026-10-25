@@ -459,6 +459,7 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
   @objc private func showFindReplace(_ sender: Any?) { currentDocument?.showFindReplace() }
   @objc private func togglePageTextUnderline(_ sender: Any?) { currentDocument?.togglePageTextUnderline() }
   @objc private func togglePageTextSuperscript(_ sender: Any?) { currentDocument?.togglePageTextSuperscript() }
+  @objc private func togglePageTextStrikeout(_ sender: Any?) { currentDocument?.togglePageTextStrikeout() }
   @objc private func togglePageTextSubscript(_ sender: Any?) { currentDocument?.togglePageTextSubscript() }
   @objc private func findNext(_ sender: Any?) { currentDocument?.findNext() }
   @objc private func findPrevious(_ sender: Any?) { currentDocument?.findPrevious() }
@@ -771,8 +772,8 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
     guard let document = currentDocument else { return false }
     switch menuItem.action {
     case #selector(togglePageTextBold), #selector(togglePageTextItalic),
-      #selector(togglePageTextUnderline), #selector(togglePageTextSuperscript),
-      #selector(togglePageTextSubscript):
+      #selector(togglePageTextUnderline), #selector(togglePageTextStrikeout),
+      #selector(togglePageTextSuperscript), #selector(togglePageTextSubscript):
       return document.viewer?.canFormatPageText == true
     case #selector(showFind), #selector(showFindReplace):
       guard let viewer = document.viewer else { return false }
@@ -1044,6 +1045,8 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
     add("Bold", #selector(togglePageTextBold), key: "b", target: self, to: format)
     add("Italic", #selector(togglePageTextItalic), key: "i", target: self, to: format)
     add("Underline", #selector(togglePageTextUnderline), key: "u", target: self, to: format)
+    add("Strikeout", #selector(togglePageTextStrikeout), key: "x",
+      modifiers: [.command, .shift], target: self, to: format)
     add("Superscript", #selector(togglePageTextSuperscript), key: "+",
       modifiers: [.command, .shift], target: self, to: format)
     add("Subscript", #selector(togglePageTextSubscript), key: "-",
