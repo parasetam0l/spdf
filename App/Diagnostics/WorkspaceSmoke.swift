@@ -2317,6 +2317,61 @@
       window.makeKeyAndOrderFront(nil)
       try await Task.sleep(for: .milliseconds(200))
 
+      // RED-01/RED-02: the Redaction Marks panel is reachable from the Tools >
+      // Security menu; staging a mark changes no bytes and Apply removes the
+      // reviewed text as one Undo step.
+      let redactionSource = output.appendingPathComponent("redaction-source.pdf")
+      try? FileManager.default.removeItem(at: redactionSource)
+      try FileManager.default.copyItem(
+        at: URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+          .appendingPathComponent("Tests/Fixtures/text-edit.pdf"),
+        to: redactionSource)
+      let (redactionOpened, _) = try await controller.openDocument(
+        withContentsOf: redactionSource, display: true)
+      guard let redactionDocument = redactionOpened as? SPDFDocument,
+        let redactionViewer = redactionDocument.viewer,
+        let redactionWindow = redactionDocument.windowControllers.first?.window
+      else { throw PDFError(.malformed, "Could not open the redaction source") }
+      redactionWindow.makeKeyAndOrderFront(nil)
+      NSApp.activate(ignoringOtherApps: true)
+      try await Task.sleep(for: .milliseconds(250))
+      guard let redactionSelection = redactionViewer.view.document?.findString(
+        "Replace this text", withOptions: []).first else {
+        throw PDFError(.malformed, "Cannot select the redaction target text")
+      }
+      redactionViewer.view.setCurrentSelection(redactionSelection, animate: false)
+      let redactionBaseline = try redactionDocument.editSession.bytesForSave()
+      guard KeyboardAudit.invoke("Redaction Marks…") else {
+        throw PDFError(.malformed, "The Redaction Marks menu item did not run")
+      }
+      try await Task.sleep(for: .milliseconds(300))
+      guard redactionDocument.windowControllers.contains(where: {
+        $0 is RedactionMarksPanelController
+      }) else { throw PDFError(.malformed, "The Redaction Marks panel did not open") }
+      guard redactionDocument.markSelectionForRedaction() else {
+        throw PDFError(.malformed, "Staging a redaction mark failed")
+      }
+      guard try redactionDocument.editSession.bytesForSave() == redactionBaseline else {
+        throw PDFError(.malformed, "A staged redaction mark changed the document bytes")
+      }
+      guard redactionDocument.applyPendingRedactionMarks() else {
+        throw PDFError(.malformed, "Applying pending redaction marks failed")
+      }
+      let redactedBytes = try redactionDocument.editSession.bytesForSave()
+      guard PDFDocument(data: redactedBytes)?.string?.contains("Replace this text") == false
+      else { throw PDFError(.malformed, "Applied redaction left the reviewed text") }
+      redactionDocument.undoEdit()
+      guard try redactionDocument.editSession.bytesForSave() == redactionBaseline else {
+        throw PDFError(.malformed, "Undo after redaction did not restore the source")
+      }
+      for panel in NSApp.windows where panel.title == "Redaction Marks" {
+        panel.close()
+      }
+      checkpoint("redaction marks staging, apply and undo passed")
+      redactionDocument.close()
+      window.makeKeyAndOrderFront(nil)
+      try await Task.sleep(for: .milliseconds(200))
+
       window.setContentSize(NSSize(width: 960, height: 650))
       try await Task.sleep(for: .milliseconds(150))
       let originalFrame = window.frame

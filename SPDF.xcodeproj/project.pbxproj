@@ -18,12 +18,16 @@
 		2DC129A2BA815F4E141D9C21 /* ComparisonSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = C2D20568FDE859912E452D28 /* ComparisonSession.swift */; };
 		337CB33D21D1544A6D6330A0 /* TableReviewPanel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 42117F0C4A7F6A3D0F507B8C /* TableReviewPanel.swift */; };
 		37DFD0503CC6E00E9186A7FC /* InkOverlay.swift in Sources */ = {isa = PBXBuildFile; fileRef = 13FCD45EDBDF88A2A15908C5 /* InkOverlay.swift */; };
+		3A1042D5B4C7A2658E6DD80B /* RedactionActions.swift in Sources */ = {isa = PBXBuildFile; fileRef = D33AC98BB7139DEA1CEB6644 /* RedactionActions.swift */; };
 		3AF65FAA1B1218CE43FBACF9 /* InlinePageTextCanvas.swift in Sources */ = {isa = PBXBuildFile; fileRef = EDA85A84C15CC1E608B47AB3 /* InlinePageTextCanvas.swift */; };
 		3FD6850EB221398A65AB2A22 /* ActualUpdaterProbe.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0B96CA009439D7450B698917 /* ActualUpdaterProbe.swift */; };
 		455ADC5971DF0138D4349A53 /* SignatureCanvas.swift in Sources */ = {isa = PBXBuildFile; fileRef = CAEDDE0A21FD109A8C499FD3 /* SignatureCanvas.swift */; };
 		48115D078626EB7A89A4649F /* TerminationSmoke.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC390DF83FDBBCFE61003882 /* TerminationSmoke.swift */; };
+		4A5A6824C8FE868DAB5D9D9C /* FontImportSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 73BEF7588069348605D908B3 /* FontImportSheet.swift */; };
 		4CC4DC07BC08B63DA3F8284A /* Sparkle in Frameworks */ = {isa = PBXBuildFile; productRef = D687115BF0FD393F5C9567AE /* Sparkle */; };
+		50C2C4A85BCC890EE0D97592 /* RedactionMarksPanel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 71C2B9354F870425C50FD352 /* RedactionMarksPanel.swift */; };
 		50D97184C2244397A0F1E6C9 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 0CF10BA4A83CEEEA549975AF /* Assets.xcassets */; };
+		522DF4594C78ADCE72012651 /* BatesBatch.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2499722DBCD91EBF881025B3 /* BatesBatch.swift */; };
 		619EDD01A28B2C4268649288 /* CorpusParagraphSmoke.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0B59A32D35572516544B58FF /* CorpusParagraphSmoke.swift */; };
 		61BD6843AD9FDF5F7C46AB91 /* FontsModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1B9476F00AAE31CEBD6331A5 /* FontsModel.swift */; };
 		65D47559CB5193F18C22959A /* SignaturesPanel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3A429645CE62F8A13D248D7E /* SignaturesPanel.swift */; };
@@ -56,10 +60,12 @@
 		DC63CEDBEFB0C8567681F7EF /* ImportedParagraphSmoke.swift in Sources */ = {isa = PBXBuildFile; fileRef = C08CF3F98E01E8C697903CEB /* ImportedParagraphSmoke.swift */; };
 		E0BC88F54A462BD236E20441 /* FindReplacePanel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2D4BC3C8B2CEC403EEC6DD6A /* FindReplacePanel.swift */; };
 		E5E87804624D1233320C9673 /* UpdateRelaunchCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = AC3F2000EB9699A06E69C102 /* UpdateRelaunchCoordinator.swift */; };
+		E6E3888C37A0166E2E0F3ACA /* FontFallbackApproval.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2434EE17E7871505A72A2BE2 /* FontFallbackApproval.swift */; };
 		E9A19C59B22DBD21DC4DBF19 /* DocumentController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 956CFADA4F98A800CE064D7E /* DocumentController.swift */; };
 		E9F3FCD6120F423EBE73ACE6 /* MacServices in Frameworks */ = {isa = PBXBuildFile; productRef = 6F428C749515EF1664FF0F81 /* MacServices */; };
 		EDB2FE1A9011B8EFE30278DE /* WorkspaceChrome.swift in Sources */ = {isa = PBXBuildFile; fileRef = B6E473AA51FAAA64191E1052 /* WorkspaceChrome.swift */; };
 		EF5D9E101289FDC3AD572200 /* SmokeTest.swift in Sources */ = {isa = PBXBuildFile; fileRef = 40CFDE87E89D9F244DF2A500 /* SmokeTest.swift */; };
+		EFE179CA9ED59AB8CC352E45 /* PageMarkDialogs.swift in Sources */ = {isa = PBXBuildFile; fileRef = BC24F3CEDE8B0F1B94BC8874 /* PageMarkDialogs.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -70,6 +76,8 @@
 		0CF10BA4A83CEEEA549975AF /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		13FCD45EDBDF88A2A15908C5 /* InkOverlay.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InkOverlay.swift; sourceTree = "<group>"; };
 		1B9476F00AAE31CEBD6331A5 /* FontsModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FontsModel.swift; sourceTree = "<group>"; };
+		2434EE17E7871505A72A2BE2 /* FontFallbackApproval.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FontFallbackApproval.swift; sourceTree = "<group>"; };
+		2499722DBCD91EBF881025B3 /* BatesBatch.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BatesBatch.swift; sourceTree = "<group>"; };
 		2A6A1C3ADABC41A95E32748D /* InspectorPanels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InspectorPanels.swift; sourceTree = "<group>"; };
 		2ABF119F13BA6C317197F9D0 /* FormsPanel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FormsPanel.swift; sourceTree = "<group>"; };
 		2D4BC3C8B2CEC403EEC6DD6A /* FindReplacePanel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FindReplacePanel.swift; sourceTree = "<group>"; };
@@ -86,6 +94,8 @@
 		589D64EAB51B3FA3C1A1F58F /* SignaturesModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SignaturesModel.swift; sourceTree = "<group>"; };
 		6716E75AAC823E2EA26B0072 /* TableReviewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TableReviewModel.swift; sourceTree = "<group>"; };
 		6F91EF2F352F7D8A64BA83B0 /* SPDFDocument.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SPDFDocument.swift; sourceTree = "<group>"; };
+		71C2B9354F870425C50FD352 /* RedactionMarksPanel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RedactionMarksPanel.swift; sourceTree = "<group>"; };
+		73BEF7588069348605D908B3 /* FontImportSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FontImportSheet.swift; sourceTree = "<group>"; };
 		76DB20CEBC03FB7FC9EC9C11 /* BookmarksWindow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BookmarksWindow.swift; sourceTree = "<group>"; };
 		83C1D98BA1E6E946D35C5A49 /* DiagnosticWatchdog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiagnosticWatchdog.swift; sourceTree = "<group>"; };
 		861EA8B50EF918A38F86E7CE /* WorkspacePreferences.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspacePreferences.swift; sourceTree = "<group>"; };
@@ -102,6 +112,7 @@
 		B3DA39FC05B81DDCFC670B89 /* WorkspaceView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceView.swift; sourceTree = "<group>"; };
 		B6E473AA51FAAA64191E1052 /* WorkspaceChrome.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceChrome.swift; sourceTree = "<group>"; };
 		B9390A4E48951B844369EC28 /* spdf */ = {isa = PBXFileReference; lastKnownFileType = folder; name = spdf; path = .; sourceTree = SOURCE_ROOT; };
+		BC24F3CEDE8B0F1B94BC8874 /* PageMarkDialogs.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PageMarkDialogs.swift; sourceTree = "<group>"; };
 		C0705225D1C69ADFF420119E /* UpdateSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UpdateSettingsView.swift; sourceTree = "<group>"; };
 		C08CF3F98E01E8C697903CEB /* ImportedParagraphSmoke.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ImportedParagraphSmoke.swift; sourceTree = "<group>"; };
 		C168F8ADE4C1C2B2357AB45D /* CombineDocuments.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CombineDocuments.swift; sourceTree = "<group>"; };
@@ -109,6 +120,7 @@
 		C70DB85406AC9CCA1F09669C /* ComparisonWindow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComparisonWindow.swift; sourceTree = "<group>"; };
 		CAEDDE0A21FD109A8C499FD3 /* SignatureCanvas.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SignatureCanvas.swift; sourceTree = "<group>"; };
 		CC390DF83FDBBCFE61003882 /* TerminationSmoke.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminationSmoke.swift; sourceTree = "<group>"; };
+		D33AC98BB7139DEA1CEB6644 /* RedactionActions.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RedactionActions.swift; sourceTree = "<group>"; };
 		D65800C5E45DCA901B0CC22D /* WorkspacePerformance.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspacePerformance.swift; sourceTree = "<group>"; };
 		E22A55458206C80891A19A5B /* StructureModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StructureModel.swift; sourceTree = "<group>"; };
 		EDA85A84C15CC1E608B47AB3 /* InlinePageTextCanvas.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InlinePageTextCanvas.swift; sourceTree = "<group>"; };
@@ -139,6 +151,7 @@
 				4B5DD137683723B1199261BD /* AppUpdater.swift */,
 				0CF10BA4A83CEEEA549975AF /* Assets.xcassets */,
 				B3CC53A357D85652A4EE5C92 /* AttachmentsWindow.swift */,
+				2499722DBCD91EBF881025B3 /* BatesBatch.swift */,
 				76DB20CEBC03FB7FC9EC9C11 /* BookmarksWindow.swift */,
 				37949C59DC95EF114D1B1603 /* CapabilityContracts.swift */,
 				C168F8ADE4C1C2B2357AB45D /* CombineDocuments.swift */,
@@ -148,6 +161,8 @@
 				C70DB85406AC9CCA1F09669C /* ComparisonWindow.swift */,
 				956CFADA4F98A800CE064D7E /* DocumentController.swift */,
 				2D4BC3C8B2CEC403EEC6DD6A /* FindReplacePanel.swift */,
+				2434EE17E7871505A72A2BE2 /* FontFallbackApproval.swift */,
+				73BEF7588069348605D908B3 /* FontImportSheet.swift */,
 				1B9476F00AAE31CEBD6331A5 /* FontsModel.swift */,
 				A47BE52ECA0F0EF59D065A11 /* FontsPanel.swift */,
 				082FE3345E0E1F44A8342174 /* FormsModel.swift */,
@@ -158,7 +173,10 @@
 				EDA85A84C15CC1E608B47AB3 /* InlinePageTextCanvas.swift */,
 				2A6A1C3ADABC41A95E32748D /* InspectorPanels.swift */,
 				962559E85F133C73EBD3324B /* PageEditOverlay.swift */,
+				BC24F3CEDE8B0F1B94BC8874 /* PageMarkDialogs.swift */,
 				A1EB135BD7BF21701C6FA995 /* PageOrganizer.swift */,
+				D33AC98BB7139DEA1CEB6644 /* RedactionActions.swift */,
+				71C2B9354F870425C50FD352 /* RedactionMarksPanel.swift */,
 				47F2AB7E4E4AA2150A937871 /* RulerViews.swift */,
 				CAEDDE0A21FD109A8C499FD3 /* SignatureCanvas.swift */,
 				589D64EAB51B3FA3C1A1F58F /* SignaturesModel.swift */,
@@ -330,6 +348,7 @@
 				BA02870B845C4579EF78B9F5 /* AppUpdater.swift in Sources */,
 				73CAAFA4B2309D979E39F4F6 /* ApplicationDelegate.swift in Sources */,
 				847D75FC3D196ADA1F89864E /* AttachmentsWindow.swift in Sources */,
+				522DF4594C78ADCE72012651 /* BatesBatch.swift in Sources */,
 				C6129A84679E92312DB9CA3A /* BookmarksWindow.swift in Sources */,
 				AD560BC40957FA38C5251D7D /* CapabilityContracts.swift in Sources */,
 				BA49026DF218DBD9C2A3416A /* CombineDocuments.swift in Sources */,
@@ -341,6 +360,8 @@
 				1EF116DDB52A64F2A65C4FD0 /* DiagnosticWatchdog.swift in Sources */,
 				E9A19C59B22DBD21DC4DBF19 /* DocumentController.swift in Sources */,
 				E0BC88F54A462BD236E20441 /* FindReplacePanel.swift in Sources */,
+				E6E3888C37A0166E2E0F3ACA /* FontFallbackApproval.swift in Sources */,
+				4A5A6824C8FE868DAB5D9D9C /* FontImportSheet.swift in Sources */,
 				61BD6843AD9FDF5F7C46AB91 /* FontsModel.swift in Sources */,
 				68D01E3A362B8CC0AC282B2A /* FontsPanel.swift in Sources */,
 				04C4F4655A8F5F7AAC79696E /* FormsModel.swift in Sources */,
@@ -351,7 +372,10 @@
 				3AF65FAA1B1218CE43FBACF9 /* InlinePageTextCanvas.swift in Sources */,
 				0FE384F50302C3E66E04F73F /* InspectorPanels.swift in Sources */,
 				2BBDA3568867B341E37F70C4 /* PageEditOverlay.swift in Sources */,
+				EFE179CA9ED59AB8CC352E45 /* PageMarkDialogs.swift in Sources */,
 				B5ED5932EEADA8C869BCBF09 /* PageOrganizer.swift in Sources */,
+				3A1042D5B4C7A2658E6DD80B /* RedactionActions.swift in Sources */,
+				50C2C4A85BCC890EE0D97592 /* RedactionMarksPanel.swift in Sources */,
 				9D6EC384A4BB598E18D0147D /* RelaunchSmoke.swift in Sources */,
 				D77556498152EB80B6434176 /* RulerViews.swift in Sources */,
 				D1F6538C09136F84873D47F1 /* SPDFApplication.swift in Sources */,

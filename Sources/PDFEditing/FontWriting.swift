@@ -1132,40 +1132,107 @@ enum WritableTextFont: Sendable, Equatable {
   }
 }
 
-/// P15-012/P15-014: a composite (Type0/Identity-H) font written from an
-/// embedded program — CIDFontType2 for TrueType outlines, CIDFontType0 for
-/// CFF outlines, with identity CID-to-GID mapping, W widths, and ToUnicode.
+
+/// FNT-03: how a written composite font encodes text as codes.
+public enum CompositeFontWritingEncoding: String, Sendable, Equatable {
+  /// Horizontal Identity-H with 2-byte codes equal to CIDs.
+  case identityHorizontal = "Identity-H"
+  /// Vertical Identity-V with 2-byte codes equal to CIDs and W2/DW2 metrics.
+  case identityVertical = "Identity-V"
+  /// A custom embedded CMap with 1-byte codes and below 256 covered scalars
+  /// (the first case beyond horizontal Identity-H).
+  case singleByteCMap = "SPDF-OneByte-H"
+
+  public var codeByteLength: Int { self == .singleByteCMap ? 1 : 2 }
+
+  public var writingMode: CompositeFontWritingMode {
+    self == .identityVertical ? .vertical : .horizontal
+  }
+
+  public var isIdentity: Bool { self != .singleByteCMap }
+}
+
+/// FNT-03: options for writing a composite font beyond the historical
+/// horizontal Identity-H default.
+public struct CompositeFontWritingOptions: Sendable, Equatable {
+  /// How character codes relate to CIDs and glyph ids.
+  public enum CIDMapping: Sendable, Equatable {
+    /// TrueType descendants: CIDs run 0...n in coverage order and an explicit
+    /// /CIDToGIDMap stream maps them to the subset's glyph ids (omitted when
+    /// every CID already equals its glyph id).
+    case sequentialWithCIDToGIDMap
+    /// CFF/OpenType descendants: CIDs are the program's glyph ids (no
+    /// CIDToGIDMap exists for CIDFontType0), so identity glyph selection is
+    /// correct without a map.
+    case glyphIndex
+  }
+
+  public var encoding: CompositeFontWritingEncoding
+  public var cidMapping: CIDMapping
+
+  public init(
+    encoding: CompositeFontWritingEncoding = .identityHorizontal,
+    cidMapping: CIDMapping = .sequentialWithCIDToGIDMap
+  ) {
+    self.encoding = encoding
+    self.cidMapping = cidMapping
+  }
+}
+
+/// P15-012/P15-014 + FNT-03: a composite (Type0) font written from an embedded
+/// program. CIDFontType2 backs TrueType outlines; CIDFontType0 backs CFF
+/// outlines (OpenType wrapper, whole program only — CFF subsetting stays
+/// explicitly unsupported). The writer supports horizontal Identity-H,
+/// vertical Identity-V and a custom 1-byte embedded CMap, and emits the
+/// /CIDToGIDMap stream that makes TrueType CIDs name the intended subset
+/// glyphs instead of assuming CID == GID.
 public struct WrittenCompositeFont: Sendable, Equatable {
   /// Tagged base name (subset tag plus family) for Type0/BaseFont use.
   public let baseName: String
-  /// Unicode scalar value to CID (CIDs run 0...n in coverage order).
+  /// Unicode scalar value to CID (or glyph id for the CFF glyph-index mode).
   public let encoding: [Int: Int]
   /// CID to advance width in thousandths of an em.
   public let widths: [Int: Int]
   /// The descendant font value (the assembler references it from the
-  /// Type0 dictionary it builds with `type0Dictionary(descendant:)`).
+  /// Type0 dictionary it builds with type0Dictionary(descendant:toUnicode:)).
   public let descendant: PDFValue
   public let descriptor: PDFValue
-  /// The embedded program stream, with `/Subtype /OpenType` already set
-  /// for CFF programs (FontFile3) and a bare stream for TrueType
-  /// (FontFile2).
+  /// The embedded program stream, with /Subtype /OpenType already set for CFF
+  /// programs (FontFile3) and a bare stream for TrueType (FontFile2).
   public let fontFile: PDFStream
   public let toUnicode: PDFStream
+  /// FNT-03: the encoding form this font uses.
+  public let encodingMode: CompositeFontWritingEncoding
+  /// FNT-03: bytes per encoded character code (1 for the custom CMap, else 2).
+  public let codeByteLength: Int
+  /// FNT-03: the /CIDToGIDMap stream (nil when CID already equals the glyph
+  /// id or the font is CIDFontType0). The assembler must register this stream
+  /// and reference it from the descendant as /CIDToGIDMap.
+  public let cidToGIDMap: PDFStream?
+  /// FNT-03: the /Encoding CMap stream for the custom encoding (nil for the
+  /// named Identity-H/Identity-V encodings).
+  public let encodingCMap: PDFStream?
 
-  /// The Type0 dictionary referencing an assembled descendant object and
-  /// the ToUnicode map. The map lives here (as in our OCR layers), matching
+  /// The Type0 dictionary referencing an assembled descendant object and the
+  /// ToUnicode map. The map lives here (as in our OCR layers), matching
   /// Table 118 — readers do not consult the descendant for it.
   public func type0Dictionary(
-    descendant descendantID: PDFObjectID, toUnicode cmapID: PDFObjectID, baseName: String
+    descendant descendantID: PDFObjectID, toUnicode cmapID: PDFObjectID, baseName: String,
+    encodingCMap encodingCMapID: PDFObjectID? = nil
   ) -> PDFValue {
-    .dictionary([
+    var dictionary: [PDFName: PDFValue] = [
       PDFName("Type"): .name(PDFName("Font")),
       PDFName("Subtype"): .name(PDFName("Type0")),
       PDFName("BaseFont"): .name(PDFName(baseName)),
-      PDFName("Encoding"): .name(PDFName("Identity-H")),
       PDFName("DescendantFonts"): .array([.reference(descendantID)]),
       PDFName("ToUnicode"): .reference(cmapID),
-    ])
+    ]
+    if let encodingCMapID {
+      dictionary[PDFName("Encoding")] = .reference(encodingCMapID)
+    } else {
+      dictionary[PDFName("Encoding")] = .name(PDFName(encodingMode.rawValue))
+    }
+    return .dictionary(dictionary)
   }
 
   /// Encode text as big-endian CIDs (P18-006: nil for unencodable text).
@@ -1173,39 +1240,75 @@ public struct WrittenCompositeFont: Sendable, Equatable {
     var bytes: [UInt8] = []
     for scalar in text.unicodeScalars {
       guard let cid = encoding[Int(scalar.value)] else { return nil }
-      bytes.append(UInt8((cid >> 8) & 0xFF))
-      bytes.append(UInt8(cid & 0xFF))
+      if codeByteLength == 1 {
+        guard cid >= 0, cid <= 255 else { return nil }
+        bytes.append(UInt8(cid))
+      } else {
+        guard cid >= 0, cid <= 65_535 else { return nil }
+        bytes.append(UInt8((cid >> 8) & 0xFF))
+        bytes.append(UInt8(cid & 0xFF))
+      }
     }
     return bytes
   }
 }
 
 public enum CompositeFontWriter {
-  /// Write `text` with `program`: TrueType programs are subset first;
-  /// CFF programs embed whole (subsetting CFF is explicitly unsupported).
-  /// CIDFontType2 backs TrueType outlines, CIDFontType0 backs CFF outlines.
+  /// Write using the historical horizontal Identity-H profile.
   public static func write(
     program: Data, baseName: String, covering text: String
+  ) throws -> WrittenCompositeFont {
+    try write(
+      program: program, baseName: baseName, covering: text,
+      options: CompositeFontWritingOptions())
+  }
+
+  /// FNT-03: write horizontal Identity-H, vertical Identity-V or a custom
+  /// 1-byte embedded CMap. TrueType programs are subset first; CFF/OpenType
+  /// programs embed whole (subsetting CFF stays explicitly unsupported).
+  public static func write(
+    program: Data, baseName: String, covering text: String,
+    options: CompositeFontWritingOptions = CompositeFontWritingOptions()
   ) throws -> WrittenCompositeFont {
     let inspector = try TrueTypeInspector.inspect(program)
     let needed = Set(text.unicodeScalars.map { Int($0.value) })
     guard !needed.isEmpty else {
       throw PDFError(.malformed, "No text to cover")
     }
-    let embedded: Data
     let isCFF = inspector.isCFF
+    guard !options.encoding.isIdentity || options.cidMapping == .sequentialWithCIDToGIDMap
+      || isCFF
+    else {
+      throw PDFError(.unsupported, "A named composite encoding needs a sequential CID map")
+    }
+    if options.encoding == .singleByteCMap {
+      guard !isCFF else {
+        throw PDFError(
+          .unsupported,
+          "A 1-byte composite CMap needs a TrueType descendant; CFF glyph ids are not byte codes")
+      }
+      guard needed.count <= 256 else {
+        throw PDFError(.limitExceeded, "A 1-byte composite CMap covers at most 256 scalars")
+      }
+    }
+    let embedded: Data
     if isCFF {
       embedded = program
     } else {
       embedded = try TrueTypeSubsetter.subset(program: program, unicodes: needed)
     }
-    let tagged = "\(AddedContent.subsetTag(covering: needed))+\(baseName)"
-    // CIDs run over the sorted coverage; the subset (or whole program for
-    // CFF) must contain every needed glyph.
     let sub = try TrueTypeInspector.inspect(embedded)
+    let tagged = "\(AddedContent.subsetTag(covering: needed))+\(baseName)"
     var encoding: [Int: Int] = [:]
     var widths: [Int: Int] = [:]
-    for (cid, scalar) in needed.sorted().enumerated() {
+    var cidToGlyph: [Int: Int] = [:]
+    var cidMapping = options.cidMapping
+    if isCFF, cidMapping == .sequentialWithCIDToGIDMap {
+      // CIDFontType0 selects glyphs through the CFF charset and has no
+      // CIDToGIDMap: glyph-index CIDs are the only verifiable mapping.
+      cidMapping = .glyphIndex
+    }
+    for (index, scalar) in needed.sorted().enumerated() {
       guard let glyph = sub.unicodeToGlyph[scalar],
         let advance = sub.advances[glyph]
       else {
@@ -1213,12 +1316,14 @@ public enum CompositeFontWriter {
           .unsupported,
           "The font program has no glyph for U+\(String(scalar, radix: 16, uppercase: true))")
       }
+      let cid = cidMapping == .glyphIndex ? glyph : index
       encoding[scalar] = cid
+      cidToGlyph[cid] = glyph
       widths[cid] = Int((Double(advance) * 1000 / Double(sub.unitsPerEm)).rounded())
     }
     let consecutive = (0..<needed.count).map { widths[$0] ?? 0 }
     let descendantSubtype = isCFF ? "CIDFontType0" : "CIDFontType2"
-    let descendant: [PDFName: PDFValue] = [
+    var descendant: [PDFName: PDFValue] = [
       PDFName("Type"): .name(PDFName("Font")),
       PDFName("Subtype"): .name(PDFName(descendantSubtype)),
       PDFName("BaseFont"): .name(PDFName(tagged)),
@@ -1228,8 +1333,68 @@ public enum CompositeFontWriter {
         PDFName("Supplement"): .integer(0),
       ]),
       PDFName("DW"): .integer(1000),
-      PDFName("W"): .array([.integer(0), .array(consecutive.map { PDFValue.integer(Int64($0)) })]),
     ]
+    if cidMapping == .glyphIndex {
+      var entries: [PDFValue] = []
+      for cid in widths.keys.sorted() {
+        entries.append(.integer(Int64(cid)))
+        entries.append(.array([.integer(Int64(widths[cid] ?? 0))]))
+      }
+      descendant[PDFName("W")] = .array(entries)
+    } else {
+      descendant[PDFName("W")] = .array([
+        .integer(0), .array(consecutive.map { PDFValue.integer(Int64($0)) })
+      ])
+    }
+    // FNT-03: an explicit CID-to-GID stream is required whenever a TrueType
+    // subset's coverage order differs from its glyph order; otherwise readers
+    // assume Identity and paint the wrong glyphs.
+    var cidToGIDMap: PDFStream?
+    if !isCFF {
+      let sortedCIDs = cidToGlyph.keys.sorted()
+      let largest = sortedCIDs.last ?? 0
+      var glyphBytes = [UInt8](repeating: 0, count: (largest + 1) * 2)
+      var isIdentity = true
+      for cid in 0...largest {
+        let glyph = cidToGlyph[cid] ?? 0
+        glyphBytes[cid * 2] = UInt8((glyph >> 8) & 0xFF)
+        glyphBytes[cid * 2 + 1] = UInt8(glyph & 0xFF)
+        if glyph != cid { isIdentity = false }
+      }
+      if !isIdentity {
+        cidToGIDMap = PDFStream(bytes: Data(glyphBytes))
+      }
+    }
+    // FNT-03: vertical metrics. The PDF defaults are declared explicitly so a
+    // reader never has to invent a vertical advance; TrueType vmtx is not
+    // parsed by this profile, so the program's ascent supplies the default
+    // advance (a declared profile value, not a measurement claim).
+    if options.encoding.writingMode == .vertical {
+      let advance = Int(
+        (Double(sub.ascent) * 1000 / Double(max(1, sub.unitsPerEm))).rounded())
+      let w1y = advance > 0 ? advance : 1000
+      descendant[PDFName("DW2")] = .array([
+        .integer(Int64(w1y)), .integer(-1000),
+      ])
+      if cidMapping == .glyphIndex {
+        var entries: [PDFValue] = []
+        for cid in widths.keys.sorted() {
+          entries.append(.integer(Int64(cid)))
+          entries.append(.array([.integer(Int64(w1y)), .integer(0), .integer(-1000)]))
+        }
+        descendant[PDFName("W2")] = .array(entries)
+      } else {
+        var triples: [PDFValue] = []
+        for _ in 0..<needed.count {
+          triples.append(.integer(Int64(w1y)))
+          triples.append(.integer(0))
+          triples.append(.integer(-1000))
+        }
+        descendant[PDFName("W2")] = .array([.integer(0), .array(triples)])
+      }
+    }
+    // ToUnicode: code width follows the encoding; astral scalars use
+    // surrogate pairs.
     var bfchar: [String] = []
     for scalar in needed.sorted() {
       let cid = encoding[scalar]!
@@ -1241,20 +1406,33 @@ public enum CompositeFontWriter {
         destination = String(
           format: "<%04X%04X>", 0xD800 + adjusted / 0x400, 0xDC00 + adjusted % 0x400)
       }
-      bfchar.append(String(format: "<%04X> %@", cid, destination))
+      let codeFormat = options.encoding.codeByteLength == 1 ? "<%02X> %@" : "<%04X> %@"
+      bfchar.append(String(format: codeFormat, cid, destination))
     }
+    let codespace = options.encoding.codeByteLength == 1 ? "<00> <FF>" : "<0000> <FFFF>"
     let cmapText =
-      "/CIDInit /ProcSet findresource begin\n12 dict begin\nbegincmap\n/CIDSystemInfo\n<< /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def\n/CMapName /Adobe-Identity-UCS def\n/CMapType 2 def\n1 begincodespacerange\n<0000> <FFFF>\nendcodespacerange\n\(bfchar.count) beginbfchar\n\(bfchar.joined(separator: "\n"))\nendbfchar\nendcmap\nCMapName currentdict /CMap defineresource pop\nend\nend\n"
+      "/CIDInit /ProcSet findresource begin\n12 dict begin\nbegincmap\n/CIDSystemInfo\n<< /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def\n/CMapName /Adobe-Identity-UCS def\n/CMapType 2 def\n1 begincodespacerange\n\(codespace)\nendcodespacerange\n\(bfchar.count) beginbfchar\n\(bfchar.joined(separator: "\n"))\nendbfchar\nendcmap\nCMapName currentdict /CMap defineresource pop\nend\nend\n"
     var fileDictionary: [PDFName: PDFValue] = [:]
     if isCFF {
       // FontFile3 carries the CFF program with its subtype declared.
       fileDictionary[PDFName("Subtype")] = .name(PDFName("OpenType"))
+    }
+    // FNT-03: a custom encoding needs its own CMap stream; named Identity
+    // encodings stay name-valued.
+    var encodingCMap: PDFStream?
+    if options.encoding == .singleByteCMap {
+      let customCMap =
+        "/CIDInit /ProcSet findresource begin\n12 dict begin\nbegincmap\n/CIDSystemInfo\n<< /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> def\n/CMapName /SPDF-OneByte-H def\n/CMapType 1 def\n1 begincodespacerange\n<00> <FF>\nendcodespacerange\n1 begincidrange\n<00> <FF> 0\nendcidrange\nendcmap\nCMapName currentdict /CMap defineresource pop\nend\nend\n"
+      encodingCMap = PDFStream(bytes: Data(customCMap.utf8))
     }
     return WrittenCompositeFont(
       baseName: tagged, encoding: encoding, widths: widths,
       descendant: .dictionary(descendant),
       descriptor: .dictionary(FontWriter.descriptor(baseName: tagged, inspector: sub)),
       fontFile: PDFStream(dictionary: fileDictionary, bytes: embedded),
-      toUnicode: PDFStream(bytes: Data(cmapText.utf8)))
+      toUnicode: PDFStream(bytes: Data(cmapText.utf8)),
+      encodingMode: options.encoding, codeByteLength: options.encoding.codeByteLength,
+      cidToGIDMap: cidToGIDMap, encodingCMap: encodingCMap)
   }
 }
+

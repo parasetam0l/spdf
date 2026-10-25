@@ -174,7 +174,7 @@ enum CapabilityContractAudit {
   private static let extraDocumentSelectors: Set<String> = [
     "documentMetadata:", "printDocument:",
     "copyAsRichText:", "copyTextBox:", "pasteTextBox:", "duplicateTextBox:",
-    "showFind:", "findNext:", "findPrevious:",
+    "showRedactionMarks:", "showFind:", "findNext:", "findPrevious:",
     "editSelectedText:", "reflowParagraph:", "redactSelection:",
     "togglePageTextBold:", "togglePageTextItalic:",
     "selectNextPageObject:", "selectPreviousPageObject:",
@@ -182,7 +182,7 @@ enum CapabilityContractAudit {
 
   /// Critical tools whose contract must be more specific than its group.
   private static let specificSelectors: Set<String> = [
-    "saveSanitizedCopy:", "exportEncryptedCopy:", "redactSelection:",
+    "saveSanitizedCopy:", "exportEncryptedCopy:", "redactSelection:", "showRedactionMarks:",
     "exportComments:", "importComments:", "createPDFFromImages:",
     "createPDFFromText:", "exportAttachments:", "manageAttachments:",
     "manageBookmarks:", "splitDocument:", "combineDocuments:",
@@ -197,6 +197,8 @@ enum CapabilityContractAudit {
       "Re-encrypts through the derivative gate; protected input is allowed only because output re-encrypts.",
     "redactSelection:":
       "Applied redaction forces a verified full rewrite and never appears secure through an incremental save.",
+    "showRedactionMarks:":
+      "Staged marks are review-only and change no bytes; Apply removes reviewed text/regions in one transaction and the save barrier prevents unapplied marks from reading as secure; hidden/OCR scope is explicit.",
     "exportComments:":
       "XFDF carries supported note/markup/drawing comments with identity/thread/state; FileAttachment bytes are not carried.",
     "importComments:":
@@ -233,6 +235,7 @@ enum CapabilityContractAudit {
     "saveSanitizedCopy:": "SPDFDocument.saveSanitizedCopy()",
     "exportEncryptedCopy:": "SPDFDocument.exportEncryptedCopy()",
     "redactSelection:": "SPDFDocument.redactSelection()",
+    "showRedactionMarks:": "SPDFDocument.showRedactionMarks()",
     "exportComments:": "SPDFDocument.exportComments()",
     "importComments:": "SPDFDocument.importComments()",
     "createPDFFromImages:": "ApplicationDelegate.createPDFFromImages()",
@@ -254,6 +257,7 @@ enum CapabilityContractAudit {
     "saveSanitizedCopy:": "Chosen sanitized PDF with hidden data removed; source unchanged.",
     "exportEncryptedCopy:": "Encrypted copy PDF.",
     "redactSelection:": "Applied redactions in a secure-rewrite session.",
+    "showRedactionMarks:": "Reviewable pending marks plus applied secure-rewrite redactions.",
     "exportComments:": "XFDF comment file.",
     "importComments:": "Merged comments and thread links in the open document.",
     "createPDFFromImages:": "Untitled editable PDF with one image per page.",
@@ -295,6 +299,7 @@ enum CapabilityContractAudit {
     "documentMetadata:", "addTextField:", "addCheckbox:", "addRadioGroup:",
     "addChoiceField:", "addPushButton:", "addSignatureField:", "editFormFieldProperties:",
     "recalculateForm:", "distributeFormFields:", "cropPages:", "removePageMark:",
+    "batesNumberingBatch:", "showRedactionMarks:",
     "repairDocument:", "reviewTables:", "previewDOCX:", "convertColors:",
     "createArchivalCopy:", "exportComments:", "importComments:", "printDocument:",
   ]

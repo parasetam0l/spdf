@@ -20,6 +20,116 @@ public enum PageTextFormatChange: Sendable {
   case subscripted(Bool)
 }
 
+/// FNT-02: a character the current font cannot represent, with the font that
+/// would supply it and whether that font change is a compatible same-face
+/// subset or a different face that needs explicit approval.
+public struct NativeFallbackRequirement: Sendable, Equatable {
+  public let character: String
+  /// UTF-16 offset of the character inside the inserted text.
+  public let location: Int
+  public let currentFontName: String
+
+  public init(character: String, location: Int, currentFontName: String) {
+    self.character = character
+    self.location = location
+    self.currentFontName = currentFontName
+  }
+}
+
+/// FNT-02: the source of a proposed missing-glyph fallback run.
+public enum NativeFallbackSource: Sendable, Equatable {
+  /// A metric-compatible subset of the same embedded face already used by the
+  /// paragraph. Applying it does not change the face.
+  case compatibleSourceSubset(PageTextSourceFont)
+  /// A different embedded face from the same paragraph. Requires explicit
+  /// approval because the visible face changes.
+  case embeddedSourceSubset(PageTextSourceFont)
+  /// A provisioned or imported licensed font. Requires explicit approval.
+  case licensedFont(CustomTextFont)
+  /// A standard PDF face. Requires explicit approval.
+  case standardFont(StandardTextFont)
+
+  public var displayName: String {
+    switch self {
+    case .compatibleSourceSubset(let source), .embeddedSourceSubset(let source):
+      return source.name
+    case .licensedFont(let font):
+      return font.faceName
+    case .standardFont(let font):
+      return font.rawValue
+    }
+  }
+
+  /// True only for a same-face subset with matching metrics; all other sources
+  /// change the face and must be approved by the user.
+  public var isCompatibleSameFaceSubset: Bool {
+    if case .compatibleSourceSubset = self { return true }
+    return false
+  }
+}
+
+/// FNT-02: one contiguous run of missing characters and the font change that
+/// would supply it. The UI lists these before commit so a changed face is
+/// never silent.
+public struct NativeFallbackRunChange: Sendable, Equatable {
+  public let characters: String
+  public let location: Int
+  public let fromFontName: String
+  public let toFontName: String
+  public let source: NativeFallbackSource
+
+  public var requiresExplicitApproval: Bool { !source.isCompatibleSameFaceSubset }
+}
+
+/// FNT-02: a preview of the missing characters in one insertion and the font
+/// changes a fallback would make. Nothing is inserted until the caller applies
+/// an approved plan.
+public struct NativeFallbackPreview: Sendable, Equatable {
+  public let requirements: [NativeFallbackRequirement]
+  public let changes: [NativeFallbackRunChange]
+  /// True when every missing character has a supported fallback candidate.
+  public let canApply: Bool
+  public let message: String
+
+  public var isRequired: Bool { !requirements.isEmpty }
+  /// True when at least one proposed run changes the face and therefore needs
+  /// explicit approval.
+  public var needsExplicitApproval: Bool {
+    changes.contains { $0.requiresExplicitApproval }
+  }
+}
+
+/// FNT-02: what the user approved for a fallback plan. Compatible same-face
+/// subsets are the existing safe behavior; every other font change is only
+/// applied when its display name was explicitly approved.
+public struct NativeFallbackApproval: Sendable, Equatable {
+  public let approvedFallbackFontNames: Set<String>
+  public let allowsCompatibleSourceSubsets: Bool
+
+  public init(
+    approvedFallbackFontNames: Set<String> = [], allowsCompatibleSourceSubsets: Bool = true
+  ) {
+    self.approvedFallbackFontNames = approvedFallbackFontNames
+    self.allowsCompatibleSourceSubsets = allowsCompatibleSourceSubsets
+  }
+
+  /// The conservative default: only same-face compatible subsets.
+  public static let compatibleSourceSubsetsOnly = NativeFallbackApproval()
+  /// No font change is allowed: a missing character refuses insertion.
+  public static let none = NativeFallbackApproval(allowsCompatibleSourceSubsets: false)
+
+  /// Approve the named fallback runs listed by a preview. Compatible subsets
+  /// stay allowed.
+  public static func approving(_ fontNames: [String]) -> NativeFallbackApproval {
+    NativeFallbackApproval(approvedFallbackFontNames: Set(fontNames))
+  }
+
+  public func approves(_ source: NativeFallbackSource) -> Bool {
+    if source.isCompatibleSameFaceSubset { return allowsCompatibleSourceSubsets }
+    return approvedFallbackFontNames.contains(source.displayName)
+  }
+}
+
 /// A local insertion plan. Mixed embedded subsets become attributed runs;
 /// unsupported characters never fall back to a substituted system font.
 public struct NativeTextInsertionPlan {
@@ -27,6 +137,21 @@ public struct NativeTextInsertionPlan {
   public let fragments: [PageTextFragment]
   public let attributedText: NSAttributedString?
   public let issue: String?
+  /// FNT-02: set when the plan changed fonts or was refused because a changed
+  /// font was not approved, so the caller can show the preview.
+  public let fallbackPreview: NativeFallbackPreview?
+
+  init(
+    usesSourceFontFallback: Bool, fragments: [PageTextFragment],
+    attributedText: NSAttributedString?, issue: String?,
+    fallbackPreview: NativeFallbackPreview? = nil
+  ) {
+    self.usesSourceFontFallback = usesSourceFontFallback
+    self.fragments = fragments
+    self.attributedText = attributedText
+    self.issue = issue
+    self.fallbackPreview = fallbackPreview
+  }
 }
 
 /// Canonical point-size attributes survive view zoom and native typing Undo.
@@ -45,6 +170,11 @@ public final class NativeTextFormatting {
   private let licensedGlyphs: [String: Set<Int>]
   private let licensedPreviewFonts: [String: NSFont]
   public var onChange: (() -> Void)?
+  /// FNT-02: presented by the app layer (new files preferred) to show a
+  /// missing-glyph preview and collect explicit approval for changed fonts.
+  /// Nil keeps insertion conservative: a changed face is refused, not applied.
+  public var fallbackApprovalHandler:
+    ((NativeFallbackPreview) -> NativeFallbackApproval?)?
 
   /// Resolve a new page-text block's initial style to a font the PDF writer
   /// can actually serialize. Imported fonts exposed while editing an existing
@@ -202,6 +332,300 @@ public final class NativeTextFormatting {
     }
     return .init(usesSourceFontFallback: needsFallback, fragments: fragments,
       attributedText: attributed, issue: nil)
+  }
+
+  /// FNT-02: compute the deliberate missing-glyph fallback preview for an
+  /// insertion. Nil when the current font already represents every character.
+  public func fallbackPreview(_ text: String, replacing range: NSRange) -> NativeFallbackPreview? {
+    guard let view else { return nil }
+    let base = Self.format(view.typingAttributes, fallback: fallback)
+    let insertion = range.location == NSNotFound ? view.selectedRange().location : range.location
+    var current: [(range: NSRange, format: PageTextFormat)] = []
+    if let storage = view.textStorage {
+      storage.enumerateAttributes(in: NSRange(location: 0, length: storage.length)) {
+        attrs, runRange, _ in
+        current.append((runRange, Self.format(attrs, fallback: self.fallback)))
+      }
+    }
+    return fallbackPreview(text, base: base, current: current, insertion: insertion)
+  }
+
+  private func fallbackPreview(
+    _ text: String, base: PageTextFormat,
+    current: [(range: NSRange, format: PageTextFormat)], insertion: Int
+  ) -> NativeFallbackPreview? {
+    var requirements: [NativeFallbackRequirement] = []
+    var changes: [NativeFallbackRunChange] = []
+    var unresolved = false
+    var utf16Location = 0
+    var pendingCharacters: String?
+    var pendingLocation = 0
+    var pendingSource: NativeFallbackSource?
+
+    func flushPending() {
+      guard let characters = pendingCharacters, let source = pendingSource else { return }
+      changes.append(
+        NativeFallbackRunChange(
+          characters: characters, location: pendingLocation, fromFontName: base.fontName,
+          toFontName: source.displayName, source: source))
+      pendingCharacters = nil
+      pendingSource = nil
+    }
+
+    for scalar in text.unicodeScalars {
+      let value = String(scalar)
+      if scalar == "\n" || scalar == "\r" {
+        flushPending()
+        utf16Location += 1
+        continue
+      }
+      if isCoveredByCurrentFont(scalar, base: base) {
+        flushPending()
+      } else {
+        requirements.append(
+          NativeFallbackRequirement(
+            character: value, location: utf16Location, currentFontName: base.fontName))
+        if let candidate = fallbackCandidates(
+          for: scalar, base: base, current: current, insertion: insertion
+        ).first {
+          if pendingSource == candidate.source {
+            pendingCharacters = (pendingCharacters ?? "") + value
+          } else {
+            flushPending()
+            pendingCharacters = value
+            pendingLocation = utf16Location
+            pendingSource = candidate.source
+          }
+        } else {
+          flushPending()
+          unresolved = true
+        }
+      }
+      utf16Location += value.utf16.count
+    }
+    flushPending()
+    guard !requirements.isEmpty else { return nil }
+
+    var seen = Set<String>()
+    let missing = requirements.map(\.character).filter { seen.insert($0).inserted }
+    let missingList = missing.map { "“\($0)”" }.joined(separator: ", ")
+    var message: String
+    if changes.isEmpty {
+      message = "\(missingList) cannot be represented by “\(base.fontName)”, and no supported fallback font contains \(missing.count == 1 ? "it" : "them"). Choose another font or remove \(missing.count == 1 ? "that character" : "those characters")."
+    } else {
+      let changeList = changes.map { "“\($0.characters)” → \($0.toFontName)" }
+        .joined(separator: ", ")
+      message = "\(missingList) \(missing.count == 1 ? "is" : "are") not in “\(base.fontName)”. The fallback would set \(changeList)."
+      if changes.contains(where: \.requiresExplicitApproval) {
+        message += " Approve the changed font to insert the text; nothing is changed until you do."
+      } else {
+        message += " A compatible subset of the same face supplies the missing characters."
+      }
+      if unresolved {
+        message += " No fallback font is available for some missing characters."
+      }
+    }
+    return NativeFallbackPreview(
+      requirements: requirements, changes: changes,
+      canApply: !changes.isEmpty && !unresolved, message: message)
+  }
+
+  /// FNT-02: apply an insertion with a deliberate fallback decision. Compatible
+  /// same-face subsets are allowed by default; a different face is only used
+  /// when its preview display name was explicitly approved. When the plan
+  /// refuses, no text is returned for insertion.
+  public func insertionPlan(
+    _ text: String, replacing range: NSRange, fallbackApproval: NativeFallbackApproval
+  ) -> NativeTextInsertionPlan {
+    guard let view else {
+      return .init(
+        usesSourceFontFallback: false, fragments: [], attributedText: nil,
+        issue: "The page text editor is unavailable.")
+    }
+    guard let preview = fallbackPreview(text, replacing: range) else {
+      return insertionPlan(text, replacing: range)
+    }
+    guard range.location != NSNotFound, range.location >= 0,
+      NSMaxRange(range) <= (view.string as NSString).length
+    else {
+      return .init(
+        usesSourceFontFallback: false, fragments: [], attributedText: nil,
+        issue: "The insertion range is no longer available.", fallbackPreview: preview)
+    }
+    let base = Self.format(view.typingAttributes, fallback: fallback)
+    let retainedSpacing = replacementSpacing(text, replacing: range, base: base)
+    let visible = text.unicodeScalars.filter { $0 != "\n" && $0 != "\r" }
+    let visibleText = String(String.UnicodeScalarView(visible))
+    guard PageTextSourceFont.canWriteInline(visibleText) else {
+      return .init(
+        usesSourceFontFallback: false, fragments: [], attributedText: nil,
+        issue: "This text needs shaping that inline editing does not yet support. The text was kept.",
+        fallbackPreview: preview)
+    }
+    var current: [(range: NSRange, format: PageTextFormat)] = []
+    if let storage = view.textStorage {
+      storage.enumerateAttributes(in: NSRange(location: 0, length: storage.length)) {
+        attrs, runRange, _ in
+        current.append((runRange, Self.format(attrs, fallback: self.fallback)))
+      }
+    }
+    let insertion = range.location == NSNotFound ? view.selectedRange().location : range.location
+    var fragments: [PageTextFragment] = []
+    func appendFragment(_ value: String, format: PageTextFormat) {
+      if let last = fragments.last, last.format == format {
+        fragments[fragments.count - 1] = .init(text: last.text + value, format: format)
+      } else {
+        fragments.append(.init(text: value, format: format))
+      }
+    }
+    var visibleIndex = 0
+    var changedFonts = false
+    for scalar in text.unicodeScalars {
+      if scalar == "\n" || scalar == "\r" {
+        appendFragment(String(scalar), format: base)
+        continue
+      }
+      var scalarBase = base
+      if let retainedSpacing, retainedSpacing.indices.contains(visibleIndex) {
+        scalarBase.characterSpacing = retainedSpacing[visibleIndex]
+      }
+      visibleIndex += 1
+      let value = String(scalar)
+      if isCoveredByCurrentFont(scalar, base: scalarBase) {
+        appendFragment(value, format: scalarBase)
+        continue
+      }
+      let candidates = fallbackCandidates(
+        for: scalar, base: scalarBase, current: current, insertion: insertion)
+      guard let approved = candidates.first(where: { fallbackApproval.approves($0.source) }) else {
+        return .init(
+          usesSourceFontFallback: false, fragments: fragments, attributedText: nil,
+          issue: preview.message, fallbackPreview: preview)
+      }
+      changedFonts = true
+      appendFragment(value, format: approved.format)
+    }
+    guard changedFonts else { return insertionPlan(text, replacing: range) }
+    let attributed = NSMutableAttributedString(string: "")
+    let paragraphStyle = view.typingAttributes[.paragraphStyle]
+    for fragment in fragments {
+      var attrs = attributes(fragment.format, scale: scale)
+      if let paragraphStyle { attrs[.paragraphStyle] = paragraphStyle }
+      attributed.append(NSAttributedString(string: fragment.text, attributes: attrs))
+    }
+    return .init(
+      usesSourceFontFallback: true, fragments: fragments, attributedText: attributed,
+      issue: nil, fallbackPreview: preview)
+  }
+
+  /// FNT-02: user-facing approval entry point. With a handler installed, a
+  /// missing-glyph insertion shows the preview and applies the fallback only
+  /// when the user approves it. Without a handler, the plan is refused with the
+  /// preview message so no font changes silently.
+  public func insertionPlan(
+    _ text: String, replacing range: NSRange, requestingFallbackApproval: Bool
+  ) -> NativeTextInsertionPlan {
+    guard requestingFallbackApproval, let handler = fallbackApprovalHandler else {
+      return insertionPlan(text, replacing: range, fallbackApproval: .none)
+    }
+    guard let preview = fallbackPreview(text, replacing: range) else {
+      return insertionPlan(text, replacing: range)
+    }
+    guard let approval = handler(preview) else {
+      return .init(
+        usesSourceFontFallback: false, fragments: [], attributedText: nil,
+        issue: "The changed font was not approved. The text was kept unchanged.",
+        fallbackPreview: preview)
+    }
+    return insertionPlan(text, replacing: range, fallbackApproval: approval)
+  }
+
+  private func isCoveredByCurrentFont(_ scalar: UnicodeScalar, base: PageTextFormat) -> Bool {
+    let value = String(scalar)
+    if let source = base.sourceFont, profiles[source.resource]?.glyphs[value] != nil {
+      return true
+    }
+    if let licensed = base.customFont,
+      licensedGlyphs[licensed.identifier]?.contains(Int(scalar.value)) == true
+    {
+      return true
+    }
+    if base.sourceFont == nil, base.customFont == nil, StandardTextFont.canEncode(value) {
+      return true
+    }
+    return false
+  }
+
+  private struct NativeFallbackCandidate {
+    let source: NativeFallbackSource
+    let format: PageTextFormat
+  }
+
+  /// Ordered candidates for one missing character: a compatible same-face
+  /// subset first, then other embedded faces, licensed faces and standard
+  /// faces. Every candidate after the compatible subset changes the face.
+  private func fallbackCandidates(
+    for scalar: UnicodeScalar, base: PageTextFormat,
+    current: [(range: NSRange, format: PageTextFormat)], insertion: Int
+  ) -> [NativeFallbackCandidate] {
+    let value = String(scalar)
+    var candidates: [NativeFallbackCandidate] = []
+    if base.sourceFont != nil,
+      let compatible = sourceFormat(for: scalar, base: base, current: current, insertion: insertion),
+      let source = compatible.sourceFont
+    {
+      candidates.append(
+        NativeFallbackCandidate(source: .compatibleSourceSubset(source), format: compatible))
+    }
+    let embedded = profiles.compactMap {
+      resource, profile -> (source: PageTextSourceFont, order: String)? in
+      guard profile.glyphs[value] != nil, sourceFonts[resource] != nil else { return nil }
+      return (profile.source, String(decoding: resource.bytes, as: UTF8.self))
+    }.sorted { $0.order < $1.order }
+    for entry in embedded
+    where !candidates.contains(where: { $0.source == .compatibleSourceSubset(entry.source) }) {
+      var format = base
+      format.sourceFont = entry.source
+      format.customFont = nil
+      candidates.append(
+        NativeFallbackCandidate(source: .embeddedSourceSubset(entry.source), format: format))
+    }
+    let bold = base.customFont?.isBold ?? base.font.isBold
+    let italic = base.customFont?.isItalic ?? base.font.isItalic
+    let licensed = licensedFonts.filter { font in
+      font.identifier != base.customFont?.identifier
+        && licensedGlyphs[font.identifier]?.contains(Int(scalar.value)) == true
+    }.sorted { left, right in
+      let leftRank = (left.isBold == bold ? 0 : 2) + (left.isItalic == italic ? 0 : 1)
+      let rightRank = (right.isBold == bold ? 0 : 2) + (right.isItalic == italic ? 0 : 1)
+      if leftRank != rightRank { return leftRank < rightRank }
+      if left.familyName != right.familyName {
+        return left.familyName.localizedStandardCompare(right.familyName) == .orderedAscending
+      }
+      if left.faceName != right.faceName {
+        return left.faceName.localizedStandardCompare(right.faceName) == .orderedAscending
+      }
+      return left.identifier < right.identifier
+    }
+    for font in licensed {
+      var format = base
+      format.customFont = font
+      format.sourceFont = nil
+      format.characterSpacing = 0
+      candidates.append(NativeFallbackCandidate(source: .licensedFont(font), format: format))
+    }
+    if base.customFont != nil || base.sourceFont != nil, StandardTextFont.canEncode(value) {
+      let family: AddedTextStyle.Family = base.customFont != nil ? .helvetica : base.font.family
+      let standard = StandardTextFont.face(family: family, bold: bold, italic: italic)
+      var format = base
+      format.font = standard
+      format.sourceFont = nil
+      format.customFont = nil
+      format.characterSpacing = 0
+      candidates.append(
+        NativeFallbackCandidate(source: .standardFont(standard), format: format))
+    }
+    return candidates
   }
 
   /// TXT-08: preserve supported rich-paste character formatting. A run whose

@@ -26,17 +26,28 @@ public struct PageTextSourceFont: Sendable, Equatable {
   }
 
   /// This writer reuses individual horizontal glyphs; it does not reorder
-  /// bidirectional text or position combining/contextual glyph clusters.
+  /// bidirectional text or do its own contextual positioning. FNT-04: a
+  /// combining mark is allowed only as part of the complete grapheme cluster
+  /// that owns it (base plus trailing marks). An isolated or leading mark
+  /// would have to be positioned by guesswork, so it stays refused; the same
+  /// rule keeps decomposed Turkish letters (I + U+0307) writable as one unit.
   public static func canWriteInline(_ text: String) -> Bool {
-    text.unicodeScalars.allSatisfy { scalar in
-      guard !CharacterSet.controlCharacters.contains(scalar),
-        !CharacterSet.nonBaseCharacters.contains(scalar) else { return false }
+    var previousWasBase = false
+    for scalar in text.unicodeScalars {
+      if CharacterSet.nonBaseCharacters.contains(scalar) {
+        guard previousWasBase else { return false }
+        continue
+      }
+      guard !CharacterSet.controlCharacters.contains(scalar) else { return false }
       switch scalar.value {
       case 0x20...0x024F, 0x0370...0x052F, 0x1F00...0x1FFF,
-        0x2000...0x206F, 0x20A0...0x214F, 0xFB00...0xFB06: return true
-      default: return false
+        0x2000...0x206F, 0x20A0...0x214F, 0xFB00...0xFB06:
+        previousWasBase = true
+      default:
+        return false
       }
     }
+    return true
   }
 }
 
@@ -88,6 +99,9 @@ struct IndexedTextFont {
   private let defaultWidth: Double
   private let gids: [UInt8]?
   private let program: Data?
+  /// FNT-03: the parsed composite encoding (embedded CMap, CFF descendant,
+  /// horizontal/vertical mode, CID widths). nil for simple fonts.
+  private let composite: CompositeFont?
 
   static func resolve(resource: PDFName, page: [PDFName: PDFValue], in graph: PDFGraph) -> Self? {
     func dictionary(_ value: PDFValue?) -> [PDFName: PDFValue]? {
@@ -111,18 +125,25 @@ struct IndexedTextFont {
     var widths: [Int: Double] = [:]
     var fallback = 0.0
     var gids: [UInt8]?
+    var compositeFont: CompositeFont?
     let name: String
     if let simple {
       name = simple.baseFont
     } else {
       guard let composite = CompositeFont.parse(font, in: graph, objectID: fontID),
-        let mapping = composite.identityMappings, !mapping.isEmpty,
+        composite.writingMode == .horizontal,
+        composite.hasResolvedEncoding,
+        !composite.codeToUnicode.isEmpty,
         case .array(let descendants)? = FontValue.resolve(font[PDFName("DescendantFonts")], in: graph),
         let descendant = dictionary(descendants.first),
-        descendant[PDFName("Subtype")] == .name(PDFName("CIDFontType2")),
+        composite.descendantSubtype == "CIDFontType2"
+          || composite.descendantSubtype == "CIDFontType0",
         composite.defaultWidth.isFinite, composite.defaultWidth >= 0
       else { return nil }
-      name = composite.baseFont; mappings = mapping; fallback = composite.defaultWidth
+      name = composite.baseFont
+      mappings = composite.codeToUnicode
+      fallback = composite.defaultWidth
+      compositeFont = composite
       descriptor = dictionary(descendant[PDFName("FontDescriptor")])
       switch FontValue.resolve(descendant[PDFName("CIDToGIDMap")], in: graph) {
       case nil, .name(PDFName("Identity"))?: break
@@ -164,22 +185,37 @@ struct IndexedTextFont {
       ?? stream(descriptor?[PDFName("FontFile3")])
     var verifiedCompositeGlyphs: [Int: VerifiedCompositeGlyph] = [:]
     var compositeInspector: TrueTypeInspector?
+    // FNT-03: metrics verification works for TrueType and for CFF-flavored
+    // OpenType programs (shared hmtx/cmap paths). A bare CFF program cannot be
+    // inspected here, so it stays readable but not inline-writable: the guard
+    // below leaves its glyph map empty and isInlineEditable then refuses.
     if simple == nil, let program,
       let inspector = try? TrueTypeInspector.inspect(program, requireUnicodeMap: false),
-      !inspector.isCFF, inspector.unitsPerEm > 0 {
+      inspector.unitsPerEm > 0 {
       compositeInspector = inspector
       for code in mappings.keys.sorted() {
         guard (0...65_535).contains(code), let text = mappings[code], !text.isEmpty else { continue }
-        let glyphID: Int
+        let cid = compositeFont?.cid(forCode: code)
+        var glyphID: Int?
         if let gids {
+          // CIDFontType2 with an explicit CIDToGIDMap stream.
           guard code * 2 + 1 < gids.count else { continue }
           glyphID = Int(gids[code * 2]) * 256 + Int(gids[code * 2 + 1])
-        } else {
-          glyphID = code
+        } else if let cid, let mapped = compositeFont?.glyphID(forCID: cid) {
+          glyphID = mapped
+        } else if text.unicodeScalars.count == 1,
+          let scalar = text.unicodeScalars.first,
+          let mapped = inspector.unicodeToGlyph[Int(scalar.value)]
+        {
+          // CIDFontType0 (CFF/OpenType): CIDs select glyphs through the CFF
+          // charset; the program's own cmap verifies the glyph and its advance
+          // against the PDF /W width. The CID stays the source code's identity.
+          glyphID = mapped
         }
-        guard glyphID > 0, glyphID < inspector.glyphCount,
-          let advance = inspector.advances[glyphID] else { continue }
-        let width = widths[code] ?? fallback
+        guard let glyphID, glyphID > 0, glyphID < inspector.glyphCount,
+          let advance = inspector.advances[glyphID]
+        else { continue }
+        let width = compositeFont?.width(forCID: cid ?? code) ?? widths[code] ?? fallback
         guard abs(Double(advance) * 1_000 / Double(inspector.unitsPerEm) - width) <= 1.1 else {
           continue
         }
@@ -289,7 +325,8 @@ struct IndexedTextFont {
       mapping: mappings, encoding: encoding, multiScalarEncoding: multiScalarEncoding,
       verifiedCompositeGlyphs: verifiedCompositeGlyphs,
       equivalentCompositeGlyphIDs: equivalentCompositeGlyphIDs,
-      widths: widths, defaultWidth: fallback, gids: gids, program: program)
+      widths: widths, defaultWidth: fallback, gids: gids, program: program,
+      composite: compositeFont)
   }
 
   private static func number(_ value: PDFValue) -> Double? {
@@ -325,13 +362,22 @@ struct IndexedTextFont {
           code: Int(glyph.codes[0]), width: width, inspector: inspector) else { return nil }
       glyphID = verified
     } else {
-      guard glyph.codes.count == 2 else { return nil }
-      let cid = Int(glyph.codes[0]) * 256 + Int(glyph.codes[1])
+      guard let composite,
+        let decoded = composite.code(in: glyph.codes, offset: 0),
+        let cid = composite.cid(forCode: decoded.value)
+      else { return nil }
       if let gids {
         guard cid * 2 + 1 < gids.count else { return nil }
         glyphID = Int(gids[cid * 2]) * 256 + Int(gids[cid * 2 + 1])
+      } else if let mapped = composite.glyphID(forCID: cid) {
+        glyphID = mapped
+      } else if glyph.text.unicodeScalars.count == 1,
+        let scalar = glyph.text.unicodeScalars.first,
+        let mapped = inspector.unicodeToGlyph[Int(scalar.value)]
+      {
+        glyphID = mapped
       } else {
-        glyphID = cid
+        return nil
       }
     }
     guard glyphID > 0, glyphID < inspector.glyphCount else { return nil }
@@ -342,13 +388,19 @@ struct IndexedTextFont {
     if let simple {
       return codes.map { Glyph(text: simple.decode([$0]), codes: [$0], width: simple.width(of: $0)) }
     }
-    guard codes.count.isMultiple(of: 2) else { return nil }
+    guard let composite else { return nil }
     var result: [Glyph] = []
-    for offset in stride(from: 0, to: codes.count, by: 2) {
-      let code = Int(codes[offset]) * 256 + Int(codes[offset + 1])
-      guard let text = mapping[code] else { return nil }
-      result.append(Glyph(text: text, codes: Array(codes[offset..<offset + 2]),
-        width: widths[code] ?? defaultWidth))
+    var offset = 0
+    while offset < codes.count {
+      guard let decoded = composite.code(in: codes, offset: offset),
+        let text = mapping[decoded.value]
+      else { return nil }
+      let cid = composite.cid(forCode: decoded.value)
+      result.append(
+        Glyph(
+          text: text, codes: Array(codes[offset..<(offset + decoded.length)]),
+          width: cid.map { composite.width(forCID: $0) } ?? defaultWidth))
+      offset += decoded.length
     }
     return result
   }
@@ -356,8 +408,10 @@ struct IndexedTextFont {
     glyphs.allSatisfy { glyph in
       guard let expected = profile.glyphs[glyph.text] else { return false }
       if simple != nil { return expected.codes == glyph.codes }
-      guard glyph.codes.count == 2 else { return false }
-      let code = Int(glyph.codes[0]) * 256 + Int(glyph.codes[1])
+      guard let composite,
+        let decoded = composite.code(in: glyph.codes, offset: 0)
+      else { return false }
+      let code = decoded.value
       guard let actual = verifiedCompositeGlyphs[code], actual.text == glyph.text,
         let expectedID = expected.id,
         equivalentCompositeGlyphIDs[code]?.contains(expectedID) == true else { return false }
@@ -367,6 +421,7 @@ struct IndexedTextFont {
   func decode(_ codes: [UInt8]) -> String { glyphs(codes)?.map(\.text).joined() ?? "\u{FFFD}" }
   func encode(_ text: String) -> [UInt8]? {
     if let simple { return simple.encode(text) }
+    guard let composite else { return nil }
     var result: [UInt8] = []
     let scalars = Array(text.unicodeScalars.map(\.value))
     var offset = 0
@@ -375,19 +430,33 @@ struct IndexedTextFont {
       for mapping in multiScalarEncoding {
         guard offset + mapping.scalars.count <= scalars.count,
           scalars[offset..<offset + mapping.scalars.count].elementsEqual(mapping.scalars) else { continue }
-        let code = mapping.code
-        result += [UInt8(code >> 8), UInt8(code & 255)]
+        guard let bytes = Self.codeBytes(for: mapping.code, composite: composite) else {
+          return nil
+        }
+        result += bytes
         offset += mapping.scalars.count
         matched = true
         break
       }
       if matched { continue }
       guard let scalar = UnicodeScalar(scalars[offset]),
-        let code = encoding[String(scalar)] else { return nil }
-      result += [UInt8(code >> 8), UInt8(code & 255)]
+        let code = encoding[String(scalar)],
+        let bytes = Self.codeBytes(for: code, composite: composite) else { return nil }
+      result += bytes
       offset += 1
     }
     return result
+  }
+
+  /// FNT-03: encode a code value with the byte width its encoding CMap
+  /// declares (1 byte for the custom single-byte CMap, 2 for Identity).
+  private static func codeBytes(for code: Int, composite: CompositeFont) -> [UInt8]? {
+    let length = composite.codeByteLength(forCode: code)
+    guard length >= 1, length <= 2 else { return nil }
+    guard length != 1 || (code >= 0 && code <= 255) else { return nil }
+    guard length == 1 || (code >= 0 && code <= 65_535) else { return nil }
+    if length == 1 { return [UInt8(code)] }
+    return [UInt8((code >> 8) & 0xFF), UInt8(code & 0xFF)]
   }
 
   static func verifiedSimpleGlyphID(scalar: Int, code: Int, width: Double,
@@ -465,6 +534,22 @@ struct IndexedTextFont {
     let name = parts.count == 2 && parts[0].count == 6 ? String(parts[1]) : baseFont
     var glyphs: [String: PageTextFontProfile.Glyph] = [:]
     let candidates = simple == nil ? mapping.keys.sorted() : Array(0...255)
+    if simple == nil {
+      // FNT-03: a composite font reverse-maps only codes whose glyph and
+      // advance were verified against the embedded program (TrueType cmap +
+      // CIDToGIDMap, or CFF/OpenType cmap for CIDFontType0). An absent glyph
+      // is simply not in the profile, so editing it refuses explicitly.
+      for code in candidates {
+        guard let verified = verifiedCompositeGlyphs[code], !verified.text.isEmpty,
+          let codes = encode(verified.text), !codes.isEmpty,
+          glyphs[verified.text] == nil
+        else { continue }
+        glyphs[verified.text] = .init(
+          id: verified.id, width: verified.width, codes: codes)
+      }
+      guard !glyphs.isEmpty else { return nil }
+      return .init(source: .init(resource: resource, name: name), program: program, glyphs: glyphs)
+    }
     if let inspector = try? TrueTypeInspector.inspect(program, requireUnicodeMap: false) {
       for code in candidates {
         let codes = simple == nil ? [UInt8(code >> 8), UInt8(code & 255)] : [UInt8(code)]

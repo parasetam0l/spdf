@@ -330,11 +330,15 @@ final class SPDFDocument: NSDocument {
 
   override func save(_ sender: Any?) {
     guard finishPendingEdits() else { return }
+    // RED-01: staged redaction marks do not alter bytes; never let a save look
+    // like it redacted something without the user applying the marks first.
+    guard confirmSaveWithPendingRedactionMarks() else { return }
     super.save(sender)
   }
 
   override func saveAs(_ sender: Any?) {
     guard finishPendingEdits() else { return }
+    guard confirmSaveWithPendingRedactionMarks() else { return }
     super.saveAs(sender)
   }
 
@@ -347,6 +351,11 @@ final class SPDFDocument: NSDocument {
     // A verified atomic replacement changes the destination inode. Keep the
     // key used by the edits until their save has actually succeeded.
     let savedRecoveryKey = recoveryKey
+    // RED-01: direct save paths (menu/autosave routing) also hit this hook.
+    guard confirmSaveWithPendingRedactionMarks() else {
+      completionHandler(NSError(domain: NSCocoaErrorDomain, code: NSUserCancelledError))
+      return
+    }
     if saveOperation == .saveOperation, destinationChangedExternally(),
       !confirmExternallyModifiedSave()
     {
@@ -422,6 +431,8 @@ final class SPDFDocument: NSDocument {
     case .alertSecondButtonReturn:
       if let fileURL, let type = fileType {
         try? revert(toContentsOf: fileURL, ofType: type)
+        // RED-01: review geometry belongs to the previous revision.
+        resetRedactionMarksAfterReload()
         sourceFingerprint = SourceFingerprint.capture(of: fileURL)
       }
       return false
@@ -838,12 +849,13 @@ final class SPDFDocument: NSDocument {
   /// was committed.
   @discardableResult
   func addPageMark(
-    _ mark: RepeatedMark, pageIDs: [PDFObjectID], margin: Double = 36
+    _ mark: RepeatedMark, pageIDs: [PDFObjectID], margin: Double = 36,
+    placement: RepeatedMarkPlacement? = nil
   ) -> RepeatedMarkPlan? {
     guard canEditContent, !pageIDs.isEmpty, let graph = editSession.currentGraph
     else { return nil }
     let command = AddRepeatedMarkCommand(
-      pageIDs: pageIDs, mark: mark, margin: margin)
+      pageIDs: pageIDs, mark: mark, margin: margin, placement: placement)
     do {
       let plan = try command.plan(in: graph)
       try editSession.apply(PDFTransaction([command]))
@@ -856,119 +868,74 @@ final class SPDFDocument: NSDocument {
     }
   }
 
-  /// PAG-06: dialog for the repeated-mark presets. The plan is shown before
-  /// the command is committed.
+  /// PAG-06/PAG-07: the Page Marks dialog. It adds a new mark set, updates an
+  /// applied set in place (one undo step; the old paint is replaced, never
+  /// stacked) or verifies the sets already applied. The preview is shown
+  /// before the command is committed.
   func presentAddPageMark() {
-    guard canEditContent, let viewer, viewer.pageCount > 0 else { return }
-    let types = ["Watermark", "Header", "Footer", "Page number", "Bates number"]
-    let typePopup = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 160, height: 24))
-    typePopup.addItems(withTitles: types)
-    let textField = NSTextField(frame: NSRect(x: 0, y: 0, width: 240, height: 22))
-    textField.stringValue = "CONFIDENTIAL"
-    let familyPopup = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 120, height: 24))
-    familyPopup.addItems(withTitles: ["Helvetica", "Times", "Courier"])
-    let sizeField = NSTextField(frame: NSRect(x: 0, y: 0, width: 60, height: 22))
-    sizeField.stringValue = "48"
-    let opacityField = NSTextField(frame: NSRect(x: 0, y: 0, width: 60, height: 22))
-    opacityField.stringValue = "0.2"
-    let angleField = NSTextField(frame: NSRect(x: 0, y: 0, width: 60, height: 22))
-    angleField.stringValue = "45"
-    let colorPopup = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 120, height: 24))
-    colorPopup.addItems(withTitles: ["Gray", "Black", "Red", "Blue"])
-    let boldCheckbox = NSButton(checkboxWithTitle: "Bold", target: nil, action: nil)
-    let pageField = NSTextField(frame: NSRect(x: 0, y: 0, width: 160, height: 22))
-    pageField.stringValue = "1-\(viewer.pageCount)"
-    let marginField = NSTextField(frame: NSRect(x: 0, y: 0, width: 60, height: 22))
-    marginField.stringValue = "36"
-    let startField = NSTextField(frame: NSRect(x: 0, y: 0, width: 60, height: 22))
-    startField.stringValue = "1"
-    let digitsField = NSTextField(frame: NSRect(x: 0, y: 0, width: 60, height: 22))
-    digitsField.stringValue = "6"
-    let rows: [[NSView]] = [
-      [NSTextField(labelWithString: "Type:"), typePopup],
-      [NSTextField(labelWithString: "Text / prefix:"), textField],
-      [NSTextField(labelWithString: "Font:"), familyPopup],
-      [NSTextField(labelWithString: "Size:"), sizeField],
-      [NSTextField(labelWithString: "Opacity:"), opacityField],
-      [NSTextField(labelWithString: "Angle:") , angleField],
-      [NSTextField(labelWithString: "Color:"), colorPopup],
-      [NSGridCell.emptyContentView, boldCheckbox],
-      [NSTextField(labelWithString: "Pages:"), pageField],
-      [NSTextField(labelWithString: "Margin:"), marginField],
-      [NSTextField(labelWithString: "Bates start:"), startField],
-      [NSTextField(labelWithString: "Bates digits:"), digitsField],
-    ]
-    let grid = NSGridView(views: rows)
-    grid.column(at: 0).xPlacement = .trailing
-    grid.frame = NSRect(x: 0, y: 0, width: 360, height: 330)
-    let dialog = NSAlert()
-    dialog.messageText = "Add Page Mark"
-    dialog.informativeText =
-      "Header, footer and page-number marks use the margin; watermarks are centered. "
-      + "Page numbers support {page} and {pages}. One undo step covers every selected page."
-    dialog.accessoryView = grid
-    dialog.addButton(withTitle: "Preview")
-    dialog.addButton(withTitle: "Cancel")
-    guard dialog.runModal() == .alertFirstButtonReturn else { return }
+    guard canEditContent, let viewer, viewer.pageCount > 0,
+      let graph = editSession.currentGraph
+    else { return }
+    let groups = RepeatedMarkInventory.groups(
+      in: graph, pageIDs: editSession.pageIDs)
+    guard let request = PageMarkEditor.request(
+      groups: groups, pageIDs: editSession.pageIDs, graph: graph)
+    else { return }
+    let pageIDs = request.pageIndices.compactMap { index in
+      editSession.pageIDs.indices.contains(index) ? editSession.pageIDs[index] : nil
+    }
+    guard pageIDs.count == request.pageIndices.count, !pageIDs.isEmpty else { return }
+    if let group = request.existingGroup {
+      _ = updatePageMark(
+        groupID: group.groupID, pageIDs: pageIDs, mark: request.mark,
+        margin: request.margin, placement: request.placement)
+    } else {
+      _ = addPageMark(
+        request.mark, pageIDs: pageIDs, margin: request.margin,
+        placement: request.placement)
+    }
+  }
 
-    let size = Double(sizeField.stringValue) ?? 48
-    let opacity = Double(opacityField.stringValue) ?? 0.2
-    let angle = Double(angleField.stringValue) ?? 45
-    let margin = Double(marginField.stringValue) ?? 36
-    let start = Int(startField.stringValue) ?? 1
-    let digits = Int(digitsField.stringValue) ?? 6
-    let colors: [[Double]] = [
-      [0.35, 0.35, 0.35], [0, 0, 0], [0.7, 0, 0], [0, 0.2, 0.7],
-    ]
-    let family: AddedTextStyle.Family = [
-      AddedTextStyle.Family.helvetica, .times, .courier,
-    ][max(0, familyPopup.indexOfSelectedItem)]
-    let alignment: TextParagraphCandidate.Alignment =
-      typePopup.indexOfSelectedItem <= 2
-      ? .center
-      : (typePopup.indexOfSelectedItem == 3 ? .center : .left)
-    let style = AddedTextStyle(
-      family: family, bold: boldCheckbox.state == .on, size: size,
-      color: colors[max(0, colorPopup.indexOfSelectedItem)], alignment: alignment,
-      opacity: min(1, max(0, opacity)))
-    let rawText = textField.stringValue
-    let text = rawText.isEmpty ? "CONFIDENTIAL" : rawText
-    let mark: RepeatedMark
-    switch typePopup.indexOfSelectedItem {
-    case 1: mark = .header(text: text, style: style)
-    case 2: mark = .footer(text: text, style: style)
-    case 3: mark = .pageNumber(text: text.contains("{page}") ? text : "Page {page} of {pages}", style: style, offset: 0)
-    case 4: mark = .bates(prefix: text, start: start, digits: digits, style: style)
-    default: mark = .watermark(text: text, style: style, angle: angle)
-    }
-    let indices = pageIndices(from: pageField.stringValue, count: editSession.pageIDs.count)
-    guard !indices.isEmpty else {
-      NSSound.beep()
-      return
-    }
-    let pageIDs = indices.map { editSession.pageIDs[$0] }
-    guard let graph = editSession.currentGraph else { return }
-    let command = AddRepeatedMarkCommand(
-      pageIDs: pageIDs, mark: mark, margin: max(0, margin))
-    let plan: RepeatedMarkPlan
+  /// PAG-06: replace one applied mark set in place. The previous streams are
+  /// removed and the new set is appended in the same transaction, so the page
+  /// never shows both versions and one Undo restores the previous set.
+  @discardableResult
+  func updatePageMark(
+    groupID: String, pageIDs: [PDFObjectID], mark: RepeatedMark,
+    margin: Double = 36, placement: RepeatedMarkPlacement? = nil
+  ) -> Bool {
+    guard canEditContent, !pageIDs.isEmpty else { return false }
+    let command = UpdateRepeatedMarkCommand(
+      groupID: groupID, allPageIDs: editSession.pageIDs, pageIDs: pageIDs,
+      mark: mark, margin: margin, placement: placement)
     do {
-      plan = try command.plan(in: graph)
+      try editSession.apply(PDFTransaction([command]))
     } catch {
       presentError(error)
-      return
+      return false
     }
-    let preview = NSAlert()
-    preview.messageText = "Preview: \(types[max(0, typePopup.indexOfSelectedItem)])"
-    var detail = plan.summary
-    for page in plan.pages.prefix(6) {
-      detail += "\nPage \(page.pageIndex + 1): \(page.text)"
-    }
-    if plan.pages.count > 6 { detail += "\n…" }
-    preview.informativeText = detail
-    preview.addButton(withTitle: "Apply")
-    preview.addButton(withTitle: "Cancel")
-    guard preview.runModal() == .alertFirstButtonReturn else { return }
-    _ = addPageMark(mark, pageIDs: pageIDs, margin: max(0, margin))
+    noteUserEdit()
+    refreshViewer(preservingPage: viewer?.pageNumber ?? 1)
+    return true
+  }
+
+  /// PAG-07: testable service entry point for verifying one applied set.
+  func verifyPageMarkGroup(groupID: String) -> RepeatedMarkVerification? {
+    guard let graph = editSession.currentGraph,
+      let group = RepeatedMarkInventory.groups(
+        in: graph, pageIDs: editSession.pageIDs
+      ).first(where: { $0.groupID == groupID })
+    else { return nil }
+    return RepeatedMarkVerifier.verify(
+      group, in: graph, pageIDs: editSession.pageIDs)
+  }
+
+  /// PAG-07: verify every applied sPDF mark set in this document.
+  func verifyPageMarks() -> [RepeatedMarkVerification] {
+    guard let graph = editSession.currentGraph else { return [] }
+    return RepeatedMarkInventory.groups(
+      in: graph, pageIDs: editSession.pageIDs
+    ).map { RepeatedMarkVerifier.verify($0, in: graph, pageIDs: editSession.pageIDs) }
   }
 
   /// Parse a 1-based page list such as `1, 3-5` into zero-based indices.
@@ -5022,16 +4989,23 @@ final class SPDFDocument: NSDocument {
       alert.runModal()
       return
     }
-    let popup = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 360, height: 24))
-    popup.addItems(withTitles: groups.map {
-      "\($0.label) — \($0.pageIDs.count) page"
-        + ($0.pageIDs.count == 1 ? "" : "s")
+    let popup = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 440, height: 24))
+    // PAG-07: report whether each set still paints its recorded sequence.
+    let verifications = groups.map {
+      RepeatedMarkVerifier.verify($0, in: graph, pageIDs: editSession.pageIDs)
+    }
+    popup.addItems(withTitles: groups.enumerated().map { index, group in
+      let pageWord = group.pageIDs.count == 1 ? "page" : "pages"
+      let status = verifications[index].isVerified ? "verified" : "needs attention"
+      return "\(group.label) — \(group.pageIDs.count) \(pageWord) (\(status))"
     })
     let alert = NSAlert()
     alert.messageText = "Remove Page Mark"
     alert.informativeText =
       "The selected mark set is removed from its pages as one undo step. "
-      + "Other content and other mark sets are left intact."
+      + "Other content and other mark sets are left intact. A verified set still "
+      + "paints its recorded text on every page; use Page > Page Marks to inspect "
+      + "the applied text before removing it."
     alert.accessoryView = popup
     alert.addButton(withTitle: "Remove")
     alert.addButton(withTitle: "Cancel")

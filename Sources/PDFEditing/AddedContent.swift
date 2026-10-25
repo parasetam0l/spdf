@@ -108,6 +108,45 @@ public enum AddedShape: Sendable, Equatable {
   }
 }
 
+/// PAG-06/PAG-07: where a header, footer, page number or Bates mark is
+/// anchored inside its page margin rectangle. Watermarks always use the
+/// centered watermark rectangle and ignore this.
+public enum RepeatedMarkPlacement: String, Sendable, Equatable, CaseIterable, Codable {
+  case topLeft
+  case topCenter
+  case topRight
+  case bottomLeft
+  case bottomCenter
+  case bottomRight
+
+  public var isTop: Bool {
+    switch self {
+    case .topLeft, .topCenter, .topRight: return true
+    case .bottomLeft, .bottomCenter, .bottomRight: return false
+    }
+  }
+
+  /// The text alignment that anchors the mark at this placement.
+  public var alignment: TextParagraphCandidate.Alignment {
+    switch self {
+    case .topLeft, .bottomLeft: return .left
+    case .topCenter, .bottomCenter: return .center
+    case .topRight, .bottomRight: return .right
+    }
+  }
+
+  public var displayName: String {
+    switch self {
+    case .topLeft: return "Top left"
+    case .topCenter: return "Top center"
+    case .topRight: return "Top right"
+    case .bottomLeft: return "Bottom left"
+    case .bottomCenter: return "Bottom center"
+    case .bottomRight: return "Bottom right"
+    }
+  }
+}
+
 /// P21-016–P21-019: repeated page marks (watermark, header, footer, page
 /// number, Bates numbering).
 public enum RepeatedMark: Sendable, Equatable {
@@ -117,14 +156,34 @@ public enum RepeatedMark: Sendable, Equatable {
   /// `{page}` and `{pages}` are replaced with physical indices; `offset` is
   /// added to the physical page number.
   case pageNumber(text: String, style: AddedTextStyle, offset: Int)
-  case bates(prefix: String, start: Int, digits: Int, style: AddedTextStyle)
+  /// PAG-07: `suffix` follows the zero-padded sequence number; `start` is the
+  /// first number and `digits` the requested minimum width.
+  case bates(prefix: String, suffix: String, start: Int, digits: Int, style: AddedTextStyle)
 
-  var style: AddedTextStyle {
+  /// The style shared by every case; public so App-level mark editors can
+  /// prefill their controls from an applied set's stored settings.
+  public var style: AddedTextStyle {
     switch self {
     case .watermark(_, let style, _), .header(_, let style), .footer(_, let style),
-      .pageNumber(_, let style, _), .bates(_, _, _, let style):
+      .pageNumber(_, let style, _), .bates(_, _, _, _, let style):
       return style
     }
+  }
+
+  /// PAG-06/PAG-07: the default anchor when a command does not override it.
+  public var defaultPlacement: RepeatedMarkPlacement {
+    switch self {
+    case .header: return .topCenter
+    case .footer, .pageNumber, .bates: return .bottomCenter
+    case .watermark: return .bottomCenter
+    }
+  }
+
+  /// PAG-07: prefix + zero-padded number + suffix.
+  public static func batesText(
+    prefix: String, suffix: String, number: Int, digits: Int
+  ) -> String {
+    prefix + String(format: "%0\(max(1, digits))d", number) + suffix
   }
 
   func text(pageIndex: Int, pageCount: Int) -> String {
@@ -136,9 +195,9 @@ public enum RepeatedMark: Sendable, Equatable {
       return
         text.replacingOccurrences(of: "{page}", with: String(number))
         .replacingOccurrences(of: "{pages}", with: String(pageCount))
-    case .bates(let prefix, let start, let digits, _):
-      let number = start + pageIndex
-      return prefix + String(format: "%0\(max(1, digits))d", number)
+    case .bates(let prefix, let suffix, let start, let digits, _):
+      return RepeatedMark.batesText(
+        prefix: prefix, suffix: suffix, number: start + pageIndex, digits: digits)
     }
   }
 
@@ -159,9 +218,9 @@ public enum RepeatedMark: Sendable, Equatable {
     case .pageNumber(let text, _, _):
       name = "Page number"
       sample = text
-    case .bates(let prefix, _, _, _):
+    case .bates(let prefix, let suffix, _, _, _):
       name = "Bates numbering"
-      sample = prefix
+      sample = prefix + suffix
     }
     let trimmed = sample.trimmingCharacters(in: .whitespacesAndNewlines)
     return trimmed.isEmpty ? name : "\(name): \(trimmed.prefix(48))"
@@ -546,7 +605,7 @@ public enum AddedContent {
   /// Appends a content block (or inserts it at the back).
   static func append(
     _ content: String, pageID: PDFObjectID, toFront: Bool, in graph: inout PDFGraph,
-    markGroup: String? = nil, markLabel: String? = nil
+    markGroup: String? = nil, markLabel: String? = nil, markSpec: Data? = nil
   ) throws {
     let bytes = Data(content.utf8)
     let streamID = nextObjectID(in: graph)
@@ -563,6 +622,9 @@ public enum AddedContent {
     }
     if let markLabel {
       dictionary[PDFName("SPDFMarkLabel")] = .string(Data(markLabel.utf8))
+    }
+    if let markSpec {
+      dictionary[RepeatedMarkSpec.streamKey] = .string(markSpec)
     }
     graph.objects[streamID] = .stream(
       PDFStream(dictionary: dictionary, bytes: bytes))
@@ -946,11 +1008,20 @@ public struct AddImageStampCommand: PDFEditCommand, Equatable, Sendable {
 /// P21-016–P21-022: repeated page marks across explicit page ranges with a
 /// preview, unique resource names, and compound undo (one command covers every
 /// page it touches).
+///
+/// PAG-06/PAG-07: every written stream also stores the editable settings as
+/// JSON (the `SPDFMarkSpec` key), so an applied set can be discovered,
+/// verified and updated in place after save/reopen instead of stacking a
+/// duplicate paint.
 public struct AddRepeatedMarkCommand: PDFEditCommand, Equatable, Sendable {
   public let pageIDs: [PDFObjectID]
   public let mark: RepeatedMark
-  /// Margins used for header/footer/page-number placement.
+  /// Margins used for header/footer/page-number/Bates placement.
   public let margin: Double
+  /// PAG-06/PAG-07: explicit anchor for header/footer/page-number/Bates marks;
+  /// nil keeps the mark's default (top center for headers, bottom center
+  /// otherwise). Watermarks stay centered and ignore this.
+  public let placement: RepeatedMarkPlacement?
   /// P15-007: an optional caller-supplied font program, embedded as a
   /// tagged subset (nil keeps the standard-14 profile).
   public let customFont: CustomTextFont?
@@ -959,13 +1030,27 @@ public struct AddRepeatedMarkCommand: PDFEditCommand, Equatable, Sendable {
 
   public init(
     pageIDs: [PDFObjectID], mark: RepeatedMark, margin: Double = 36,
-    customFont: CustomTextFont? = nil, groupID: String = UUID().uuidString
+    customFont: CustomTextFont? = nil, groupID: String = UUID().uuidString,
+    placement: RepeatedMarkPlacement? = nil
   ) {
     self.pageIDs = pageIDs
     self.mark = mark
     self.margin = margin
     self.customFont = customFont
     self.groupID = groupID
+    self.placement = placement
+  }
+
+  /// PAG-06: the anchor this command writes.
+  public var resolvedPlacement: RepeatedMarkPlacement {
+    placement ?? mark.defaultPlacement
+  }
+
+  /// PAG-06: the settings persisted with every stream of this set.
+  public var settings: RepeatedMarkSpec {
+    RepeatedMarkSpec(
+      mark: mark, margin: margin, placement: resolvedPlacement,
+      usesCustomFont: customFont != nil)
   }
 
   /// P17-012: the pages this command changes.
@@ -976,8 +1061,59 @@ public struct AddRepeatedMarkCommand: PDFEditCommand, Equatable, Sendable {
     guard !pageIDs.isEmpty else {
       throw PDFError(.malformed, "No pages were selected")
     }
+    let style = mark.style
+    guard style.size.isFinite, style.size >= 2, style.size <= 400 else {
+      throw PDFError(.malformed, "The mark font size is outside the supported range")
+    }
+    guard style.opacity.isFinite, style.opacity >= 0, style.opacity <= 1 else {
+      throw PDFError(.malformed, "The mark opacity is outside 0-1")
+    }
+    guard style.lineSpacing.isFinite, style.lineSpacing >= 0.5, style.lineSpacing <= 10 else {
+      throw PDFError(.malformed, "The mark line spacing is outside the supported range")
+    }
+    guard style.color.count == 3,
+      style.color.allSatisfy({ $0.isFinite && $0 >= 0 && $0 <= 1 })
+    else {
+      throw PDFError(.malformed, "The mark color must be three finite RGB components")
+    }
+    guard margin.isFinite, margin >= 0, margin <= 500 else {
+      throw PDFError(.malformed, "The mark margin is outside the supported range")
+    }
+    switch mark {
+    case .watermark(let text, _, let angle):
+      try Self.validateText(text, limit: 10_000)
+      guard angle.isFinite, abs(angle) <= 360 else {
+        throw PDFError(.malformed, "The watermark angle is outside the supported range")
+      }
+    case .header(let text, _), .footer(let text, _):
+      try Self.validateText(text, limit: 10_000)
+    case .pageNumber(let text, _, let offset):
+      try Self.validateText(text, limit: 1_000)
+      guard abs(offset) <= 1_000_000 else {
+        throw PDFError(.malformed, "The page-number offset is outside the supported range")
+      }
+    case .bates(let prefix, let suffix, let start, let digits, _):
+      try Self.validateText(prefix, limit: 200, allowEmpty: true)
+      try Self.validateText(suffix, limit: 200, allowEmpty: true)
+      guard (1...12).contains(digits) else {
+        throw PDFError(.malformed, "Bates digits must be between 1 and 12")
+      }
+      guard start >= 0, start <= 9_999_999_999 else {
+        throw PDFError(.limitExceeded, "The Bates start number is outside the supported range")
+      }
+    }
     for pageID in pageIDs {
       try AnnotationSupport.validatePage(pageID, in: graph)
+    }
+    _ = try settings.jsonData()
+  }
+
+  static func validateText(_ text: String, limit: Int, allowEmpty: Bool = false) throws {
+    guard allowEmpty || !text.isEmpty else {
+      throw PDFError(.malformed, "The mark text is empty")
+    }
+    guard text.utf8.count <= limit else {
+      throw PDFError(.limitExceeded, "The mark text exceeds the size limit")
     }
   }
 
@@ -985,31 +1121,18 @@ public struct AddRepeatedMarkCommand: PDFEditCommand, Equatable, Sendable {
   public func plan(in input: PDFGraph) throws -> RepeatedMarkPlan {
     var graph = input
     var previews: [RepeatedMarkPlan.PagePreview] = []
+    let style = alignedStyle
     for (index, pageID) in pageIDs.enumerated() {
       let text = mark.text(pageIndex: index, pageCount: pageIDs.count)
       let box = try pageBox(pageID, in: graph)
       let rect = placementRect(in: box)
       let font = try AddedContent.selectFont(
-        style: mark.style, custom: customFont, covering: text, pageID: pageID,
-        in: &graph)
+        style: style, custom: customFont, covering: text, pageID: pageID, in: &graph)
       let fontName = font.resourceName
       let lines = AddedContent.wrap(
-        text, font: font, size: mark.style.size, width: rect[2] - rect[0])
-      var content = ""
-      if case .watermark(_, _, let angle) = mark {
-        content +=
-          "q\n\(AddedContent.number(cos(angle * .pi / 180))) "
-          + "\(AddedContent.number(sin(angle * .pi / 180))) "
-          + "\(AddedContent.number(-sin(angle * .pi / 180))) "
-          + "\(AddedContent.number(cos(angle * .pi / 180))) "
-          + "\(AddedContent.number(rect[0])) \(AddedContent.number(rect[1])) cm\n"
-      } else {
-        content += "q\n"
-      }
-      content += AddedContent.textBlock(
-        lines: lines, origin: [rect[0], rect[3] - mark.style.size * 0.8], width: rect[2] - rect[0],
-        fontName: fontName, font: font, style: mark.style, opacityName: nil)
-      content += "Q\n"
+        text, font: font, size: style.size, width: rect[2] - rect[0])
+      let content = contentBlock(
+        lines: lines, rect: rect, fontName: fontName, font: font, opacityName: nil)
       previews.append(
         RepeatedMarkPlan.PagePreview(
           pageIndex: index, text: text, bounds: rect, content: content))
@@ -1019,43 +1142,64 @@ public struct AddRepeatedMarkCommand: PDFEditCommand, Equatable, Sendable {
 
   public func apply(to graph: PDFGraph) throws -> PDFGraph {
     var graph = graph
-    let plan = try plan(in: graph)
+    let style = alignedStyle
+    // PAG-06: persist the editable settings before mutating so an invalid
+    // spec cannot leave a half-applied set.
+    let specData = try settings.jsonData()
     for (index, pageID) in pageIDs.enumerated() {
       let text = mark.text(pageIndex: index, pageCount: pageIDs.count)
       let box = try pageBox(pageID, in: graph)
       let rect = placementRect(in: box)
       let font = try AddedContent.selectFont(
-        style: mark.style, custom: customFont, covering: text, pageID: pageID,
-        in: &graph)
+        style: style, custom: customFont, covering: text, pageID: pageID, in: &graph)
       let fontName = font.resourceName
       let opacityName = try AddedContent.registerOpacity(
-        mark.style.opacity, pageID: pageID, in: &graph)
+        style.opacity, pageID: pageID, in: &graph)
       let lines = AddedContent.wrap(
-        text, font: font, size: mark.style.size, width: rect[2] - rect[0])
+        text, font: font, size: style.size, width: rect[2] - rect[0])
       guard lines.allSatisfy({ font.encode($0) != nil }) else {
         throw PDFError(
           .unsupported,
           "The mark text contains characters the standard-14 WinAnsi profile cannot encode")
       }
-      var content = "q\n"
-      if case .watermark(_, _, let angle) = mark, angle != 0 {
-        content +=
-          "\(AddedContent.number(cos(angle * .pi / 180))) "
-          + "\(AddedContent.number(sin(angle * .pi / 180))) "
-          + "\(AddedContent.number(-sin(angle * .pi / 180))) "
-          + "\(AddedContent.number(cos(angle * .pi / 180))) "
-          + "\(AddedContent.number(rect[0])) \(AddedContent.number(rect[1])) cm\n"
-      }
-      content += AddedContent.textBlock(
-        lines: lines, origin: [rect[0], rect[3] - mark.style.size * 0.8], width: rect[2] - rect[0],
-        fontName: fontName, font: font, style: mark.style, opacityName: opacityName)
-      content += "Q\n"
+      let content = contentBlock(
+        lines: lines, rect: rect, fontName: fontName, font: font,
+        opacityName: opacityName)
       try AddedContent.append(
         content, pageID: pageID, toFront: true, in: &graph,
-        markGroup: groupID, markLabel: mark.label)
-      _ = plan
+        markGroup: groupID, markLabel: mark.label, markSpec: specData)
     }
     return graph
+  }
+
+  /// PAG-06/PAG-07: the text alignment follows the resolved placement; every
+  /// other style attribute stays untouched.
+  var alignedStyle: AddedTextStyle {
+    if case .watermark = mark { return mark.style }
+    var style = mark.style
+    style.alignment = resolvedPlacement.alignment
+    return style
+  }
+
+  func contentBlock(
+    lines: [String], rect: [Double], fontName: PDFName, font: WritableTextFont,
+    opacityName: PDFName?
+  ) -> String {
+    let style = alignedStyle
+    var content = "q\n"
+    if case .watermark(_, _, let angle) = mark, angle != 0 {
+      content +=
+        "\(AddedContent.number(cos(angle * .pi / 180))) "
+        + "\(AddedContent.number(sin(angle * .pi / 180))) "
+        + "\(AddedContent.number(-sin(angle * .pi / 180))) "
+        + "\(AddedContent.number(cos(angle * .pi / 180))) "
+        + "\(AddedContent.number(rect[0])) \(AddedContent.number(rect[1])) cm\n"
+    }
+    content += AddedContent.textBlock(
+      lines: lines, origin: [rect[0], rect[3] - style.size * 0.8], width: rect[2] - rect[0],
+      fontName: fontName, font: font, style: style, opacityName: opacityName)
+    content += "Q\n"
+    return content
   }
 
   func pageBox(_ pageID: PDFObjectID, in graph: PDFGraph) throws -> [Double] {
@@ -1077,18 +1221,28 @@ public struct AddRepeatedMarkCommand: PDFEditCommand, Equatable, Sendable {
     return [0, 0, 612, 792]
   }
 
+  /// PAG-06/PAG-07: the mark rectangle for the resolved placement. Left,
+  /// center and right anchors use the text alignment inside the margin
+  /// rectangle; top and bottom placements attach the baseline inside the
+  /// matching margin edge.
   func placementRect(in box: [Double]) -> [Double] {
     switch mark {
-    case .header:
-      return [box[0] + margin, box[3] - margin, box[2] - margin, box[3] - margin + mark.style.size]
-    case .footer, .pageNumber, .bates:
-      return [box[0] + margin, box[1] + margin - mark.style.size, box[2] - margin, box[1] + margin]
     case .watermark:
       let width = (box[2] - box[0]) * 0.6
       let height = mark.style.size * 1.4
       let x = box[0] + ((box[2] - box[0]) - width) / 2
       let y = box[1] + ((box[3] - box[1]) - height) / 2
       return [x, y, x + width, y + height]
+    case .header, .footer, .pageNumber, .bates:
+      let left = box[0] + margin
+      let right = max(left, box[2] - margin)
+      let size = mark.style.size
+      if resolvedPlacement.isTop {
+        let base = box[3] - margin
+        return [left, base, right, base + size]
+      }
+      let base = box[1] + margin
+      return [left, base - size, right, base]
     }
   }
 }

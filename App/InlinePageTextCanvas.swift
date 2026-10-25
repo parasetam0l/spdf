@@ -335,6 +335,13 @@ final class InlinePageTextCanvas: NSView, NSTextViewDelegate {
         profiles: target?.paragraph?.fontProfiles ?? [:],
         licensedFonts: licensedFonts)
       formatting?.onChange = { [weak self] in self?.formattingChanged() }
+      // FNT-02: a typed character the chosen face cannot supply is offered as
+      // an explicit fallback-run approval before anything mutates. Cancel
+      // leaves the draft untouched; a different face is never substituted
+      // without this approval.
+      formatting?.fallbackApprovalHandler = { [weak self] preview in
+        FontFallbackApprovalPanel.present(preview, over: self?.window)
+      }
       textView.toggleBold = { [weak self] in self?.toggleFormat(italic: false) }
       textView.toggleItalic = { [weak self] in self?.toggleFormat(italic: true) }
       textView.toggleUnderline = { [weak self] in self?.toggleUnderlineFormat() }
@@ -363,7 +370,10 @@ final class InlinePageTextCanvas: NSView, NSTextViewDelegate {
         return true
       }
       guard let text = value as? String else { return false }
-      let plan = formatting.insertionPlan(text, replacing: range)
+      // FNT-02: ask the formatting layer for the fallback preview as part of
+      // the plan; the approval handler above decides whether it is applied.
+      let plan = formatting.insertionPlan(
+        text, replacing: range, requestingFallbackApproval: true)
       if let issue = plan.issue {
         self.viewer?.pageTextFormattingIssue = issue
         NSSound.beep()
@@ -524,7 +534,12 @@ final class InlinePageTextCanvas: NSView, NSTextViewDelegate {
     window?.makeFirstResponder(textView)
     if let viewer {
       let local = textView.convert(point, from: viewer.view)
-      let index = textView.characterIndexForInsertion(at: local)
+      var index = textView.characterIndexForInsertion(at: local)
+      // FNT-04: caret movement must never land inside a grapheme cluster
+      // (base plus combining marks, or a decomposed Turkish letter).
+      if !ScriptGraphemes.isBoundary(index, in: textView.string) {
+        index = ScriptGraphemes.cluster(containing: index, in: textView.string).lowerBound
+      }
       textView.setSelectedRange(
         NSRange(location: min(index, (textView.string as NSString).length), length: 0))
     }
@@ -1234,6 +1249,14 @@ final class InlinePageTextCanvas: NSView, NSTextViewDelegate {
           }
           offset += raw.length
         }
+      }
+      // FNT-04: a format run must not split a Unicode grapheme cluster. A
+      // differently styled combining mark would otherwise be stored as its
+      // own PDF code; merge the complete grapheme into the run that owns its
+      // base and keep the line text identical.
+      if !segments.isEmpty {
+        let normalized = GraphemeSafeTextSegments.normalize(segments: segments, text: value)
+        if normalized.issue == nil { segments = normalized.segments }
       }
       let breakFormat = hard ? formatting?.fragments(in:
         NSRange(location: NSMaxRange(range) - 1, length: 1)).first?.format : nil

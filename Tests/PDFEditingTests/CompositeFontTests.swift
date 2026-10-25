@@ -120,7 +120,11 @@ struct CompositeFontTests {
     #expect(result.glyphs[2].unicode == "ffi")
     #expect(result.glyphs[0].byteLength == 2)
     #expect(result.glyphs[0].cid == 1)
-    #expect(result.glyphs[0].width == 500)
+    // FNT-03: decode() now consults the parsed /W array (CID 1 → 600,
+    // CID 2 → 700); CIDs without an entry keep /DW (500).
+    #expect(result.glyphs[0].width == 600)
+    #expect(result.glyphs[1].width == 700)
+    #expect(result.glyphs[2].width == 500)
     #expect(font.coverage().contains("subset"))
   }
 

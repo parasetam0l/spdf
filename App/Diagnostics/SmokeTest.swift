@@ -1261,6 +1261,26 @@
           guard let markGroup = markGroups.first else {
             throw PDFError(.malformed, "Applied page mark was not discoverable")
           }
+          // PAG-06: an applied mark set updates in place (one transaction, no
+          // stacked duplicate) and verification reports the stored text.
+          guard first.updatePageMark(
+            groupID: markGroup.groupID, pageIDs: markGroup.pageIDs,
+            mark: .header(text: "Smoke Header 2", style: AddedTextStyle(size: 10))),
+            let updatedVerification = first.verifyPageMarkGroup(groupID: markGroup.groupID),
+            updatedVerification.isVerified
+          else { throw PDFError(.malformed, "Page mark update or verification failed") }
+          let updatedMarkPDF = try PDFParser.parse(try first.data(ofType: "com.adobe.pdf"))
+          let updatedMarkLayout = try PageTextLayout.build(
+            pageID: updatedMarkPDF.pageIDs[0], in: updatedMarkPDF.graph)
+          // Compare whole painted lines: "Smoke Header 2" contains the old
+          // label as a substring, so a substring check would mis-detect it.
+          guard updatedMarkLayout.lines.contains(where: {
+            updatedMarkLayout.text(in: $0).trimmingCharacters(in: .whitespaces)
+              == "Smoke Header 2"
+          }), !updatedMarkLayout.lines.contains(where: {
+            updatedMarkLayout.text(in: $0).trimmingCharacters(in: .whitespaces)
+              == "Smoke Header"
+          }) else { throw PDFError(.malformed, "Page mark update stacked or lost the stored text") }
           try first.editSession.apply(
             PDFTransaction([
               RemoveRepeatedMarkCommand(
@@ -1272,12 +1292,27 @@
           guard !removedLayout.lines.contains(where: {
             removedLayout.text(in: $0).contains("Smoke Header")
           }) else { throw PDFError(.malformed, "Page mark removal left the mark") }
-          guard first.undoEdit() else {
-            throw PDFError(.malformed, "Page mark removal did not undo")
+          guard first.undoEdit(), first.undoEdit(), first.undoEdit(),
+            try first.data(ofType: "com.adobe.pdf") == original
+          else {
+            throw PDFError(.malformed, "Page mark undo chain did not restore the original bytes")
           }
-          guard first.undoEdit(), try first.data(ofType: "com.adobe.pdf") == original else {
-            throw PDFError(.malformed, "Page mark undo did not restore the original bytes")
+          // PAG-07: a Bates batch over one source document produces a verified
+          // sequence, mapping CSV/JSON and an output PDF.
+          guard let batesSource = first.fileURL else {
+            throw PDFError(.malformed, "Bates batch source has no file URL")
           }
+          let batesDirectory = output.appendingPathComponent("bates", isDirectory: true)
+          try FileManager.default.createDirectory(
+            at: batesDirectory, withIntermediateDirectories: true)
+          let batesResult = try BatesBatchService.run(
+            inputURLs: [batesSource],
+            settings: BatesBatchSettings(prefix: "SMOKE-", startNumber: 1, digits: 4),
+            outputDirectory: batesDirectory)
+          guard batesResult.report.isVerified, batesResult.outputs.count == 1,
+            FileManager.default.fileExists(atPath: batesResult.mappingCSVURL.path),
+            FileManager.default.fileExists(atPath: batesResult.mappingJSONURL.path)
+          else { throw PDFError(.malformed, "Bates batch did not verify or write its report") }
           // PAG-09: metadata editing round-trips and undoes.
           try first.editSession.apply(
             PDFTransaction([

@@ -292,7 +292,7 @@ struct AddedContentTests {
         AddRepeatedMarkCommand(
           pageIDs: pageIDs,
           mark: .bates(
-            prefix: "ABC-", start: 100, digits: 5,
+            prefix: "ABC-", suffix: "", start: 100, digits: 5,
             style: AddedTextStyle(family: .courier, size: 8)))
       ]), to: edited)
 

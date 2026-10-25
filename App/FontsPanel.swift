@@ -6,6 +6,9 @@ import SwiftUI
 struct FontsPanel: View {
   @ObservedObject var model: FontsModel
   var onProvision: (String) -> Void
+  /// FNT-01: the local licensed font import sheet is owned by this panel so the
+  /// existing View > Show Fonts sidebar exposes the flow without extra wiring.
+  @State private var showingFontImport = false
 
   var body: some View {
     VStack(alignment: .leading, spacing: 0) {
@@ -18,6 +21,14 @@ struct FontsPanel: View {
         } else if !model.entries.isEmpty {
           Text("\(model.entries.count)").font(.caption).foregroundStyle(.secondary)
         }
+        Button {
+          showingFontImport = true
+        } label: {
+          Image(systemName: "plus.circle")
+        }
+        .buttonStyle(.borderless)
+        .help("Import a font file you are licensed to embed")
+        .accessibilityLabel("Import licensed font file")
       }
       .frame(maxWidth: .infinity, alignment: .leading)
       .padding(.horizontal, 12)
@@ -79,9 +90,25 @@ struct FontsPanel: View {
           }
         }
       }
+      HStack {
+        Button {
+          showingFontImport = true
+        } label: {
+          Label("Import Licensed Font File…", systemImage: "plus")
+        }
+        .buttonStyle(.borderless)
+        .font(.caption)
+        .accessibilityLabel("Import licensed font file")
+        Spacer()
+      }
+      .padding(.horizontal, 12)
+      .padding(.vertical, 8)
     }
     .frame(minWidth: 260, idealWidth: 320, maxWidth: 480)
     .accessibilityElement(children: .contain)
     .accessibilityLabel("Fonts")
+    .sheet(isPresented: $showingFontImport) {
+      FontImportSheet()
+    }
   }
 }

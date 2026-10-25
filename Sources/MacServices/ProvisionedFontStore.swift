@@ -76,49 +76,64 @@ public enum ProvisionedFontStore {
 
   /// Return only byte-identical, locally accepted, subsettable TrueType fonts.
   /// This intentionally ignores fonts installed outside the app's accepted
-  /// provisioning flow and refuses changed files.
-  public static func availableFonts(in directory: URL? = nil) -> [CustomTextFont] {
+  /// provisioning flow and refuses changed files. FNT-01: faces imported from
+  /// a user-provided licensed font file (recorded individually by digest) are
+  /// merged in, so the inline editor sees one accepted set.
+  public static func availableFonts(
+    in directory: URL? = nil, importedDirectory: URL? = nil
+  ) -> [CustomTextFont] {
     let root = (directory ?? GoogleFontsInstaller.defaultFontsDirectory()).standardizedFileURL
-    let url = root.appendingPathComponent(manifestName)
-    guard let manifest = readManifest(at: url), manifest.version == 1,
-      manifest.packages.count <= 200 else { return [] }
-
     var result: [CustomTextFont] = []
     var totalBytes = 0
     var identifiers = Set<String>()
-    for package in manifest.packages.sorted(by: { $0.family.localizedStandardCompare($1.family) == .orderedAscending }) {
-      guard package.licenseAccepted,
-        !package.licenseText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-        GoogleFontsInstaller.licenseDirectories.contains(package.licenseDirectory) else { continue }
-      for record in package.files {
-        guard result.count < maximumLoadedFonts, !record.name.isEmpty,
-          URL(fileURLWithPath: record.name).lastPathComponent == record.name,
-          URL(fileURLWithPath: record.name).pathExtension.lowercased() == "ttf" else { continue }
-        let file = root.appendingPathComponent(record.name).standardizedFileURL
-        guard file.deletingLastPathComponent() == root,
-          let values = try? file.resourceValues(forKeys: [.isSymbolicLinkKey]),
-          values.isSymbolicLink != true,
-          let data = try? Data(contentsOf: file), data.count <= maximumFileBytes,
-          totalBytes + data.count <= maximumLoadedBytes,
-          digest(data) == record.sha256,
-          let inspector = try? TrueTypeInspector.inspect(data),
-          !inspector.isCFF, inspector.permitsEditableSubsetEmbedding,
-          inspector.unicodeToGlyph.values.contains(where: { $0 > 0 && $0 < inspector.glyphCount })
-        else { continue }
+    let url = root.appendingPathComponent(manifestName)
+    if let manifest = readManifest(at: url), manifest.version == 1,
+      manifest.packages.count <= 200
+    {
+      for package in manifest.packages.sorted(by: { $0.family.localizedStandardCompare($1.family) == .orderedAscending }) {
+        guard package.licenseAccepted,
+          !package.licenseText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+          GoogleFontsInstaller.licenseDirectories.contains(package.licenseDirectory) else { continue }
+        for record in package.files {
+          guard result.count < maximumLoadedFonts, !record.name.isEmpty,
+            URL(fileURLWithPath: record.name).lastPathComponent == record.name,
+            URL(fileURLWithPath: record.name).pathExtension.lowercased() == "ttf" else { continue }
+          let file = root.appendingPathComponent(record.name).standardizedFileURL
+          guard file.deletingLastPathComponent() == root,
+            let values = try? file.resourceValues(forKeys: [.isSymbolicLinkKey]),
+            values.isSymbolicLink != true,
+            let data = try? Data(contentsOf: file), data.count <= maximumFileBytes,
+            totalBytes + data.count <= maximumLoadedBytes,
+            digest(data) == record.sha256,
+            let inspector = try? TrueTypeInspector.inspect(data),
+            !inspector.isCFF, inspector.permitsEditableSubsetEmbedding,
+            inspector.unicodeToGlyph.values.contains(where: { $0 > 0 && $0 < inspector.glyphCount })
+          else { continue }
 
-        guard let native = coreTextFont(program: data, size: 12) else { continue }
-        let actualFamily = CTFontCopyFamilyName(native) as String
-        let style = CTFontCopyPostScriptName(native) as String
-        let traits = CTFontGetSymbolicTraits(native)
-        let label = "\(actualFamily) · \(style)"
-        let id = record.sha256
-        guard identifiers.insert(id).inserted else { continue }
-        totalBytes += data.count
-        result.append(.init(
-          program: data, familyName: package.family, faceName: label, identifier: id,
-          isBold: traits.contains(.boldTrait), isItalic: traits.contains(.italicTrait)))
+          guard let native = coreTextFont(program: data, size: 12) else { continue }
+          let actualFamily = CTFontCopyFamilyName(native) as String
+          let style = CTFontCopyPostScriptName(native) as String
+          let traits = CTFontGetSymbolicTraits(native)
+          let label = "\(actualFamily) · \(style)"
+          let id = record.sha256
+          guard identifiers.insert(id).inserted else { continue }
+          totalBytes += data.count
+          result.append(.init(
+            program: data, familyName: package.family, faceName: label, identifier: id,
+            isBold: traits.contains(.boldTrait), isItalic: traits.contains(.italicTrait)))
+        }
+        if result.count >= maximumLoadedFonts || totalBytes >= maximumLoadedBytes { break }
       }
-      if result.count >= maximumLoadedFonts || totalBytes >= maximumLoadedBytes { break }
+    }
+    // FNT-01: locally imported, explicitly licensed faces. Entries are capped
+    // together with the provisioned Google Fonts files above.
+    for font in ImportedFontStore.availableFonts(in: importedDirectory) {
+      guard result.count < maximumLoadedFonts,
+        totalBytes + font.program.count <= maximumLoadedBytes,
+        identifiers.insert(font.identifier).inserted
+      else { continue }
+      totalBytes += font.program.count
+      result.append(font)
     }
     return result
   }

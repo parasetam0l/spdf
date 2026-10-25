@@ -13,6 +13,11 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
   /// TXT-10: the last copied authored text box, shared across document windows
   /// so paste works between pages and between documents in this app.
   private var textBoxClipboard: TextBoxClipboard?
+  /// PAG-07: the Bates numbering batch window and model stay alive while open.
+  /// Internal (not private) so the batch window controller can live in its own
+  /// file.
+  var batesBatchModel: BatesBatchModel?
+  var batesBatchWindow: NSWindow?
 
   func applicationDidFinishLaunching(_ notification: Notification) {
     installMenus()
@@ -416,6 +421,9 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
   @objc private func removePageMark(_ sender: Any?) {
     currentDocument?.presentRemovePageMark()
   }
+  @objc private func batesNumberingBatch(_ sender: Any?) {
+    presentBatesBatch()
+  }
   @objc private func addBookmark(_ sender: Any?) {
     currentDocument?.presentAddBookmark()
   }
@@ -636,6 +644,9 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
   @objc private func saveSanitizedCopy(_ sender: Any?) {
     currentDocument?.saveSanitizedCopy()
   }
+  @objc private func showRedactionMarks(_ sender: Any?) {
+    currentDocument?.showRedactionMarks()
+  }
   @objc private func importPages(_ sender: Any?) {
     currentDocument?.importPagesFromFile()
   }
@@ -788,6 +799,10 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
     if menuItem.action == #selector(createPDFFromText) {
       return true
     }
+    if menuItem.action == #selector(batesNumberingBatch) {
+      // PAG-07: the batch works on chosen files and needs no open document.
+      return true
+    }
     if menuItem.action == #selector(documentMetadata) {
       return currentDocument?.canEditContent == true
     }
@@ -907,6 +922,8 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
       return document.canEditContent
     case #selector(copyAsRichText):
       return document.viewer?.view.currentSelection != nil
+    case #selector(showRedactionMarks):
+      return document.canShowRedactionMarksPanel
     case #selector(saveSanitizedCopy):
       return document.canEditContent
     case #selector(exportEncryptedCopy):
@@ -1192,8 +1209,11 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
       "Rotate Right", #selector(rotateRight), key: "r", modifiers: [.command, .shift], target: self,
       to: page)
     add("Crop Pages…", #selector(cropPages), target: self, to: page)
-    add("Add Page Mark…", #selector(addPageMark), target: self, to: page)
+    add("Page Marks…", #selector(addPageMark), target: self, to: page)
     add("Remove Page Mark…", #selector(removePageMark), target: self, to: page)
+    add(
+      "Bates Numbering (Batch)…", #selector(batesNumberingBatch), target: self,
+      to: page)
     page.addItem(.separator())
     add("Manage Bookmarks…", #selector(manageBookmarks), target: self, to: page)
     add("Add Bookmark…", #selector(addBookmark), target: self, to: page)
@@ -1284,6 +1304,10 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
     add("Unlock Document…", #selector(unlockDocument), target: self, to: security)
     add("Lock Document", #selector(lockDocument), target: self, to: security)
     security.addItem(.separator())
+    // RED-01/RED-02: pending-mark review panel and search-based redaction.
+    add(
+      "Redaction Marks…", #selector(showRedactionMarks), key: "r",
+      modifiers: [.command, .option, .shift], target: self, to: security)
     add("Save Sanitized Copy…", #selector(saveSanitizedCopy), target: self, to: security)
     add("Export Encrypted Copy…", #selector(exportEncryptedCopy), target: self, to: security)
     add("Sign Document…", #selector(signDocument), target: self, to: security)
