@@ -587,8 +587,10 @@
         let lines = canvas.pageLines()
         let style = viewer.pageTextStyle
         if CommandLine.arguments.contains("--expect-collision-refusal") {
+          let draftBefore = canvas.textView.string
           let committed = canvas.commit()
           let refusal = viewer.pageTextFormattingIssue ?? ""
+          let draftPreserved = canvas.textView.string == draftBefore
           if committed {
             let edited = try document.editSession.bytesForSave()
             let undone = document.undoEdit()
@@ -615,6 +617,9 @@
 
           let refusalLeftGraphUnchanged = try document.editSession.bytesForSave() == original
           let isOverlapRefusal = refusal.localizedCaseInsensitiveContains("overlap another text block")
+          let remainsCorrectable = viewer.pageTextOverflow?.cause == .collision
+            && viewer.pageTextFitOverflow != nil && viewer.pageTextWidenOverflowBox != nil
+            && draftPreserved
           let remainedEditable = viewer.isEditingPageText && viewer.hasPendingPageTextChanges
           let refusedGraph = document.editSession.currentGraph ?? graph
           let refusedRuns = try PageTextEditing.sourceRuns(pageID: pageID, in: refusedGraph)
@@ -626,7 +631,7 @@
             && !document.isDocumentEdited
           let sourceUnchanged = try Data(contentsOf: source) == sourceBytes
           let passed = isOverlapRefusal && refusalLeftGraphUnchanged
-            && remainedEditable && refusedNeighborCheck.unchanged
+            && remainsCorrectable && remainedEditable && refusedNeighborCheck.unchanged
             && cancelLeftGraphUnchanged && cleanAfterCancel && sourceUnchanged
           let record: [String: Any] = [
             "status": passed ? "passed" : "failed",
@@ -636,6 +641,8 @@
             "lineCount": lines.count,
             "refusal": refusal,
             "refusedAsOverlap": isOverlapRefusal,
+            "overflowCorrectionAvailable": remainsCorrectable,
+            "draftTextPreserved": draftPreserved,
             "graphUnchangedOnRefusal": refusalLeftGraphUnchanged,
             "draftStayedEditableUntilCancel": remainedEditable,
             "neighborUnchanged": refusedNeighborCheck.unchanged,
@@ -752,12 +759,36 @@
         // recovery. No document transaction or partial save may escape it.
         viewer.pageTextPositionApplier?(canvas.sourceRect.minX, canvas.sourceRect.minY - (clippingRect[3] - clippingRect[1]) - 20)
         guard viewer.pageTextFormattingIssue != nil, !canvas.commit(),
-          try document.editSession.bytesForSave() == original else {
+          try document.editSession.bytesForSave() == original,
+          viewer.pageTextOverflow?.cause == .clipping,
+          viewer.pageTextMoveOverflowInside != nil,
+          viewer.pageTextFitOverflow != nil else {
           throw PDFError(.malformed, "Clipped text escaped the pending editor or changed the graph")
         }
-        viewer.pageTextPositionApplier?(canvas.sourceRect.minX, canvas.sourceRect.minY)
-        guard viewer.pageTextFormattingIssue == nil else {
-          throw PDFError(.malformed, "Returning text inside its boundary did not clear overflow")
+        guard viewer.pageTextMoveOverflowInside?() == true,
+          viewer.pageTextFormattingIssue == nil, viewer.pageTextOverflow == nil else {
+          throw PDFError(.malformed, "Move-inside correction did not clear clipping overflow")
+        }
+        // Fit text is exercised against a real clip: enlarge every run, then
+        // let the correction shrink each run proportionally without losing
+        // any characters. Restore the source size before the edit continues.
+        let fitDraft = canvas.textView.string
+        let fitSize = viewer.pageTextStyle.fontSize
+        let fullRange = NSRange(location: 0, length: (fitDraft as NSString).length)
+        canvas.textView.setSelectedRange(fullRange)
+        viewer.pageTextFormattingApplier?(.size(fitSize * 4))
+        guard viewer.pageTextOverflow?.cause == .clipping else {
+          throw PDFError(.malformed, "Enlarged clipped text did not report overflow")
+        }
+        guard viewer.pageTextFitOverflow?() == true,
+          viewer.pageTextOverflow == nil, viewer.pageTextFormattingIssue == nil,
+          canvas.textView.string == fitDraft else {
+          throw PDFError(.malformed, "Fit-text correction failed or lost the draft")
+        }
+        canvas.textView.setSelectedRange(fullRange)
+        viewer.pageTextFormattingApplier?(.size(fitSize))
+        guard viewer.pageTextOverflow == nil, viewer.pageTextFormattingIssue == nil else {
+          throw PDFError(.malformed, "Restoring the fitted draft reintroduced overflow")
         }
       }
       if matching != nil || clippingRect != nil {

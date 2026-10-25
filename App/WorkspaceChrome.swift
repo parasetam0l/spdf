@@ -160,7 +160,9 @@ struct WorkspaceTextInspector: View {
                   colorMenu
                 }
               }
-              if let issue = viewer.pageTextFormattingIssue {
+              if viewer.pageTextOverflow != nil {
+                WorkspacePageTextOverflowView(viewer: viewer)
+              } else if let issue = viewer.pageTextFormattingIssue {
                 Text(issue).font(.caption).foregroundStyle(.red).fixedSize(horizontal: false, vertical: true)
               }
               if viewer.pageTextWidthApplier != nil {
@@ -448,6 +450,60 @@ struct WorkspaceParagraphControls: View {
     guard style.isValid else { return }
     viewer.pageTextParagraphStyle = style
     viewer.pageTextParagraphStyleApplier?(style)
+  }
+}
+
+/// TXT-06: explain why the draft cannot be committed and offer only the
+/// corrections that preserve the draft and any source clipping boundary.
+struct WorkspacePageTextOverflowView: View {
+  @ObservedObject var viewer: PDFViewingSession
+
+  var body: some View {
+    if let overflow = viewer.pageTextOverflow {
+      VStack(alignment: .leading, spacing: 6) {
+        HStack(spacing: 5) {
+          Image(systemName: "exclamationmark.triangle.fill")
+          Text(overflow.cause.title).font(.caption.weight(.semibold))
+        }
+        .foregroundStyle(.red)
+        Text(overflow.message)
+          .font(.caption)
+          .fixedSize(horizontal: false, vertical: true)
+        if overflow.canFitText || overflow.canWidenBox || overflow.canMoveInsideBoundary {
+          HStack(spacing: 6) {
+            if overflow.canFitText, let fit = viewer.pageTextFitOverflow {
+              Button("Fit text") { _ = fit() }
+                .buttonStyle(.bordered)
+                .help("Reduce every text run proportionally until the draft fits. All characters stay in the draft.")
+                .accessibilityLabel("Fit overflowing text")
+            }
+            if overflow.canWidenBox, let widen = viewer.pageTextWidenOverflowBox {
+              Button("Widen box") { _ = widen() }
+                .buttonStyle(.bordered)
+                .help("Increase the wrapping width, bounded by the source clipping area.")
+                .accessibilityLabel("Widen overflowing text box")
+            }
+            if overflow.canMoveInsideBoundary, let move = viewer.pageTextMoveOverflowInside {
+              Button("Move inside") { _ = move() }
+                .buttonStyle(.bordered)
+                .help("Shift the paragraph until its box lies inside the dashed clipping boundary.")
+                .accessibilityLabel("Move text inside boundary")
+            }
+          }
+        } else {
+          Text(overflow.cause == .taggedLayout
+            ? "The draft remains open. Tagged layout cannot be resized automatically; Cancel discards the draft."
+            : "The draft remains open. This layout cannot be corrected automatically; Cancel discards the draft.")
+            .font(.system(size: 10)).foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+        }
+      }
+      .padding(8)
+      .background(Color.red.opacity(0.07), in: RoundedRectangle(cornerRadius: 6))
+      .overlay(
+        RoundedRectangle(cornerRadius: 6)
+          .strokeBorder(Color.red.opacity(0.35), lineWidth: 1))
+    }
   }
 }
 

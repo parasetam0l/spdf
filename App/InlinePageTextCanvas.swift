@@ -225,6 +225,7 @@ final class InlinePageTextCanvas: NSView, NSTextViewDelegate {
   private var isTyping = false
   private var bodyDragStart = NSPoint.zero
   private var isLayingOut = false
+  private var isApplyingOverflowCorrection = false
   private var observations = Set<AnyCancellable>()
   var onFinish: ((Bool) -> Void)?
 
@@ -370,6 +371,15 @@ final class InlinePageTextCanvas: NSView, NSTextViewDelegate {
       self.viewer?.pageTextFormattingIssue = self.formatting?.apply(change, isTyping: self.isTyping)
       self.updateClippingIssue()
     }
+    viewer.pageTextFitOverflow = formatting == nil ? nil : { [weak self] in
+      self?.fitOverflowText() ?? false
+    }
+    viewer.pageTextWidenOverflowBox = formatting == nil ? nil : { [weak self] in
+      self?.widenOverflowBox() ?? false
+    }
+    viewer.pageTextMoveOverflowInside = sourceTarget?.paragraph?.clippingRect == nil ? nil : {
+      [weak self] in self?.moveOverflowInsideBoundary() ?? false
+    }
     viewer.isEditingPageText = true
     viewer.isTypingPageText = isTyping
     viewer.pageTextBeginTyping = { [weak self] in self?.beginTyping() }
@@ -444,6 +454,7 @@ final class InlinePageTextCanvas: NSView, NSTextViewDelegate {
         }.store(in: &observations)
     }
     synchronizeGeometry()
+    updateClippingIssue()
     publishFormattingSelection()
   }
   required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
@@ -570,6 +581,7 @@ final class InlinePageTextCanvas: NSView, NSTextViewDelegate {
   }
 
   func applyStyle(_ requested: PageTextStyle) {
+    clearNonClippingOverflow()
     guard requested.fontSize.isFinite, (2...144).contains(requested.fontSize),
       requested.color.count == 3,
       requested.color.allSatisfy({ $0.isFinite && (0...1).contains($0) })
@@ -590,6 +602,7 @@ final class InlinePageTextCanvas: NSView, NSTextViewDelegate {
   }
 
   func setTextWidth(_ width: Double) {
+    clearNonClippingOverflow()
     guard width.isFinite, (24...2_000).contains(width) else { return }
     wrapsText = true
     textView.acceptsLineBreaks = true
@@ -714,6 +727,7 @@ final class InlinePageTextCanvas: NSView, NSTextViewDelegate {
   }
 
   private func applyParagraphStyle(_ paragraph: PageTextParagraphStyle) {
+    clearNonClippingOverflow()
     guard paragraph.isValid, let viewer else { return }
     viewer.pageTextParagraphStyle = paragraph
     synchronizeGeometry()
@@ -721,6 +735,7 @@ final class InlinePageTextCanvas: NSView, NSTextViewDelegate {
   }
 
   func textDidChange(_ notification: Notification) {
+    clearNonClippingOverflow()
     synchronizeGeometry()
     publishPendingChange()
     publishFormattingSelection()
@@ -741,6 +756,7 @@ final class InlinePageTextCanvas: NSView, NSTextViewDelegate {
   }
 
   private func formattingChanged() {
+    clearNonClippingOverflow()
     synchronizeGeometry()
     publishPendingChange()
     publishFormattingSelection()
@@ -775,13 +791,199 @@ final class InlinePageTextCanvas: NSView, NSTextViewDelegate {
     viewer.canChangePageTextTraits = !selection.usesSourceFont
   }
 
+  /// TXT-06: scale every run down until the draft fits the clip or clears a
+  /// collision. The text, mixed fonts and all characters stay in place.
+  @discardableResult
+  func fitOverflowText() -> Bool {
+    guard let formatting, let viewer else { return false }
+    guard viewer.pageTextOverflow?.canFitText != false else { return false }
+    updateClippingIssue()
+    let collision = viewer.pageTextOverflow?.cause == .collision
+    isApplyingOverflowCorrection = true
+    defer { isApplyingOverflowCorrection = false }
+    var changed = false
+    for _ in 0..<32 {
+      let clipped = clippingLayoutIssue != nil
+      let collisionIssue = collision ? currentDraftIssue() : nil
+      if !clipped, collisionIssue == nil {
+        if changed || viewer.pageTextOverflow != nil {
+          viewer.pageTextOverflow = nil
+          viewer.pageTextFormattingIssue = nil
+          publishPendingChange()
+        }
+        return changed
+      }
+      let sizes = formatting.fragments().map(\.format.size)
+      guard let largest = sizes.max(), largest > 2.01 else { break }
+      let factor = max(0.9, 2.0 / largest)
+      guard formatting.scaleFontSizes(by: factor) == nil else { return false }
+      changed = true
+      synchronizeGeometry()
+      updateClippingIssue()
+    }
+    if clippingLayoutIssue == nil, !collision || currentDraftIssue() == nil {
+      viewer.pageTextOverflow = nil
+      viewer.pageTextFormattingIssue = nil
+      publishPendingChange()
+      return changed
+    }
+    viewer.pageTextFormattingIssue =
+      "Text still does not fit at the minimum supported size. Widen the box or move it."
+    publishPendingChange()
+    return false
+  }
+
+  /// TXT-06: grow the authored wrapping width. A source clip is a hard ceiling,
+  /// so this can never move ink outside the highlighted boundary.
+  @discardableResult
+  func widenOverflowBox() -> Bool {
+    guard wrapsText, let viewer else { return false }
+    let clip = sourceTarget?.paragraph?.clippingRect
+    let baseX = sourceRect.minX + dx
+    let maximum: Double
+    if let clip, clip.count == 4, clip.allSatisfy(\.isFinite), clip[2] > clip[0] {
+      maximum = min(2_000, max(24, clip[2] - baseX))
+    } else {
+      maximum = 2_000
+    }
+    let step = max(18, min(120, textWidth * 0.18))
+    let next = min(maximum, textWidth + step)
+    guard next > textWidth + 0.01 else {
+      viewer.pageTextFormattingIssue =
+        "There is no room to widen inside the boundary. Fit the text or move it inside."
+      publishPendingChange()
+      return false
+    }
+    let priorCause = viewer.pageTextOverflow?.cause
+    isApplyingOverflowCorrection = true
+    setTextWidth(next)
+    isApplyingOverflowCorrection = false
+    if clippingLayoutIssue == nil, priorCause == .collision {
+      refreshCollisionOverflow()
+    }
+    if clippingLayoutIssue == nil, viewer.pageTextOverflow?.cause == .clipping {
+      viewer.pageTextOverflow = nil
+      viewer.pageTextFormattingIssue = nil
+    }
+    return true
+  }
+
+  /// TXT-06: shift a clipped draft back inside its source clip rectangle. This
+  /// is deliberately a whole-box correction; it cannot shrink a box that is
+  /// wider/taller than the clip, which Fit text handles instead.
+  @discardableResult
+  func moveOverflowInsideBoundary() -> Bool {
+    guard let viewer, let clip = sourceTarget?.paragraph?.clippingRect,
+      clip.count == 4, clip.allSatisfy(\.isFinite), clip[2] > clip[0], clip[3] > clip[1],
+      let page = viewer.view.document?.page(at: pageIndex)
+    else { return false }
+    // The authored source box is the safe fallback for an editor that was
+    // moved outside its clip: restoring it is an exact, text-preserving move.
+    if sourceRect.minX >= clip[0] - 0.01, sourceRect.maxX <= clip[2] + 0.01,
+      sourceRect.minY >= clip[1] - 0.01, sourceRect.maxY <= clip[3] + 0.01
+    {
+      isApplyingOverflowCorrection = true
+      dx = 0
+      dy = 0
+      synchronizeGeometry()
+      isApplyingOverflowCorrection = false
+      publishPendingChange()
+      if clippingLayoutIssue == nil { return true }
+    }
+    let frame = textView.frame
+    func pagePoint(_ point: NSPoint) -> NSPoint {
+      viewer.view.convert(convert(point, to: viewer.view), to: page)
+    }
+    let corners = [
+      pagePoint(NSPoint(x: frame.minX, y: frame.minY)),
+      pagePoint(NSPoint(x: frame.maxX, y: frame.minY)),
+      pagePoint(NSPoint(x: frame.minX, y: frame.maxY)),
+      pagePoint(NSPoint(x: frame.maxX, y: frame.maxY)),
+    ]
+    let minX = Double(corners.map(\.x).min() ?? CGFloat(clip[0]))
+    let maxX = Double(corners.map(\.x).max() ?? CGFloat(clip[2]))
+    let minY = Double(corners.map(\.y).min() ?? CGFloat(clip[1]))
+    let maxY = Double(corners.map(\.y).max() ?? CGFloat(clip[3]))
+    var shiftX = 0.0
+    var shiftY = 0.0
+    if minX < clip[0] { shiftX = clip[0] - minX }
+    else if maxX > clip[2] { shiftX = clip[2] - maxX }
+    if minY < clip[1] { shiftY = clip[1] - minY }
+    else if maxY > clip[3] { shiftY = clip[3] - maxY }
+    guard abs(shiftX) + abs(shiftY) > 0.01 else {
+      viewer.pageTextFormattingIssue =
+        "The box is already inside the boundary or is larger than it. Fit the text instead."
+      publishPendingChange()
+      return false
+    }
+    let priorCause = viewer.pageTextOverflow?.cause
+    isApplyingOverflowCorrection = true
+    dx += shiftX
+    dy += shiftY
+    synchronizeGeometry()
+    isApplyingOverflowCorrection = false
+    publishPendingChange()
+    if clippingLayoutIssue == nil, priorCause == .collision {
+      refreshCollisionOverflow()
+    }
+    return true
+  }
+
+  private func currentDraftIssue() -> String? {
+    guard let viewer, let target = sourceTarget, target.paragraph != nil else { return nil }
+    return viewer.pageTextDraftIssue?(target, pageLines(), pageBox(), style)
+  }
+
+  /// Recheck a collision after a width or position correction. Clipping is
+  /// already refreshed by `updateClippingIssue`; this keeps the correction
+  /// card and its actions visible while the draft still overlaps.
+  private func refreshCollisionOverflow() {
+    guard let viewer, let issue = currentDraftIssue() else {
+      viewer?.pageTextOverflow = nil
+      viewer?.pageTextFormattingIssue = nil
+      return
+    }
+    viewer.pageTextOverflow = PageTextOverflowCorrection(
+      cause: .collision, message: issue, canFitText: true,
+      canWidenBox: true, canMoveInsideBoundary: false)
+    viewer.pageTextFormattingIssue = issue
+  }
+
+  /// A new edit makes a collision/tagged message stale. Clipping is
+  /// recalculated by `updateClippingIssue` after every layout change.
+  private func clearNonClippingOverflow() {
+    guard !isApplyingOverflowCorrection else { return }
+    guard let viewer, let overflow = viewer.pageTextOverflow,
+      overflow.cause != .clipping else { return }
+    viewer.pageTextOverflow = nil
+    if viewer.pageTextFormattingIssue == overflow.message {
+      viewer.pageTextFormattingIssue = nil
+    }
+  }
+
   private func updateClippingIssue() {
-    guard let paragraph = sourceTarget?.paragraph, paragraph.clippingRect != nil else { return }
+    guard let viewer else { return }
+    guard let paragraph = sourceTarget?.paragraph, let clippingRect = paragraph.clippingRect else {
+      clippingLayoutIssue = nil
+      if viewer.pageTextOverflow?.cause == .clipping {
+        viewer.pageTextOverflow = nil
+        viewer.pageTextFormattingIssue = nil
+      }
+      needsDisplay = true
+      return
+    }
     let prior = clippingLayoutIssue
     clippingLayoutIssue = NativeParagraphEditing.clippingIssue(lines: pageLines(),
-      clippingRect: paragraph.clippingRect, profiles: paragraph.fontProfiles, nativeFonts: clippingFonts)
-    if clippingLayoutIssue != nil || viewer?.pageTextFormattingIssue == prior {
-      viewer?.pageTextFormattingIssue = clippingLayoutIssue
+      clippingRect: clippingRect, profiles: paragraph.fontProfiles, nativeFonts: clippingFonts)
+    if let issue = clippingLayoutIssue {
+      viewer.pageTextFormattingIssue = issue
+      viewer.pageTextOverflow = PageTextOverflowCorrection(
+        cause: .clipping, message: issue, canFitText: true, canWidenBox: true,
+        canMoveInsideBoundary: clippingRect.count == 4
+          && clippingRect[2] > clippingRect[0] && clippingRect[3] > clippingRect[1])
+    } else if viewer.pageTextOverflow?.cause == .clipping {
+      viewer.pageTextOverflow = nil
+      if viewer.pageTextFormattingIssue == prior { viewer.pageTextFormattingIssue = nil }
     }
     needsDisplay = true
   }
@@ -798,6 +1000,7 @@ final class InlinePageTextCanvas: NSView, NSTextViewDelegate {
   }
 
   func move(byWindowDelta delta: NSPoint, finished: Bool) {
+    clearNonClippingOverflow()
     guard let viewer, let page = viewer.view.document?.page(at: pageIndex) else { return }
     if dragBase == nil { dragBase = (dx, dy) }
     isDragging = !finished
@@ -842,6 +1045,7 @@ final class InlinePageTextCanvas: NSView, NSTextViewDelegate {
         swapRenderer(to: hidden)
       }
       focusText()
+      needsDisplay = true
     }
     return accepted
   }
@@ -872,6 +1076,10 @@ final class InlinePageTextCanvas: NSView, NSTextViewDelegate {
     viewer?.pageTextStyleApplier = nil
     viewer?.pageTextWidthApplier = nil
     viewer?.pageTextFormattingApplier = nil
+    viewer?.pageTextFitOverflow = nil
+    viewer?.pageTextWidenOverflowBox = nil
+    viewer?.pageTextMoveOverflowInside = nil
+    viewer?.pageTextOverflow = nil
     viewer?.pageTextMixedFormatting = []
     viewer?.pageTextAvailableSourceFonts = []
     viewer?.pageTextAvailableLicensedFonts = []
@@ -890,12 +1098,14 @@ final class InlinePageTextCanvas: NSView, NSTextViewDelegate {
       let area = viewer.view.convert(NSRect(x: rect[0], y: rect[1], width: rect[2] - rect[0],
         height: rect[3] - rect[1]), from: page)
       let boundary = NSBezierPath(rect: convert(area, from: viewer.view))
-      (clippingLayoutIssue == nil ? NSColor.controlAccentColor : NSColor.systemRed).setStroke()
+      ((clippingLayoutIssue != nil || viewer.pageTextOverflow != nil)
+        ? NSColor.systemRed : NSColor.controlAccentColor).setStroke()
       boundary.lineWidth = 1
       boundary.setLineDash([4, 3], count: 2, phase: 0)
       boundary.stroke()
     }
-    NSColor.controlAccentColor.withAlphaComponent(0.6).setStroke()
+    (viewer?.pageTextOverflow != nil
+      ? NSColor.systemRed : NSColor.controlAccentColor.withAlphaComponent(0.6)).setStroke()
     var box = textView.frame
     if !wrapsText, let container = textView.textContainer, let manager = textView.layoutManager {
       box.size.width = max(18, min(box.width, manager.usedRect(for: container).width + 4))

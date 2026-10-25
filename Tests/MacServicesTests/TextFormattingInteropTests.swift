@@ -210,6 +210,50 @@ struct TextFormattingInteropTests {
     #expect(plan.fragments.map { $0.format.sourceFont?.resource } == [tiny.resource])
   }
 
+  @Test func overflowCorrectionClassifiesOnlyCorrectableFailures() {
+    let collision = PageTextOverflowCorrection.classify(error: PDFError(
+      .unsupported, "This edit would overlap another text block. Shorten the text"))
+    #expect(collision?.cause == .collision)
+    #expect(collision?.canFitText == true)
+    #expect(collision?.canWidenBox == true)
+    #expect(collision?.canMoveInsideBoundary == false)
+
+    let tagged = PageTextOverflowCorrection.classify(error: PDFError(
+      .unsupported, "This tagged paragraph needs a supported same-style line layout."))
+    #expect(tagged?.cause == .taggedLayout)
+    #expect(tagged?.canFitText == false)
+    #expect(tagged?.canWidenBox == false)
+    #expect(tagged?.canMoveInsideBoundary == false)
+
+    #expect(PageTextOverflowCorrection.classify(error: PDFError(
+      .malformed, "Text line does not match its box.")) == nil)
+  }
+
+  @Test @MainActor func overflowFitScalesMixedRunsAndUndoesAsOneDraftEdit() throws {
+    let first = PageTextFormat(size: 12, color: [0.8, 0.1, 0.2])
+    var second = PageTextFormat(font: .times, size: 20, color: [0.1, 0.2, 0.8])
+    second.characterSpacing = 0.5
+    let fragments = [
+      PageTextFragment(text: "Mixed ", format: first),
+      PageTextFragment(text: "heading", format: second),
+    ]
+    let view = FormatTestTextView(frame: .zero)
+    let formatting = NativeTextFormatting(view: view, fragments: fragments, initial: first)
+    formatting.render(scale: 1, minimumLineSpacing: 24)
+    #expect(formatting.scaleFontSizes(by: 0.5) == nil)
+    let scaled = formatting.fragments()
+    #expect(scaled.map(\.text).joined() == "Mixed heading")
+    #expect(scaled.map(\.format.size) == [6, 10])
+    #expect(scaled[0].format.color == first.color)
+    #expect(scaled[1].format.color == second.color)
+    #expect(scaled[1].format.font == .times)
+    #expect(abs(scaled[1].format.characterSpacing - 0.5) < 0.001)
+    #expect(view.history.canUndo)
+    view.history.undo()
+    #expect(formatting.fragments().map(\.format.size) == [12, 20])
+    #expect(formatting.fragments().map(\.text).joined() == "Mixed heading")
+  }
+
   @Test func paragraphControlsValidateAndMapToTextKit() {
     let style = PageTextParagraphStyle(
       alignment: .justified, leading: 18, spacingBefore: 4, spacingAfter: 6,

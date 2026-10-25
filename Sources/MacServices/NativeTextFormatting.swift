@@ -476,6 +476,48 @@ public final class NativeTextFormatting {
     return nil
   }
 
+  /// TXT-06: shrink every run by the same factor for an overflow correction.
+  /// Mixed source fonts and their relative sizes stay intact; only each run's
+  /// point size changes. The edit is one native typing Undo step.
+  @discardableResult
+  public func scaleFontSizes(by factor: Double) -> String? {
+    guard factor.isFinite, factor > 0, factor <= 1 else {
+      return "The text-size correction must be between 0 and 1."
+    }
+    guard let view, let storage = view.textStorage else { return nil }
+    if view.hasMarkedText() { return "Finish composing text before correcting overflow." }
+    let full = NSRange(location: 0, length: storage.length)
+    guard full.length > 0 else { return "The text box is empty." }
+    var changes: [(range: NSRange, format: PageTextFormat)] = []
+    storage.enumerateAttributes(in: full, options: []) { attributes, range, _ in
+      var format = Self.format(attributes, fallback: fallback)
+      format.size = max(2, min(144, (format.size * factor * 1_000).rounded() / 1_000))
+      guard format.isValid else { return }
+      changes.append((range, format))
+    }
+    guard !changes.isEmpty else { return "The text has no supported format to resize." }
+    let selection = view.selectedRange()
+    view.breakUndoCoalescing()
+    let snapshot = NSAttributedString(attributedString: storage)
+    let typing = view.typingAttributes
+    view.undoManager?.beginUndoGrouping()
+    registerUndo(snapshot, selection: selection, typing: typing)
+    storage.beginEditing()
+    for change in changes {
+      storage.addAttributes(attributes(change.format, scale: scale), range: change.range)
+    }
+    storage.endEditing()
+    var typingFormat = Self.format(typing, fallback: fallback)
+    typingFormat.size = max(2, min(144, (typingFormat.size * factor * 1_000).rounded() / 1_000))
+    view.typingAttributes = attributes(typingFormat, scale: scale)
+    view.undoManager?.setActionName("Reduce Text Size")
+    view.undoManager?.endUndoGrouping()
+    view.setSelectedRange(selection)
+    view.didChangeText()
+    onChange?()
+    return nil
+  }
+
   private func registerUndo(
     _ snapshot: NSAttributedString, selection: NSRange,
     typing: [NSAttributedString.Key: Any]

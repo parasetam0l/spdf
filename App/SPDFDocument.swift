@@ -495,6 +495,9 @@ final class SPDFDocument: NSDocument {
     viewer.onTextBlockCommit = { [weak self] target, text, style, dx, dy, lines, box in
       self?.commitTextBlock(target, text: text, style: style, dx: dx, dy: dy, lines: lines, box: box) ?? false
     }
+    viewer.pageTextDraftIssue = { [weak self] target, lines, box, style in
+      self?.paragraphDraftIssue(target, lines: lines, box: box, style: style)
+    }
     viewer.onNewTextBlockCommit = { [weak self] pageIndex, rect, text, style, lines, box in
       guard let self, self.requireContentEditing(for: "Add Text"),
         self.editSession.pageIDs.indices.contains(pageIndex)
@@ -5339,6 +5342,38 @@ final class SPDFDocument: NSDocument {
     }
   }
 
+  /// Build the same rewrite the inline editor commits, so a correction can
+  /// validate a draft without mutating the document. The current graph is the
+  /// authority; this never authorizes a later commit on its own.
+  private func paragraphRewriteCommand(
+    _ target: PageTextTarget, lines: [PageTextLine], box: PageTextBox?, style: PageTextStyle
+  ) -> RewritePageTextCommand? {
+    guard let paragraph = target.paragraph,
+      editSession.pageIDs.indices.contains(target.pageIndex)
+    else { return nil }
+    return RewritePageTextCommand(
+      pageID: editSession.pageIDs[target.pageIndex], originalText: paragraph.originalText,
+      lines: lines, fontSize: style.fontSize, color: style.color,
+      standardFontAdvances: paragraph.standardFontAdvances,
+      sourceRunOutputCounts: paragraph.sourceRunOutputCounts, box: box)
+  }
+
+  /// TXT-06: validate the still-open draft for Fit text. No transaction or
+  /// preview is created here, and a tagged-layout refusal remains explicit.
+  private func paragraphDraftIssue(
+    _ target: PageTextTarget, lines: [PageTextLine], box: PageTextBox, style: PageTextStyle
+  ) -> String? {
+    guard let graph = editSession.currentGraph,
+      let command = paragraphRewriteCommand(target, lines: lines, box: box, style: style)
+    else { return nil }
+    do {
+      try command.validate(in: graph)
+      return nil
+    } catch {
+      return error.localizedDescription
+    }
+  }
+
   @discardableResult
   func commitTextBlock(
     _ target: PageTextTarget, text: String, style: PageTextStyle,
@@ -5348,34 +5383,25 @@ final class SPDFDocument: NSDocument {
     guard editSession.pageIDs.indices.contains(target.pageIndex)
     else { return false }
     let page = editSession.pageIDs[target.pageIndex]
-    if let paragraph = target.paragraph {
+    if target.paragraph != nil {
       guard let lines else { return false }
       // The inspector follows the selected characters or caret. That style
       // may differ from the first span without any actual edit to the box.
       // Canonical span/width changes are tracked by the native formatter.
       if text == target.text, dx == 0, dy == 0,
         viewer?.hasPendingPageTextChanges != true { return true }
+      guard let command = paragraphRewriteCommand(
+        target, lines: lines, box: box, style: style) else { return false }
       do {
-        try editSession.apply(PDFTransaction([
-          RewritePageTextCommand(
-            pageID: page, originalText: paragraph.originalText, lines: lines,
-            fontSize: style.fontSize, color: style.color,
-            standardFontAdvances: paragraph.standardFontAdvances,
-            sourceRunOutputCounts: paragraph.sourceRunOutputCounts, box: box)
-        ]))
+        try editSession.apply(PDFTransaction([command]))
         noteUserEdit()
         refreshViewer(preservingPage: target.pageIndex + 1)
         return true
       } catch {
-#if DEBUG
-        if CommandLine.arguments.contains("--test-corpus-paragraphs") {
-          viewer?.pageTextFormattingIssue = String(describing: error)
-        } else {
-          presentError(error)
-        }
-#else
-        presentError(error)
-#endif
+        // TXT-06: keep the draft open and show a correctable overflow instead
+        // of a modal alert. Tagged/unsupported refusals stay explicit.
+        viewer?.pageTextFormattingIssue = error.localizedDescription
+        viewer?.pageTextOverflow = PageTextOverflowCorrection.classify(error: error)
         return false
       }
     }

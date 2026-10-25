@@ -275,6 +275,17 @@ public final class PDFViewingSession: NSObject, ObservableObject, PDFViewDelegat
   @Published public var pageTextMixedFormatting = Set<String>()
   @Published public var pageTextSelectionScope = "Whole text box"
   @Published public var pageTextFormattingIssue: String?
+  /// TXT-06: non-mutating overflow/collision correction offered while the
+  /// inline draft remains open. The issue string above mirrors the message for
+  /// existing status surfaces and smoke tests.
+  @Published public var pageTextOverflow: PageTextOverflowCorrection?
+  public var pageTextFitOverflow: (() -> Bool)?
+  public var pageTextWidenOverflowBox: (() -> Bool)?
+  public var pageTextMoveOverflowInside: (() -> Bool)?
+  /// Validates the current draft without committing it, so repeated fit or
+  /// resize corrections can tell whether a collision has cleared.
+  public var pageTextDraftIssue:
+    ((PageTextTarget, [PageTextLine], PageTextBox, PageTextStyle) -> String?)?
   public var pageTextFormattingApplier: ((PageTextFormatChange) -> Void)?
   @Published public var canChangePageTextTraits = true
   public var pageTextBeginTyping: (() -> Void)?
@@ -511,6 +522,11 @@ public final class PDFViewingSession: NSObject, ObservableObject, PDFViewDelegat
     pageTextWidthApplier = nil
     pageTextStyleApplier = nil
     pageTextFormattingApplier = nil
+    pageTextOverflow = nil
+    pageTextFitOverflow = nil
+    pageTextWidenOverflowBox = nil
+    pageTextMoveOverflowInside = nil
+    pageTextDraftIssue = nil
     canFormatPageText = false
     pageTextMixedFormatting = []
     pageTextAvailableSourceFonts = []
