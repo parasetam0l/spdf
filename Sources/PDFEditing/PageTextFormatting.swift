@@ -161,6 +161,13 @@ public struct PageTextBox: Sendable, Equatable {
       && abs(x) <= 1_000_000 && abs(firstBaseline) <= 1_000_000
       && (24...2_000).contains(width) && lineSpacing > 0 && lineSpacing <= 1_000
   }
+
+  /// TXT-03: paragraph alignment and indents place a line inside, or at a
+  /// bounded offset from, the authored paragraph box. The box remains the
+  /// reflow/wrapping reference; it is not a single-line x coordinate.
+  func allowsLineX(_ value: Double) -> Bool {
+    value.isFinite && value >= x - 0.005 && value <= x + width + 0.005
+  }
 }
 
 /// Authoring metadata retains geometry, paragraph breaks and their nonpainting
@@ -364,10 +371,8 @@ enum PageTextLineWriter {
       else {
         throw PDFError(.malformed, "Invalid text line position")
       }
-      if let box {
-        guard abs(line.x - box.x) < 0.005 else {
-          throw PDFError(.malformed, "Text line does not match its box")
-        }
+      if let box, !box.allowsLineX(line.x) {
+        throw PDFError(.malformed, "Text line does not match its box")
       }
       if !line.segments.isEmpty {
         guard line.segments.map(\.text).joined() == line.text,
@@ -655,7 +660,7 @@ public enum AuthoredPageTextBoxes {
           case .integer(let count) = fields[0], count >= 0, count <= 4_000,
           case .boolean(let hard) = fields[1], let lineX = number(fields[2]),
           let lineY = number(fields[3]), lineX.isFinite, lineY.isFinite,
-          abs(lineX - box.x) < 0.005, abs(lineY) <= 1_000_000,
+          box.allowsLineX(lineX), abs(lineY) <= 1_000_000,
           cursor + Int(count) <= indices.count
         else {
           valid = false

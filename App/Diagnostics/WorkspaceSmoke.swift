@@ -1628,6 +1628,24 @@
         !viewer.isTypingPageText,
         try document.editSession.bytesForSave() == paragraphBaseline
       else { throw PDFError(.malformed, "A paragraph was not selected as one non-mutating object") }
+      let styleBefore = paragraphCanvas.pageLines()
+      let paragraphStyle = PageTextParagraphStyle(
+        alignment: .center, leading: 22, spacingBefore: 5, spacingAfter: 7,
+        leftIndent: 12, rightIndent: 10, firstLineIndent: 8)
+      viewer.pageTextParagraphStyleApplier?(paragraphStyle)
+      let styleAfter = paragraphCanvas.pageLines()
+      guard viewer.pageTextParagraphStyle == paragraphStyle,
+        styleAfter.dropFirst().first?.baseline != styleBefore.dropFirst().first?.baseline,
+        styleAfter.first?.x != styleBefore.first?.x,
+        viewer.hasPendingPageTextChanges
+      else {
+        throw PDFError(
+          .malformed,
+          "Paragraph alignment/leading/indent controls did not preview live "
+            + "(style=\(viewer.pageTextParagraphStyle), before=\(styleBefore.first?.x ?? -1)/\(styleBefore.first?.baseline ?? -1), "
+            + "after=\(styleAfter.first?.x ?? -1)/\(styleAfter.first?.baseline ?? -1), "
+            + "pending=\(viewer.hasPendingPageTextChanges))")
+      }
       paragraphCanvas.beginTyping()
       let replacement = "A longer paragraph is edited directly on the page. Native wrapping follows the width of the text box, and the saved document keeps exactly the line positions shown while typing. Every unrelated line stays in its original place."
       paragraphCanvas.textView.insertText(replacement,
@@ -1818,7 +1836,11 @@
           pair.0.text == pair.1.text && pair.0.breakFormat == pair.1.breakFormat
             && abs(pair.0.baseline - pair.1.baseline) < 0.005
         }) else {
-        throw PDFError(.malformed, "Reopened native layout lost leading or styled paragraph breaks")
+        throw PDFError(
+          .malformed,
+          "Reopened native layout lost leading or styled paragraph breaks "
+            + "(reopened=\(reopenedLines.map { ($0.text, $0.baseline, String(describing: $0.breakFormat)) }), "
+            + "expected=\(styledLines.map { ($0.text, $0.baseline, String(describing: $0.breakFormat)) }))")
       }
       let inspector = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 224, height: 460),
         styleMask: [.titled, .closable], backing: .buffered, defer: false)

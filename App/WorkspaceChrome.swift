@@ -173,6 +173,10 @@ struct WorkspaceTextInspector: View {
                 }
               }
             }
+            if viewer.isEditingPageText, viewer.canFormatPageText {
+              Divider()
+              WorkspaceParagraphControls(viewer: viewer)
+            }
             if viewer.isEditingPageText {
               Divider()
               VStack(alignment: .leading, spacing: 10) {
@@ -376,6 +380,74 @@ struct WorkspaceTextInspector: View {
   }
   private func color(_ rgb: [Double]) {
     apply(.color(rgb))
+  }
+}
+
+struct WorkspaceParagraphControls: View {
+  @ObservedObject var viewer: PDFViewingSession
+
+  var body: some View {
+    VStack(alignment: .leading, spacing: 10) {
+      Text("PARAGRAPH")
+        .font(.system(size: 10, weight: .semibold))
+        .tracking(0.7)
+        .foregroundStyle(.secondary)
+      HStack(spacing: 4) {
+        ForEach(PageTextParagraphAlignment.allCases, id: \.self) { alignment in
+          Button {
+            updateParagraph { $0.alignment = alignment }
+          } label: {
+            Image(systemName: alignment.symbol).frame(width: 26, height: 24)
+          }
+          .buttonStyle(.bordered)
+          .tint(
+            viewer.pageTextParagraphStyle.alignment == alignment
+              ? .accentColor : .secondary)
+          .accessibilityLabel("\(alignment.title) paragraph alignment")
+          .accessibilityValue(
+            viewer.pageTextParagraphStyle.alignment == alignment ? "Selected" : "Not selected")
+        }
+        Spacer()
+      }
+      HStack(spacing: 8) {
+        field("Leading", keyPath: \.leading, label: "Paragraph leading")
+        field("Before", keyPath: \.spacingBefore, label: "Space before paragraph")
+        field("After", keyPath: \.spacingAfter, label: "Space after paragraph")
+      }
+      HStack(spacing: 8) {
+        field("Left", keyPath: \.leftIndent, label: "Left paragraph indent")
+        field("Right", keyPath: \.rightIndent, label: "Right paragraph indent")
+        field("First line", keyPath: \.firstLineIndent, label: "First-line indent")
+      }
+      Text("Leading 0 keeps the source line height. First-line indent can be negative for a hanging indent.")
+        .font(.system(size: 9)).foregroundStyle(.tertiary)
+        .fixedSize(horizontal: false, vertical: true)
+    }
+  }
+
+  private func field(
+    _ title: String, keyPath: WritableKeyPath<PageTextParagraphStyle, Double>,
+    label: String
+  ) -> some View {
+    VStack(alignment: .leading, spacing: 3) {
+      Text(title).font(.system(size: 9)).foregroundStyle(.secondary)
+      WorkspacePointField(
+        label: label,
+        value: Binding(
+          get: { viewer.pageTextParagraphStyle[keyPath: keyPath] },
+          set: { value in
+            guard value.isFinite else { return }
+            updateParagraph { $0[keyPath: keyPath] = value }
+          }))
+    }
+  }
+
+  private func updateParagraph(_ mutate: (inout PageTextParagraphStyle) -> Void) {
+    var style = viewer.pageTextParagraphStyle
+    mutate(&style)
+    guard style.isValid else { return }
+    viewer.pageTextParagraphStyle = style
+    viewer.pageTextParagraphStyleApplier?(style)
   }
 }
 

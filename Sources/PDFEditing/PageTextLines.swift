@@ -1081,7 +1081,7 @@ public struct RewritePageTextCommand: PDFEditCommand, Equatable, Sendable {
     else { return nil }
 
     if let box {
-      guard !box.wraps, abs(box.x - line.x) <= 0.02,
+      guard !box.wraps, box.allowsLineX(line.x),
         abs(box.firstBaseline - line.baseline) <= 0.02 else { return nil }
     }
 
@@ -1403,7 +1403,7 @@ public struct RewritePageTextCommand: PDFEditCommand, Equatable, Sendable {
     }) else { return nil }
 
     if let box {
-      guard !box.wraps, abs(box.x - line.x) <= 0.02,
+      guard !box.wraps, box.allowsLineX(line.x),
         abs(box.firstBaseline - line.baseline) <= 0.02 else { return nil }
     }
 
@@ -1598,7 +1598,7 @@ public struct RewritePageTextCommand: PDFEditCommand, Equatable, Sendable {
     guard structureRunOrder == globalIndices else { return refuse(at: #line) }
     if let box {
       guard box.x.isFinite, box.firstBaseline.isFinite,
-        abs(box.x - (lines.first?.x ?? .infinity)) <= 0.02,
+        box.allowsLineX(lines.first?.x ?? .infinity),
         abs(box.firstBaseline - (lines.first?.baseline ?? .infinity)) <= 0.02,
         lines.count == 1 || box.wraps
       else { return refuse(at: #line) }

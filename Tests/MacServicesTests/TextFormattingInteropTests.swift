@@ -210,6 +210,23 @@ struct TextFormattingInteropTests {
     #expect(plan.fragments.map { $0.format.sourceFont?.resource } == [tiny.resource])
   }
 
+  @Test func paragraphControlsValidateAndMapToTextKit() {
+    let style = PageTextParagraphStyle(
+      alignment: .justified, leading: 18, spacingBefore: 4, spacingAfter: 6,
+      leftIndent: 12, rightIndent: 9, firstLineIndent: -7)
+    #expect(style.isValid)
+    let textKit = style.textKitStyle(scale: 2, fallbackLeading: 14, maximumLineHeight: 36)
+    #expect(textKit.alignment == .justified)
+    #expect(abs(textKit.minimumLineHeight - 36) < 0.001)
+    #expect(abs(textKit.maximumLineHeight - 36) < 0.001)
+    #expect(abs(textKit.paragraphSpacingBefore - 8) < 0.001)
+    #expect(abs(textKit.paragraphSpacing - 12) < 0.001)
+    #expect(abs(textKit.headIndent - 24) < 0.001)
+    #expect(abs(textKit.tailIndent + 18) < 0.001)
+    #expect(abs(textKit.firstLineHeadIndent + 14) < 0.001)
+    #expect(!PageTextParagraphStyle(leading: -1).isValid)
+  }
+
   @Test @MainActor func acceptedLicensedFontPreviewsFormatsAndPersistsParagraphText() throws {
     let program = try #require(Data(base64Encoded: FontFixtureData.subsetProgramBase64))
     let custom = CustomTextFont(

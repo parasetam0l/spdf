@@ -258,6 +258,8 @@ public final class PDFViewingSession: NSObject, ObservableObject, PDFViewDelegat
   /// and keeps the current tool.
   public var pendingEditFinisher: (() -> Bool)?
   @Published public var pageTextStyle = PageTextStyle()
+  /// TXT-03: paragraph alignment, leading, spacing and indents.
+  @Published public var pageTextParagraphStyle = PageTextParagraphStyle()
   /// Verified embedded fonts available for the active inline text selection.
   @Published public var pageTextAvailableSourceFonts: [PageTextSourceFont] = []
   /// User-accepted, locally provisioned fonts that pass inline embedding checks.
@@ -283,6 +285,7 @@ public final class PDFViewingSession: NSObject, ObservableObject, PDFViewDelegat
   public var pageTextRedo: (() -> Bool)?
   public var pageTextPositionApplier: ((Double, Double) -> Void)?
   public var pageTextAlignmentApplier: ((PageObjectAlignment) -> Void)?
+  public var pageTextParagraphStyleApplier: ((PageTextParagraphStyle) -> Void)?
   public var pageTextWidthApplier: ((Double) -> Void)?
   public var pageTextStyleApplier: ((PageTextStyle) -> Void)?
   public var hasPendingTextGesture: (() -> Bool)?
@@ -503,6 +506,8 @@ public final class PDFViewingSession: NSObject, ObservableObject, PDFViewDelegat
     pageTextRedo = nil
     pageTextPositionApplier = nil
     pageTextAlignmentApplier = nil
+    pageTextParagraphStyleApplier = nil
+    pageTextParagraphStyle = .init()
     pageTextWidthApplier = nil
     pageTextStyleApplier = nil
     pageTextFormattingApplier = nil

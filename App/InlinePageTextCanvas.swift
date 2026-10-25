@@ -207,6 +207,7 @@ final class InlinePageTextCanvas: NSView, NSTextViewDelegate {
   private let originalDocument: PDFDocument
   private let font: NSFont
   private let originalStyle: PageTextStyle
+  private let originalParagraphStyle: PageTextParagraphStyle
   private let initialBaseline: Double
   private(set) var formatting: NativeTextFormatting?
   private var wrapsText = true
@@ -276,6 +277,8 @@ final class InlinePageTextCanvas: NSView, NSTextViewDelegate {
       color: input?.fillColor ?? viewer.pageTextStyle.color,
       opacity: input?.opacity ?? viewer.pageTextStyle.opacity)
     originalStyle = style
+    let initialParagraphStyle = PageTextParagraphStyle()
+    originalParagraphStyle = initialParagraphStyle
     super.init(frame: viewer.view.bounds)
     autoresizingMask = [.width, .height]
     textView.identifier = .init(target == nil ? "spdf-new-text-editor" : "spdf-text-editor")
@@ -356,6 +359,10 @@ final class InlinePageTextCanvas: NSView, NSTextViewDelegate {
     viewer.view.clearSelection()
     viewer.view.setAccessibilityHidden(true)
     viewer.pageTextStyle = style
+    viewer.pageTextParagraphStyle = originalParagraphStyle
+    viewer.pageTextParagraphStyleApplier = { [weak self] paragraph in
+      self?.applyParagraphStyle(paragraph)
+    }
     viewer.canFormatPageText = formatting != nil
     viewer.pageTextFormattingIssue = nil
     viewer.pageTextFormattingApplier = formatting == nil ? nil : { [weak self] change in
@@ -621,24 +628,48 @@ final class InlinePageTextCanvas: NSView, NSTextViewDelegate {
     var attributes: [NSAttributedString.Key: Any] = [
       .font: scaled, .foregroundColor: color, .kern: 0, .ligature: 0,
     ]
-    if formatting == nil && (sourceTarget == nil || sourceTarget?.paragraph != nil) {
+    var maximumFontPointSize = scaled.pointSize
+    if let storage = textView.textStorage {
+      storage.enumerateAttribute(
+        .font, in: NSRange(location: 0, length: storage.length)
+      ) { value, _, _ in
+        if let value = value as? NSFont {
+          maximumFontPointSize = max(maximumFontPointSize, value.pointSize)
+        }
+      }
+    }
+    if viewer.pageTextParagraphStyle != originalParagraphStyle {
+      let paragraphStyle = viewer.pageTextParagraphStyle.textKitStyle(
+        scale: scale * style.fontSize / originalStyle.fontSize,
+        fallbackLeading: sourceTarget?.paragraph?.lineSpacing ?? originalStyle.fontSize * 1.2,
+        maximumLineHeight: maximumFontPointSize)
+      attributes[.paragraphStyle] = paragraphStyle
+      textView.defaultParagraphStyle = paragraphStyle
+      if !textView.string.isEmpty {
+        textView.textStorage?.addAttributes(
+          [
+            .paragraphStyle: paragraphStyle,
+            .kern: formatting == nil ? 0 : attributes[.kern] ?? 0,
+            .ligature: formatting == nil ? 0 : attributes[.ligature] ?? 0,
+          ],
+          range: NSRange(location: 0, length: (textView.string as NSString).length))
+      }
+      if formatting == nil { textView.typingAttributes = attributes }
+    } else if formatting == nil,
+      sourceTarget == nil || sourceTarget?.paragraph != nil
+    {
       let paragraph = NSMutableParagraphStyle()
       let spacing = sourceTarget?.paragraph?.lineSpacing ?? originalStyle.fontSize * 1.2
       paragraph.minimumLineHeight = spacing * style.fontSize / originalStyle.fontSize * scale
-      paragraph.maximumLineHeight = paragraph.minimumLineHeight
+      paragraph.maximumLineHeight = max(paragraph.minimumLineHeight, maximumFontPointSize)
       attributes[.paragraphStyle] = paragraph
       if !textView.string.isEmpty {
         textView.textStorage?.addAttribute(
           .paragraphStyle, value: paragraph,
           range: NSRange(location: 0, length: (textView.string as NSString).length))
       }
+      textView.typingAttributes = attributes
     }
-    if formatting == nil, sourceTarget?.paragraph != nil, !textView.string.isEmpty {
-      textView.textStorage?.addAttributes(
-        [.kern: 0, .ligature: 0],
-        range: NSRange(location: 0, length: (textView.string as NSString).length))
-    }
-    if formatting == nil { textView.typingAttributes = attributes }
     let manager = textView.layoutManager
     let height = max(16, manager?.defaultLineHeight(for: scaled) ?? scaled.pointSize * 1.2)
     var baselineOffset = manager?.defaultBaselineOffset(for: scaled) ?? scaled.ascender
@@ -680,6 +711,13 @@ final class InlinePageTextCanvas: NSView, NSTextViewDelegate {
     if viewer.pageTextWidth != textWidth { viewer.pageTextWidth = textWidth }
     window?.invalidateCursorRects(for: self)
     needsDisplay = true
+  }
+
+  private func applyParagraphStyle(_ paragraph: PageTextParagraphStyle) {
+    guard paragraph.isValid, let viewer else { return }
+    viewer.pageTextParagraphStyle = paragraph
+    synchronizeGeometry()
+    publishPendingChange()
   }
 
   func textDidChange(_ notification: Notification) {
@@ -754,6 +792,7 @@ final class InlinePageTextCanvas: NSView, NSTextViewDelegate {
       (formatting?.hasChanges ?? (textView.string != (sourceTarget?.text ?? "") || style != originalStyle))
       || dx != 0 || dy != 0
       || abs(textWidth - sourceRect.width) > 0.01
+      || (viewer?.pageTextParagraphStyle ?? originalParagraphStyle) != originalParagraphStyle
     viewer?.hasPendingPageTextChanges = changed
     viewer?.onPendingPageTextChange?(changed)
   }
@@ -829,6 +868,7 @@ final class InlinePageTextCanvas: NSView, NSTextViewDelegate {
     viewer?.pageTextRedo = nil
     viewer?.pageTextPositionApplier = nil
     viewer?.pageTextAlignmentApplier = nil
+    viewer?.pageTextParagraphStyleApplier = nil
     viewer?.pageTextStyleApplier = nil
     viewer?.pageTextWidthApplier = nil
     viewer?.pageTextFormattingApplier = nil
@@ -915,9 +955,18 @@ final class InlinePageTextCanvas: NSView, NSTextViewDelegate {
       let scale = viewer?.view.scaleFactor {
       width = max(textWidth, manager.usedRect(for: container).width / scale)
     } else { width = textWidth }
-    return .init(x: sourceRect.minX + dx, firstBaseline: initialBaseline + dy,
-      width: max(24, min(2_000, width)),
-      lineSpacing: sourceTarget?.paragraph?.lineSpacing ?? originalStyle.fontSize * 1.2, wraps: wrapsText)
+    let baseX = sourceRect.minX + dx
+    let lineX = pageLines().map(\.x).min() ?? baseX
+    let boxX = min(baseX, lineX)
+    let boxWidth = max(width, baseX + width - boxX)
+    return .init(x: boxX, firstBaseline: initialBaseline + dy,
+      width: max(24, min(2_000, boxWidth)),
+      lineSpacing: {
+        let leading = viewer?.pageTextParagraphStyle.leading ?? 0
+        if leading > 0 { return leading }
+        return sourceTarget?.paragraph?.lineSpacing ?? originalStyle.fontSize * 1.2
+      }(),
+      wraps: wrapsText)
   }
 
   override func scrollWheel(with event: NSEvent) { viewer?.scrollPage(with: event) }
