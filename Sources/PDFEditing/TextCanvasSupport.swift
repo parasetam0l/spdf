@@ -239,9 +239,25 @@ public enum PageTextEditing {
     let content = try PageContent.load(pageID: pageID, in: graph)
     let runs = try TextRunIndexer.runs(in: content, graph: graph)
     let instructions = Set(originalText.keys.map { runs[$0].instructionIndex })
-    let ranges = instructions.sorted().map { index -> (range: Range<Int>, replacement: [UInt8]) in
+    var ranges = instructions.sorted().map { index -> (range: Range<Int>, replacement: [UInt8]) in
       let range = TextStyleSupport.fullSpan(of: content.instructions[index])
       return (range, Array("\n3 Tr\n".utf8) + content.bytes[range] + Array("\n0 Tr\n".utf8))
+    }
+    // TXT-08: the preview hides the source text; retire this box's previously
+    // painted underline/strikeout too so the live draft is not shown over stale
+    // decorations. The commit path repaints the final decorations.
+    var touched = Set<Int>()
+    for index in instructions {
+      let span = TextStyleSupport.fullSpan(of: content.instructions[index])
+      if let segments = content.segmentIndices(for: span) { touched.formUnion(segments) }
+    }
+    if !touched.isEmpty {
+      for range in PageTextLineWriter.decorationRanges(in: content) {
+        guard let spanning = content.segmentIndices(for: range),
+          spanning.allSatisfy({ touched.contains($0) })
+        else { continue }
+        ranges.append((range, []))
+      }
     }
     return try content.replacing(ranges: ranges, in: graph)
   }

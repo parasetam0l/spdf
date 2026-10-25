@@ -247,7 +247,9 @@ public final class NativeTextFormatting {
         format.sourceFont = nil
         format.customFont = nil
         format.characterSpacing = 0
-        format.size = font.pointSize
+        // Pasteboard fonts are on-screen points; storage formats are page
+        // space and `attributes(_:scale:)` multiplies them by the view scale.
+        format.size = font.pointSize / max(0.01, scale)
       }
       if let color = attributes[.foregroundColor] as? NSColor,
         let rgb = color.usingColorSpace(.sRGB) {
@@ -262,7 +264,9 @@ public final class NativeTextFormatting {
         format.strikeout = strikeout != 0
       }
       if let rise = attributes[.baselineOffset] as? NSNumber {
-        format.rise = rise.doubleValue
+        // AppKit stores the baseline offset in scaled view points; the format
+        // keeps page-space rise like every other writer input.
+        format.rise = rise.doubleValue / max(0.01, scale)
       }
       if let spacing = attributes[.kern] as? NSNumber {
         format.characterSpacing = spacing.doubleValue / max(0.01, scale)
@@ -541,18 +545,22 @@ public final class NativeTextFormatting {
       case .wordSpacing(let value): result.wordSpacing = value
       case .rise(let value): result.rise = value
       case .superscript(let enabled):
-        if enabled {
-          result.rise = source.size * 0.35
-          result.size = max(2, source.size * 0.65)
-        } else if source.rise > 0.01 {
+        // Idempotent and convertible: re-applying a script keeps the current
+        // base size, while converting a subscript first restores its base.
+        if enabled, source.rise <= 0.01 {
+          let base = source.rise < -0.01 ? source.size / 0.65 : source.size
+          result.size = max(2, base * 0.65)
+          result.rise = base * 0.35
+        } else if !enabled, source.rise > 0.01 {
           result.size = max(2, source.size / 0.65)
           result.rise = 0
         }
       case .subscripted(let enabled):
-        if enabled {
-          result.rise = -source.size * 0.20
-          result.size = max(2, source.size * 0.65)
-        } else if source.rise < -0.01 {
+        if enabled, source.rise >= -0.01 {
+          let base = source.rise > 0.01 ? source.size / 0.65 : source.size
+          result.size = max(2, base * 0.65)
+          result.rise = -base * 0.20
+        } else if !enabled, source.rise < -0.01 {
           result.size = max(2, source.size / 0.65)
           result.rise = 0
         }
@@ -578,10 +586,12 @@ public final class NativeTextFormatting {
     storage.beginEditing()
     for piece in pieces {
       let format = changed(piece.format)
-      let length = (piece.text as NSString).length
-      storage.addAttributes(
-        attributes(format, scale: scale), range: NSRange(location: offset, length: length))
-      offset += length
+      let pieceRange = NSRange(location: offset, length: (piece.text as NSString).length)
+      // `addAttributes` only merges, so a key the new format omits must be
+      // removed explicitly or the disabled decoration stays painted.
+      Self.removeManagedAttributes(from: storage, in: pieceRange)
+      storage.addAttributes(attributes(format, scale: scale), range: pieceRange)
+      offset += pieceRange.length
     }
     storage.endEditing()
     view.undoManager?.setActionName("Format Text")
@@ -685,6 +695,7 @@ public final class NativeTextFormatting {
     paragraph.lineBreakMode = .byWordWrapping
     storage.beginEditing()
     for (range, format) in pieces {
+      Self.removeManagedAttributes(from: storage, in: range)
       storage.addAttributes(attributes(format, scale: scale), range: range)
       if abs(format.wordSpacing) > 1e-9 {
         let text = (storage.string as NSString).substring(with: range) as NSString
@@ -708,6 +719,25 @@ public final class NativeTextFormatting {
     view.insertionPointColor = NSColor(
       srgbRed: typing.color[0], green: typing.color[1], blue: typing.color[2],
       alpha: typing.opacity)
+  }
+
+  /// AppKit presentation attributes this editor owns. They are derived from
+  /// the canonical page-space format above, so a key omitted by the new format
+  /// must be removed explicitly; otherwise turning a decoration, stroke or
+  /// rise off would leave the old AppKit value painted, and a stale
+  /// `.baselineOffset` would shift the live line geometry and saved baseline.
+  private static let managedAttributes: [NSAttributedString.Key] = [
+    .underlineStyle, .strikethroughStyle, .baselineOffset, .obliqueness, .strokeWidth,
+    .strokeColor,
+  ]
+
+  private static func removeManagedAttributes(
+    from storage: NSMutableAttributedString, in range: NSRange
+  ) {
+    guard range.length > 0 else { return }
+    for key in managedAttributes {
+      storage.removeAttribute(key, range: range)
+    }
   }
 
   private func attributes(_ format: PageTextFormat, scale: Double) -> [NSAttributedString

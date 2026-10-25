@@ -1600,12 +1600,17 @@ final class SPDFDocument: NSDocument {
 
   func togglePageTextSuperscript() {
     guard let viewer, viewer.canFormatPageText else { return }
-    viewer.pageTextFormattingApplier?(.superscript(!(viewer.pageTextStyle.rise > 0.01)))
+    // A mixed selection can contain both raised and normal runs; resolve it
+    // to "on" like underline/strikeout instead of re-applying to the raised
+    // runs that already carry the decoration.
+    let mixed = viewer.pageTextMixedFormatting.contains("rise")
+    viewer.pageTextFormattingApplier?(.superscript(mixed || !(viewer.pageTextStyle.rise > 0.01)))
   }
 
   func togglePageTextSubscript() {
     guard let viewer, viewer.canFormatPageText else { return }
-    viewer.pageTextFormattingApplier?(.subscripted(!(viewer.pageTextStyle.rise < -0.01)))
+    let mixed = viewer.pageTextMixedFormatting.contains("rise")
+    viewer.pageTextFormattingApplier?(.subscripted(mixed || !(viewer.pageTextStyle.rise < -0.01)))
   }
 
   func toggleSelectedTextBold() {

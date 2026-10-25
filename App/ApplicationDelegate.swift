@@ -461,6 +461,11 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
   @objc private func togglePageTextSuperscript(_ sender: Any?) { currentDocument?.togglePageTextSuperscript() }
   @objc private func togglePageTextStrikeout(_ sender: Any?) { currentDocument?.togglePageTextStrikeout() }
   @objc private func togglePageTextSubscript(_ sender: Any?) { currentDocument?.togglePageTextSubscript() }
+  @objc private func togglePageTextSpellChecking(_ sender: Any?) {
+    guard let viewer = currentDocument?.viewer else { return }
+    viewer.pageTextSpellChecking.toggle()
+    viewer.pageTextSpellCheckingApplier?(viewer.pageTextSpellChecking)
+  }
   @objc private func findNext(_ sender: Any?) { currentDocument?.findNext() }
   @objc private func findPrevious(_ sender: Any?) { currentDocument?.findPrevious() }
   @objc private func showPagesSidebar(_ sender: Any?) { currentDocument?.viewer?.showPages() }
@@ -775,6 +780,10 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
       #selector(togglePageTextUnderline), #selector(togglePageTextStrikeout),
       #selector(togglePageTextSuperscript), #selector(togglePageTextSubscript):
       return document.viewer?.canFormatPageText == true
+    case #selector(togglePageTextSpellChecking):
+      guard let viewer = document.viewer else { return false }
+      menuItem.state = viewer.pageTextSpellChecking ? .on : .off
+      return viewer.isEditingPageText
     case #selector(showFind), #selector(showFindReplace):
       guard let viewer = document.viewer else { return false }
       return !viewer.isLocked && viewer.pageCount > 0
@@ -1051,6 +1060,18 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
       modifiers: [.command, .shift], target: self, to: format)
     add("Subscript", #selector(togglePageTextSubscript), key: "-",
       modifiers: [.command, .shift], target: self, to: format)
+    // TXT-08: user-driven spelling correction through AppKit's spelling panel.
+    // Automatic replacement stays disabled so text is never changed silently.
+    let spelling = submenu("Spelling and Grammar", in: edit)
+    add(
+      "Show Spelling and Grammar", #selector(NSText.showGuessPanel(_:)), key: ":",
+      target: nil, to: spelling)
+    add(
+      "Check Spelling…", #selector(NSText.checkSpelling(_:)), key: ";", target: nil,
+      to: spelling)
+    add(
+      "Check Spelling While Typing", #selector(togglePageTextSpellChecking),
+      target: self, to: spelling)
     edit.addItem(.separator())
     add("Find…", #selector(showFind), key: "f", target: self, to: edit)
     add(

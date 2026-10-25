@@ -397,7 +397,7 @@ enum PageTextLineWriter {
         guard line.segments.map(\.text).joined() == line.text,
           line.segments.allSatisfy({
             $0.x.isFinite && abs($0.x) <= 1_000_000 && $0.format.isValid
-              && $0.width.map { $0.isFinite && $0 >= 0 } ?? true
+              && $0.width.map { $0.isFinite && $0 >= 0 && $0 <= 1_000_000 } ?? true
               && !$0.text.contains("\n") && !$0.text.contains("\r")
               && !($0.format.sourceFont != nil && $0.format.customFont != nil)
               && ($0.format.sourceFont != nil || $0.format.customFont != nil
@@ -621,6 +621,9 @@ enum PageTextLineWriter {
         ]))
     }
     bytes += Array("ET\n".utf8)
+    if !decorations.isEmpty {
+      bytes += Array((Self.decorationBeginMarker + "\n").utf8)
+    }
     for decoration in decorations {
       bytes += Array("q\n".utf8)
       if let opacityName = decoration.opacityName {
@@ -631,6 +634,9 @@ enum PageTextLineWriter {
       bytes += Array(([
         decoration.x, decoration.y, decoration.width, decoration.thickness,
       ].map(AnnotationSupport.number).joined(separator: " ") + " re f\nQ\n").utf8)
+    }
+    if !decorations.isEmpty {
+      bytes += Array((Self.decorationEndMarker + "\n").utf8)
     }
     bytes += Array("Q\n".utf8)
     try AddedContent.append(
@@ -657,6 +663,31 @@ enum PageTextLineWriter {
       dictionary[PDFName("SPDFTextLines")] = .array(lineRecords)
       graph.objects[id] = .stream(PDFStream(dictionary: dictionary, bytes: stream.bytes))
     }
+  }
+
+  /// TXT-08: comments marking the underline/strikeout paint block appended by
+  /// this writer. A later rewrite retires the previous block through these
+  /// markers before painting the replacement. Renderers ignore comments.
+  static let decorationBeginMarker = "%SPDFDecorationBegin"
+  static let decorationEndMarker = "%SPDFDecorationEnd"
+
+  /// Byte ranges of every sPDF decoration block in a page's concatenated
+  /// content. Only this writer emits the markers, so native content cannot
+  /// match.
+  static func decorationRanges(in content: PageContent) -> [Range<Int>] {
+    let data = Data(content.bytes)
+    let begin = Data((decorationBeginMarker + "\n").utf8)
+    let end = Data((decorationEndMarker + "\n").utf8)
+    var ranges: [Range<Int>] = []
+    var search = 0
+    while search < data.count,
+      let start = data.range(of: begin, in: search..<data.count),
+      let finish = data.range(of: end, in: start.upperBound..<data.count)
+    {
+      ranges.append(start.lowerBound..<finish.upperBound)
+      search = finish.upperBound
+    }
+    return ranges
   }
 
   private static func emit(
@@ -802,7 +833,9 @@ public enum AuthoredPageTextBoxes {
             var width: Double?
             if case .null = values[4] {
               width = nil
-            } else if let value = number(values[4]), value.isFinite, value >= 0 {
+            } else if let value = number(values[4]), value.isFinite, value >= 0,
+              value <= 1_000_000
+            {
               width = value
             } else {
               valid = false

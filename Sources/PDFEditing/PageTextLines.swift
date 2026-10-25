@@ -1059,10 +1059,57 @@ public struct RewritePageTextCommand: PDFEditCommand, Equatable, Sendable {
   /// A same-style, fixed-geometry edit can replace its source text-show
   /// instructions directly. Keeping the glyphs under their original marked
   /// content preserves the structure-tree reading order in tagged PDFs.
+  /// Segments whose bytes a set of replacement ranges touches.
+  private static func touchedSegments(
+    for ranges: [Range<Int>], in content: PageContent
+  ) -> Set<Int> {
+    var result = Set<Int>()
+    for range in ranges {
+      if let segments = content.segmentIndices(for: range) { result.formUnion(segments) }
+    }
+    return result
+  }
+
+  /// Retire this box's previous underline/strikeout paint in the segments being
+  /// rewritten. Each writer append stores one box in its own stream, so only
+  /// that box's decoration block is removed and other boxes keep theirs.
+  private static func retiredDecorationRanges(
+    in content: PageContent, limitedTo segments: Set<Int>
+  ) -> [(range: Range<Int>, replacement: [UInt8])] {
+    guard !segments.isEmpty else { return [] }
+    return PageTextLineWriter.decorationRanges(in: content).compactMap { range in
+      guard let spanning = content.segmentIndices(for: range),
+        spanning.allSatisfy({ segments.contains($0) })
+      else { return nil }
+      return (range, [])
+    }
+  }
+
   private func inPlaceRewriteRanges(
     content: PageContent, runs: [TextRun], advances: [Double], font: IndexedTextFont,
     graph: PDFGraph
   ) throws -> [(range: Range<Int>, replacement: [UInt8])]? {
+    // TXT-08: in-place replacement keeps the source text state and cannot paint
+    // underline/strikeout or carry per-run rise/word spacing. Formatted output
+    // therefore always takes the verified append path below.
+    let needsTextState = lines.contains { line in
+      line.segments.contains { segment in
+        segment.format.underline || segment.format.strikeout
+          || abs(segment.format.rise) > 1e-6 || abs(segment.format.wordSpacing) > 1e-8
+      }
+    }
+    guard !needsTextState else { return nil }
+    // Authored sPDF boxes keep their style metadata in the appended stream and
+    // may own previous decoration paint. The append path rewrites both; an
+    // in-place edit would leave stale metadata or paint behind.
+    let selectedSegments = Set(runs.flatMap { run -> [Int] in
+      let span = TextStyleSupport.fullSpan(of: content.instructions[run.instructionIndex])
+      return content.segmentIndices(for: span) ?? []
+    })
+    guard !selectedSegments.contains(where: {
+      content.segments[$0].dictionary[PDFName("SPDFAdded")] != nil
+    }) else { return nil }
+
     if Self.hasTaggedReadingOrder(pageID: pageID, in: graph),
       let resized = try taggedPointSizeRewriteRanges(
         content: content, runs: runs, advances: advances, font: font, graph: graph)
@@ -2230,12 +2277,17 @@ public struct RewritePageTextCommand: PDFEditCommand, Equatable, Sendable {
       content: context.content, runs: context.runs, advances: context.advances,
       font: context.font, graph: graph)
     {
-      return try context.content.replacing(ranges: replacements, in: graph)
+      let touched = Self.touchedSegments(for: replacements.map(\.range), in: context.content)
+      return try context.content.replacing(
+        ranges: replacements
+          + Self.retiredDecorationRanges(in: context.content, limitedTo: touched),
+        in: graph)
     }
     if Self.hasTaggedReadingOrder(pageID: pageID, in: graph) {
       throw PDFError(.unsupported, Self.taggedRewriteRefusal)
     }
     var ranges: [(range: Range<Int>, replacement: [UInt8])] = []
+    var touchedSegments = Set<Int>()
     let groups = Dictionary(grouping: context.runs.indices, by: { context.runs[$0].instructionIndex })
     for instructionIndex in groups.keys.sorted() {
       let indices = groups[instructionIndex]!
@@ -2253,8 +2305,16 @@ public struct RewritePageTextCommand: PDFEditCommand, Equatable, Sendable {
         }
       }
       let number = AnnotationSupport.number(-advance * 1_000 / run.fontSize)
-      ranges.append((TextStyleSupport.fullSpan(of: instruction), Array("[\(number)] TJ".utf8)))
+      let span = TextStyleSupport.fullSpan(of: instruction)
+      if let segments = context.content.segmentIndices(for: span) {
+        touchedSegments.formUnion(segments)
+      }
+      ranges.append((span, Array("[\(number)] TJ".utf8)))
     }
+    // TXT-08: retire this box's previous underline/strikeout paint before the
+    // replacement text and decorations are appended.
+    ranges += Self.retiredDecorationRanges(
+      in: context.content, limitedTo: touchedSegments)
     // Restore the page's initial CTM, clip, alpha and text state before
     // painting the replacement, including pages ending with an active cm.
     ranges.append((0..<0, Array("q\n".utf8)))

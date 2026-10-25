@@ -127,12 +127,17 @@ struct WorkspaceTextInspector: View {
                 if viewer.canFormatPageText || !viewer.isEditingPageText {
                   fontMenu
                   HStack(spacing: 8) {
+                    // Embedded-font paragraphs keep their weight/slant, but
+                    // underline/strikeout/script are representable for them
+                    // through the same writer, so only these two are gated.
                     traitButton("Bold", symbol: "bold", field: "bold", selected: face.isBold) {
                       apply(.bold(viewer.pageTextMixedFormatting.contains("bold") || !face.isBold))
                     }
+                    .disabled(viewer.isEditingPageText && !viewer.canChangePageTextTraits)
                     traitButton("Italic", symbol: "italic", field: "italic", selected: face.isItalic) {
                       apply(.italic(viewer.pageTextMixedFormatting.contains("italic") || !face.isItalic))
                     }
+                    .disabled(viewer.isEditingPageText && !viewer.canChangePageTextTraits)
                     traitButton(
                       "Underline", symbol: "underline", field: "underline",
                       selected: viewer.pageTextStyle.underline
@@ -149,15 +154,22 @@ struct WorkspaceTextInspector: View {
                         viewer.pageTextMixedFormatting.contains("strikeout")
                           || !viewer.pageTextStyle.strikeout))
                     }
-                    Button("A↑") { apply(.superscript(!(viewer.pageTextStyle.rise > 0.01))) }
-                      .buttonStyle(.bordered).controlSize(.small)
-                      .help("Superscript")
-                    Button("A↓") { apply(.subscripted(!(viewer.pageTextStyle.rise < -0.01))) }
-                      .buttonStyle(.bordered).controlSize(.small)
-                      .help("Subscript")
+                    Button("A↑") {
+                      apply(.superscript(
+                        viewer.pageTextMixedFormatting.contains("rise")
+                          || !(viewer.pageTextStyle.rise > 0.01)))
+                    }
+                    .buttonStyle(.bordered).controlSize(.small)
+                    .help("Superscript")
+                    Button("A↓") {
+                      apply(.subscripted(
+                        viewer.pageTextMixedFormatting.contains("rise")
+                          || !(viewer.pageTextStyle.rise < -0.01)))
+                    }
+                    .buttonStyle(.bordered).controlSize(.small)
+                    .help("Subscript")
                     Spacer()
                   }
-                  .disabled(viewer.isEditingPageText && !viewer.canChangePageTextTraits)
                   if viewer.isEditingPageText {
                     Text(viewer.pageTextSelectionScope).font(.caption).foregroundStyle(.secondary)
                   }

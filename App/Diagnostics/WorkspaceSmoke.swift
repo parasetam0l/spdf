@@ -1765,10 +1765,42 @@
       guard let formatted = findCanvas(content) else {
         throw PDFError(.malformed, "Missing character-formatting canvas")
       }
+      // Menu actions resolve through NSDocumentController.currentDocument, so
+      // the workspace document must own the key window for this check.
+      window.makeKeyAndOrderFront(nil)
+      NSApp.activate(ignoringOtherApps: true)
+      try await Task.sleep(for: .milliseconds(200))
       formatted.beginTyping()
       guard formatted.textView.isContinuousSpellCheckingEnabled,
         !formatted.textView.isAutomaticSpellingCorrectionEnabled else {
         throw PDFError(.malformed, "Spell suggestions were unavailable or automatic correction was on")
+      }
+      // TXT-08: user-driven correction is reachable through the standard
+      // spelling panel, and the app-level toggle stays in sync with the native
+      // text view instead of drifting from it.
+      let checkItem = KeyboardAudit.find("Check Spelling…")
+      let guessItem = KeyboardAudit.find("Show Spelling and Grammar")
+      guard let checkSpelling = checkItem,
+        checkSpelling.action == #selector(NSText.checkSpelling(_:)),
+        guessItem?.action == #selector(NSText.showGuessPanel(_:))
+      else {
+        throw PDFError(
+          .malformed,
+          "Spelling correction menu is not wired (check=\(String(describing: checkItem?.action)), "
+            + "guess=\(String(describing: guessItem?.action)))")
+      }
+      let toggledOff = KeyboardAudit.invoke("Check Spelling While Typing")
+      let stateAfterOff = viewer.pageTextSpellChecking
+      let nativeAfterOff = formatted.textView.isContinuousSpellCheckingEnabled
+      let toggledOn = KeyboardAudit.invoke("Check Spelling While Typing")
+      guard toggledOff, !stateAfterOff, !nativeAfterOff, toggledOn,
+        viewer.pageTextSpellChecking, formatted.textView.isContinuousSpellCheckingEnabled
+      else {
+        throw PDFError(
+          .malformed,
+          "Spell toggle did not sync (invoked=\(toggledOff)/\(toggledOn), "
+            + "state=\(stateAfterOff)->\(viewer.pageTextSpellChecking), "
+            + "native=\(nativeAfterOff)->\(formatted.textView.isContinuousSpellCheckingEnabled))")
       }
       viewer.pageTextSpellCheckingApplier?(false)
       guard !formatted.textView.isContinuousSpellCheckingEnabled else {
