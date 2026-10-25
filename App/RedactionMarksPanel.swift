@@ -24,6 +24,10 @@ final class RedactionMarksPanelModel: ObservableObject {
     let pageIndex: Int
     let rects: [[Double]]
     let reason: String?
+    /// RED-03: exact overlay lines painted for this mark.
+    let overlayText: [String]
+    /// RED-04: what the mark removes (whole image draws, forms, vector paint).
+    let removalItems: [String]
   }
 
   struct HitRow: Identifiable {
@@ -35,11 +39,14 @@ final class RedactionMarksPanelModel: ObservableObject {
     let refusal: String?
     let isSelected: Bool
     let isEligible: Bool
+    /// RED-04: raster-removal disclosure for a scan-backed match.
+    let note: String?
   }
 
   @Published var statusDescription = "No redaction marks. Nothing has been removed."
   @Published var planSummary = ""
   @Published var planStatus = ""
+  @Published var overlaySummary = ""
   @Published var disclosures: [String] = []
   @Published var markRows: [MarkRow] = []
   @Published var canApply = false
@@ -52,6 +59,30 @@ final class RedactionMarksPanelModel: ObservableObject {
       refreshPlan()
     }
   }
+
+  // MARK: RED-03 overlay and repeated-region settings
+
+  static let overlayFillColors: [[Double]] = [
+    [0, 0, 0], [0.25, 0.25, 0.25], [0.7, 0, 0], [0.9, 0.9, 0.9],
+  ]
+  static let overlayFillNames = ["Black", "Dark gray", "Red", "Light gray"]
+  static let overlayTextColors: [[Double]] = [[1, 1, 1], [0, 0, 0], [1, 0.85, 0.2]]
+  static let overlayTextNames = ["White", "Black", "Amber"]
+  static let overlayReasonChoices: [String] =
+    ["No reason code"] + RedactionReasonCode.presets.map(\.label) + ["Custom…"]
+
+  @Published var overlayEnabled = true { didSet { syncOverlay() } }
+  @Published var overlayFillColor = 0 { didSet { syncOverlay() } }
+  @Published var overlayTextColor = 0 { didSet { syncOverlay() } }
+  @Published var overlayReplacementText = "" { didSet { syncOverlay() } }
+  @Published var overlayReasonChoice = 0 { didSet { syncOverlay() } }
+  @Published var overlayCustomReason = "" { didSet { syncOverlay() } }
+  @Published var overlayShowsReasonCode = true { didSet { syncOverlay() } }
+  @Published var overlayFontSize = "9" { didSet { syncOverlay() } }
+  /// RED-03: 1-based page range for a repeated region, e.g. "1-3, 5".
+  @Published var repeatedRegionPages = ""
+  private var suppressesOverlaySync = false
+
   @Published var noteText: String?
   @Published var errorMessage: String?
 
@@ -93,7 +124,102 @@ final class RedactionMarksPanelModel: ObservableObject {
     self.session = session
     self.hiddenPolicy = session.options.hiddenTextPolicy
     loadSavedTermSets()
+    loadOverlayFields(from: session.overlay)
     refreshAll()
+  }
+
+  // MARK: RED-03 overlay settings
+
+  func loadOverlayFields(from overlay: RedactionOverlayOptions) {
+    suppressesOverlaySync = true
+    defer { suppressesOverlaySync = false }
+    overlayEnabled = overlay.paintsOverlay
+    overlayFillColor = Self.nearestColorIndex(overlay.fillColor, Self.overlayFillColors)
+    overlayTextColor = Self.nearestColorIndex(overlay.textColor, Self.overlayTextColors)
+    overlayReplacementText = overlay.replacementText ?? ""
+    overlayShowsReasonCode = overlay.showsReasonCode
+    overlayFontSize = Self.number(overlay.fontSize)
+    if let code = overlay.reasonCode {
+      let presets = RedactionReasonCode.presets
+      if let index = presets.firstIndex(where: { $0.code == code.code }) {
+        overlayReasonChoice = index + 1
+        overlayCustomReason = ""
+      } else {
+        overlayReasonChoice = presets.count + 1
+        overlayCustomReason = code.label
+      }
+    } else {
+      overlayReasonChoice = 0
+      overlayCustomReason = ""
+    }
+  }
+
+  var selectedOverlayReasonCode: RedactionReasonCode? {
+    guard overlayReasonChoice > 0 else { return nil }
+    let presets = RedactionReasonCode.presets
+    if overlayReasonChoice <= presets.count { return presets[overlayReasonChoice - 1] }
+    let label = overlayCustomReason.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !label.isEmpty else { return nil }
+    return RedactionReasonCode(code: "custom", label: label)
+  }
+
+  func currentOverlay() -> RedactionOverlayOptions {
+    let fill = Self.overlayFillColors[
+      max(0, min(overlayFillColor, Self.overlayFillColors.count - 1))]
+    let text = Self.overlayTextColors[
+      max(0, min(overlayTextColor, Self.overlayTextColors.count - 1))]
+    let replacement = overlayReplacementText.trimmingCharacters(in: .whitespacesAndNewlines)
+    return RedactionOverlayOptions(
+      paintsOverlay: overlayEnabled, fillColor: fill, textColor: text,
+      replacementText: replacement.isEmpty ? nil : overlayReplacementText,
+      reasonCode: selectedOverlayReasonCode,
+      showsReasonCode: overlayShowsReasonCode,
+      fontSize: Double(overlayFontSize) ?? 9,
+      fontFamily: .helvetica, textAlignment: .center)
+  }
+
+  func syncOverlay() {
+    guard !suppressesOverlaySync else { return }
+    let overlay = currentOverlay()
+    guard (try? overlay.validate()) != nil else {
+      errorMessage =
+        "Review the overlay settings: text must use printable Latin-1 characters and the size must be 2-96."
+      return
+    }
+    session.overlay = overlay
+    errorMessage = nil
+    refreshPlan()
+  }
+
+  func resetOverlayToFillOnly() {
+    suppressesOverlaySync = true
+    overlayEnabled = true
+    overlayFillColor = 0
+    overlayTextColor = 0
+    overlayReplacementText = ""
+    overlayReasonChoice = 0
+    overlayCustomReason = ""
+    overlayShowsReasonCode = false
+    overlayFontSize = "9"
+    suppressesOverlaySync = false
+    syncOverlay()
+    noteText = "Overlay reset to a plain fill. Removal settings are unchanged."
+  }
+
+  static func nearestColorIndex(_ color: [Double], _ presets: [[Double]]) -> Int {
+    guard color.count == 3 else { return 0 }
+    var best = 0
+    var bestDistance = Double.infinity
+    for (index, preset) in presets.enumerated() {
+      let distance = zip(color, preset).reduce(0.0) {
+        $0 + ($1.0 - $1.1) * ($1.0 - $1.1)
+      }
+      if distance < bestDistance {
+        bestDistance = distance
+        best = index
+      }
+    }
+    return best
   }
 
   // MARK: Refresh
@@ -103,6 +229,7 @@ final class RedactionMarksPanelModel: ObservableObject {
     let plan = document?.redactionPlan(options: session.options)
     planSummary = plan?.summary ?? ""
     planStatus = plan?.statusDescription ?? session.store.statusDescription
+    overlaySummary = plan?.overlay.summary ?? session.overlay.summary
     statusDescription = session.store.statusDescription
     disclosures = plan?.disclosures ?? []
     pendingCount = session.store.pendingCount
@@ -117,6 +244,7 @@ final class RedactionMarksPanelModel: ObservableObject {
     let plan = document?.redactionPlan(options: session.options)
     planSummary = plan?.summary ?? ""
     planStatus = plan?.statusDescription ?? session.store.statusDescription
+    overlaySummary = plan?.overlay.summary ?? session.overlay.summary
     disclosures = plan?.disclosures ?? []
     refusedCount = plan?.refusedCount ?? 0
     canApply = (plan?.canApply ?? false) && session.store.hasUnappliedMarks
@@ -163,7 +291,8 @@ final class RedactionMarksPanelModel: ObservableObject {
       return MarkRow(
         id: mark.id,
         title: "Page " + String(mark.pageIndex + 1) + " · " + mark.kind.title
-          + (mark.isHiddenText ? " (hidden)" : ""),
+          + (mark.isHiddenText ? " (hidden)" : "")
+          + (mark.removesRasterPaint ? " (scan)" : ""),
         detail: details.joined(separator: " · ") + " — " + rectText,
         status: status,
         refusal: refusal,
@@ -171,7 +300,9 @@ final class RedactionMarksPanelModel: ObservableObject {
         isEditable: mark.kind != .page && !session.store.isApplied(mark.id),
         pageIndex: mark.pageIndex,
         rects: mark.rects,
-        reason: mark.reason)
+        reason: mark.reason,
+        overlayText: entry?.overlayText ?? [],
+        removalItems: entry?.removalItems ?? [])
     }
   }
 
@@ -264,6 +395,29 @@ final class RedactionMarksPanelModel: ObservableObject {
     refreshAll()
   }
 
+  /// RED-03: stage the same rectangle on every page of the entered range.
+  func addRepeatedRegion() {
+    guard let document else { return }
+    guard let rect = Self.parseRect(rectangleX0, rectangleY0, rectangleX1, rectangleY1) else {
+      errorMessage = "Enter four finite numbers with x1 greater than x0 and y1 greater than y0."
+      return
+    }
+    let range = repeatedRegionPages.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !range.isEmpty else {
+      errorMessage = "Enter a page range such as 1-3 or 2, 4-6 for the repeated region."
+      return
+    }
+    let added = document.markRepeatedRedactionRegion(pageRange: range, rect: rect)
+    guard added > 0 else {
+      errorMessage = "The repeated region could not be staged for that page range."
+      return
+    }
+    errorMessage = nil
+    refreshAll()
+    noteText = "Staged " + String(added)
+      + " repeated region mark(s) as pending — nothing has been removed yet."
+  }
+
   // MARK: Search
 
   func runSearch() {
@@ -330,7 +484,8 @@ final class RedactionMarksPanelModel: ObservableObject {
         id: hit.id, pageLabel: hit.pageLabel, context: hit.context,
         source: hit.sourceLabel + (hit.isHidden ? " · hidden/OCR" : ""),
         hidden: hit.isHidden, refusal: hit.refusal,
-        isSelected: queue.isSelected(hit.id), isEligible: hit.isEligible)
+        isSelected: queue.isSelected(hit.id), isEligible: hit.isEligible,
+        note: hit.rasterNote)
     }
     selectedHitCount = queue.selectedCount
     markableHitCount = queue.eligibleCount
@@ -533,6 +688,8 @@ struct RedactionMarksView: View {
         Divider()
         marksSection
         Divider()
+        overlaySection
+        Divider()
         applySection
         Divider()
         searchSection
@@ -624,6 +781,18 @@ struct RedactionMarksView: View {
           .foregroundStyle(row.isPending ? Color.orange : Color.green)
       }
       Text(row.detail).font(.caption2).foregroundStyle(.secondary)
+      if !row.overlayText.isEmpty {
+        Text("Overlay: " + row.overlayText.joined(separator: " / "))
+          .font(.caption2)
+          .foregroundStyle(.secondary)
+      }
+      if !row.removalItems.isEmpty {
+        Text(
+          "Removes: " + row.removalItems.prefix(4).joined(separator: ", ")
+            + (row.removalItems.count > 4 ? ", …" : ""))
+          .font(.caption2)
+          .foregroundStyle(.secondary)
+      }
       if let refusal = row.refusal {
         Text(refusal).font(.caption2).foregroundStyle(.red)
           .fixedSize(horizontal: false, vertical: true)
@@ -698,9 +867,81 @@ struct RedactionMarksView: View {
         Button("Add Rectangle") { model.addRectangleMark() }
           .accessibilityLabel("Add rectangle redaction mark")
       }
-      Text("Coordinates are page space (points, origin bottom-left).")
+      HStack(spacing: 8) {
+        Text("Repeated pages:").font(.caption2).foregroundStyle(.secondary)
+        TextField("1-3", text: $model.repeatedRegionPages)
+          .textFieldStyle(.roundedBorder)
+          .frame(width: 90)
+          .accessibilityLabel("Repeated region page range")
+        Button("Add Repeated Region") { model.addRepeatedRegion() }
+          .accessibilityLabel("Add repeated rectangle region")
+      }
+      Text("Coordinates are page space (points, origin bottom-left). The same rectangle is staged on every page in the range; one Apply covers them all.")
         .font(.caption2)
         .foregroundStyle(.secondary)
+    }
+  }
+
+  private var overlaySection: some View {
+    VStack(alignment: .leading, spacing: 8) {
+      Text("Redaction overlay (paint only)").font(.headline)
+      Text(
+        "The marked content is removed whether or not an overlay is painted. The lines below are "
+          + "exactly what Apply paints; the mark list shows the per-mark overlay text.")
+        .font(.caption2)
+        .foregroundStyle(.secondary)
+        .fixedSize(horizontal: false, vertical: true)
+      HStack(spacing: 10) {
+        Toggle("Paint overlay", isOn: $model.overlayEnabled)
+        Picker("Fill", selection: $model.overlayFillColor) {
+          ForEach(Array(RedactionMarksPanelModel.overlayFillNames.enumerated()), id: \.offset) {
+            index, name in
+            Text(name).tag(index)
+          }
+        }
+        .frame(width: 150)
+        Picker("Text color", selection: $model.overlayTextColor) {
+          ForEach(Array(RedactionMarksPanelModel.overlayTextNames.enumerated()), id: \.offset) {
+            index, name in
+            Text(name).tag(index)
+          }
+        }
+        .frame(width: 150)
+        HStack(spacing: 4) {
+          Text("Size").font(.caption2).foregroundStyle(.secondary)
+          TextField("9", text: $model.overlayFontSize)
+            .textFieldStyle(.roundedBorder)
+            .frame(width: 46)
+            .accessibilityLabel("Overlay text size")
+        }
+      }
+      HStack(spacing: 10) {
+        TextField("Replacement text (optional)", text: $model.overlayReplacementText)
+          .textFieldStyle(.roundedBorder)
+          .frame(maxWidth: 240)
+          .accessibilityLabel("Redaction replacement text")
+        Picker("Reason code", selection: $model.overlayReasonChoice) {
+          ForEach(
+            Array(RedactionMarksPanelModel.overlayReasonChoices.enumerated()), id: \.offset
+          ) { index, title in
+            Text(title).tag(index)
+          }
+        }
+        .frame(width: 190)
+        if model.overlayReasonChoice == RedactionReasonCode.presets.count + 1 {
+          TextField("Custom label", text: $model.overlayCustomReason)
+            .textFieldStyle(.roundedBorder)
+            .frame(width: 150)
+            .accessibilityLabel("Custom reason code label")
+        }
+        Toggle("Paint reason label", isOn: $model.overlayShowsReasonCode)
+      }
+      HStack(spacing: 10) {
+        Text(model.overlaySummary).font(.caption2).foregroundStyle(.secondary)
+        Spacer()
+        Button("Reset overlay to fill only") { model.resetOverlayToFillOnly() }
+          .font(.caption)
+      }
     }
   }
 
@@ -708,6 +949,9 @@ struct RedactionMarksView: View {
     VStack(alignment: .leading, spacing: 8) {
       Text("Apply").font(.headline)
       Text(model.planSummary).font(.caption.weight(.medium))
+      Text(model.overlaySummary)
+        .font(.caption2)
+        .foregroundStyle(.secondary)
       Picker("Hidden text policy", selection: $model.hiddenPolicy) {
         ForEach(RedactionHiddenTextPolicy.allCases, id: \.self) { policy in
           Text(policy.title).tag(policy)

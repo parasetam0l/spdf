@@ -47,11 +47,17 @@ public struct RedactionMark: Identifiable, Sendable, Equatable {
   /// True for a hidden (invisible text / generated OCR layer) match. Hidden
   /// marks never paint the visible fill.
   public var isHiddenText: Bool
+  /// PAG-adjacent RED-04: true for an OCR/text mark whose visible pixels live
+  /// in a scanned image draw. Applying it removes the whole intersecting image
+  /// draw (disclosed in the plan), because removing only the hidden text layer
+  /// would leave the raster pixels behind.
+  public var removesRasterPaint: Bool
 
   public init(
     id: UUID = UUID(), pageID: PDFObjectID, pageIndex: Int, kind: RedactionMarkKind,
     rects: [[Double]], reason: String? = nil, matchedText: String? = nil,
-    sources: [String] = [], isHiddenText: Bool = false
+    sources: [String] = [], isHiddenText: Bool = false,
+    removesRasterPaint: Bool = false
   ) {
     self.id = id
     self.pageID = pageID
@@ -62,6 +68,7 @@ public struct RedactionMark: Identifiable, Sendable, Equatable {
     self.matchedText = matchedText
     self.sources = sources
     self.isHiddenText = isHiddenText
+    self.removesRasterPaint = removesRasterPaint
   }
 
   /// Union of the review rectangles, or nil when the geometry is invalid.
@@ -85,6 +92,7 @@ public struct RedactionMark: Identifiable, Sendable, Equatable {
       parts.append("“\(clipped)”")
     }
     if isHiddenText { parts.append("hidden text") }
+    if removesRasterPaint { parts.append("removes underlying scan") }
     if let reason, !reason.isEmpty { parts.append(reason) }
     return parts.joined(separator: " · ")
   }
@@ -155,7 +163,7 @@ public struct RedactionMarkStore: Sendable, Equatable {
   public mutating func add(
     kind: RedactionMarkKind, pageID: PDFObjectID, pageIndex: Int, rects: [[Double]],
     reason: String? = nil, matchedText: String? = nil, sources: [String] = [],
-    isHiddenText: Bool = false
+    isHiddenText: Bool = false, removesRasterPaint: Bool = false
   ) throws -> RedactionMark {
     guard pageIndex >= 0 else {
       throw PDFError(.malformed, "A redaction mark needs a non-negative page index")
@@ -163,7 +171,8 @@ public struct RedactionMarkStore: Sendable, Equatable {
     try Self.validateRects(rects, kind: kind)
     let mark = RedactionMark(
       pageID: pageID, pageIndex: pageIndex, kind: kind, rects: rects, reason: reason,
-      matchedText: matchedText, sources: sources, isHiddenText: isHiddenText)
+      matchedText: matchedText, sources: sources, isHiddenText: isHiddenText,
+      removesRasterPaint: removesRasterPaint)
     marks.append(mark)
     return mark
   }
@@ -329,9 +338,36 @@ public struct RedactionMarkPlanEntry: Identifiable, Sendable, Equatable {
   public let paintsFill: Bool
   /// Extra review notes (for example "images and vector paint are retained").
   public let notes: [String]
+  /// RED-03: exact overlay lines painted for this mark (empty when the overlay
+  /// paints no text). The apply command paints exactly these lines.
+  public let overlayText: [String]
+  /// RED-04: short descriptions of the paint units this mark removes.
+  public let removalItems: [String]
 
   public var refusal: String? { status.refusal }
   public var isReady: Bool { status.isReady }
+
+  public init(
+    id: UUID, pageIndex: Int, kind: RedactionMarkKind, summary: String, status: Status,
+    textRuns: Int, hiddenTextRuns: Int, annotations: Int, formFields: Int, images: Int,
+    paintsFill: Bool, notes: [String], overlayText: [String] = [],
+    removalItems: [String] = []
+  ) {
+    self.id = id
+    self.pageIndex = pageIndex
+    self.kind = kind
+    self.summary = summary
+    self.status = status
+    self.textRuns = textRuns
+    self.hiddenTextRuns = hiddenTextRuns
+    self.annotations = annotations
+    self.formFields = formFields
+    self.images = images
+    self.paintsFill = paintsFill
+    self.notes = notes
+    self.overlayText = overlayText
+    self.removalItems = removalItems
+  }
 }
 
 /// A complete, non-mutating review of every staged mark.
@@ -341,6 +377,9 @@ public struct RedactionMarkPlan: Sendable, Equatable {
   /// Pages whose hidden text/OCR layers the apply run will clear entirely.
   public let hiddenTextPageIndexes: [Int]
   public let disclosures: [String]
+  /// RED-03: exactly what the apply run paints. Distinct from the removal: the
+  /// overlay is paint only, and the marked content is removed regardless.
+  public let overlay: RedactionOverlayOptions
 
   public var pendingCount: Int { entries.filter { $0.status == .pending }.count }
   public var appliedCount: Int { entries.filter { $0.status == .applied }.count }
@@ -374,6 +413,18 @@ public struct RedactionMarkPlan: Sendable, Equatable {
     return parts.joined(separator: ", ") + "."
   }
 
+  public init(
+    entries: [RedactionMarkPlanEntry], options: RedactionApplicationOptions,
+    hiddenTextPageIndexes: [Int], disclosures: [String],
+    overlay: RedactionOverlayOptions? = nil
+  ) {
+    self.entries = entries
+    self.options = options
+    self.hiddenTextPageIndexes = hiddenTextPageIndexes
+    self.disclosures = disclosures
+    self.overlay = overlay ?? RedactionOverlayOptions(applicationOptions: options)
+  }
+
   /// The exact command the panel applies when the user confirms. Nil unless
   /// the plan can be applied.
   public func command(marks: [RedactionMark]) -> RedactMarksCommand? {
@@ -382,7 +433,7 @@ public struct RedactionMarkPlan: Sendable, Equatable {
       entries.contains { $0.id == mark.id && $0.status == .pending }
     }
     guard !pending.isEmpty else { return nil }
-    return RedactMarksCommand(marks: pending, options: options)
+    return RedactMarksCommand(marks: pending, options: options, overlay: overlay)
   }
 }
 
@@ -392,8 +443,11 @@ public enum RedactionMarkPlanner {
   public static func plan(
     store: RedactionMarkStore, graph: PDFGraph, pageIDs: [PDFObjectID],
     options: RedactionApplicationOptions = RedactionApplicationOptions(),
+    overlay: RedactionOverlayOptions? = nil,
     limits: PDFLimits = PDFLimits()
   ) throws -> RedactionMarkPlan {
+    let overlay = overlay ?? RedactionOverlayOptions(applicationOptions: options)
+    try overlay.validate()
     let resolver = try RedactionPageResolver(pageIDs: pageIDs, graph: graph)
     var entries: [RedactionMarkPlanEntry] = []
     var hiddenPages: Set<Int> = []
@@ -433,8 +487,8 @@ public enum RedactionMarkPlanner {
       }
       entries.append(
         try entry(
-          for: mark, pageIndex: pageIndex, graph: graph, options: options, limits: limits,
-          hidden: hidden))
+          for: mark, pageIndex: pageIndex, graph: graph, options: options, overlay: overlay,
+          limits: limits, hidden: hidden))
     }
     var disclosures: [String] = []
     disclosures.append("Nothing has been removed or saved until you apply these marks.")
@@ -452,17 +506,35 @@ public enum RedactionMarkPlanner {
       disclosures.append("Apply is refused because hidden text is present on \(labels).")
     }
     disclosures.append(
-      "Text marks leave unrelated images and vector paint untouched; region marks follow the conservative "
-        + "region policy and refuse unsupported paint. Saving writes a verified full rewrite with no earlier revisions.")
+      "Region marks use the broadened RED-04 paint profile: whole intersecting image draws "
+        + "(including scanned and masked images), whole reusable-form invocations covered by one "
+        + "region and fully covered vector paint are removed; partial form/vector intersections, "
+        + "inline images, gradient shading and tiling patterns refuse instead of leaving partial "
+        + "paint. Text marks remove only the reviewed glyphs and leave unrelated paint untouched "
+        + "unless the mark explicitly removes an underlying scan.")
+    disclosures.append(
+      "Removal and overlay paint are separate operations: the marked content is removed whether "
+        + "or not an overlay is painted, and the overlay lines listed for each mark are exactly "
+        + "what apply paints.")
+    disclosures.append(overlay.summary)
+    if overlay.paintsText {
+      let lines = overlay.reviewLines
+      if !lines.isEmpty {
+        disclosures.append("Overlay text: \"" + lines.joined(separator: "\" / \"") + "\".")
+      }
+    }
+    disclosures.append(
+      "Saving writes a verified full rewrite with no earlier revisions; removed image and form "
+        + "objects become unreachable and are pruned.")
     return RedactionMarkPlan(
       entries: entries, options: options, hiddenTextPageIndexes: hiddenPages.sorted(),
-      disclosures: disclosures)
+      disclosures: disclosures, overlay: overlay)
   }
 
   private static func entry(
     for mark: RedactionMark, pageIndex: Int, graph: PDFGraph,
-    options: RedactionApplicationOptions, limits: PDFLimits,
-    hidden: RedactionHiddenTextInventory
+    options: RedactionApplicationOptions, overlay: RedactionOverlayOptions,
+    limits: PDFLimits, hidden: RedactionHiddenTextInventory
   ) throws -> RedactionMarkPlanEntry {
     var notes: [String] = []
     var textRuns = 0
@@ -471,6 +543,7 @@ public enum RedactionMarkPlanner {
     var formFields = 0
     var images = 0
     var paintsFill = false
+    var removalItems: [String] = []
     var status: RedactionMarkPlanEntry.Status = .pending
     switch mark.kind {
     case .page:
@@ -489,9 +562,9 @@ public enum RedactionMarkPlanner {
         formFields = try pageFieldCount(pageID: mark.pageID, in: graph)
         let placements = try ImageInventory.placements(in: graph, pageID: mark.pageID)
         images = placements.count
-        paintsFill = options.paintsFill
+        paintsFill = overlay.paintsOverlay
         notes.append(
-          "The whole page is replaced by the redaction fill; page annotations and widgets are removed.")
+          "The whole page is replaced by the redaction paint; page annotations and widgets are removed.")
         if !placements.isEmpty {
           notes.append("Page images and vector paint are removed with the page content.")
         }
@@ -500,21 +573,18 @@ public enum RedactionMarkPlanner {
       }
     case .region:
       do {
-        let command = RedactRegionsCommand(
-          pageID: mark.pageID, regions: mark.rects, fillColor: options.fillColor,
-          paintsFill: options.paintsFill)
+        // RED-04: the broadened paint profile (whole image draws incl. masks and
+        // scans, whole covered form invocations, fully covered vector paths).
+        let command = RedactPaintRegionsCommand(pageID: mark.pageID, regions: mark.rects)
         try command.validate(in: graph)
         if options.hiddenTextPolicy == .refuseWhenPresent, hidden.hasHiddenText {
           throw PDFError(
             .unsupported,
             "This page carries hidden or OCR text and the policy refuses to apply without removing it")
         }
-        let layout = try PageTextLayout.build(pageID: mark.pageID, in: graph, limits: limits)
-        textRuns = Set(
-          layout.clusters.filter { cluster in
-            RedactRegionsCommand.intersects(cluster.bounds, anyRegion: mark.rects)
-          }.map(\.runIndex)
-        ).count
+        let analysis = try RedactionPaintAnalyzer.analyze(
+          pageID: mark.pageID, regions: mark.rects, graph: graph, limits: limits)
+        textRuns = analysis.textRunIndices.count
         hiddenRuns = hidden.hiddenRunCount
         annotations = try AnnotationInventory.annotations(in: graph, pageID: mark.pageID)
           .filter { annotation in
@@ -525,11 +595,13 @@ public enum RedactionMarkPlanner {
           }.count
         formFields = try pageFieldCount(
           pageID: mark.pageID, in: graph, regions: mark.rects)
-        images = try ImageInventory.placements(in: graph, pageID: mark.pageID)
-          .filter { RedactRegionsCommand.intersects($0.bounds, anyRegion: mark.rects) }.count
-        paintsFill = options.paintsFill
-        notes.append(
-          "Region marks remove whole intersected text runs, intersecting removals and annotations per the conservative policy.")
+        images = analysis.imageCount + analysis.formCount
+        paintsFill = overlay.paintsOverlay
+        removalItems = analysis.items.filter(\.isRemovable).map(\.description)
+        notes.append("Region policy: " + analysis.summary)
+        if !analysis.disclosures.isEmpty {
+          notes.append(contentsOf: analysis.disclosures.prefix(2))
+        }
       } catch {
         status = .refused(error.localizedDescription)
       }
@@ -559,11 +631,44 @@ public enum RedactionMarkPlanner {
           }.count
         formFields = try pageFieldCount(
           pageID: mark.pageID, in: graph, regions: mark.rects)
-        paintsFill = options.paintsFill && !mark.isHiddenText
+        paintsFill = overlay.paintsOverlay && !mark.isHiddenText
         notes.append("Only the reviewed glyphs are removed; surrounding text keeps its position.")
         notes.append("Unrelated images and vector paint are retained.")
+        if mark.removesRasterPaint {
+          // RED-04: OCR/text over a scan removes the whole intersecting image
+          // draw, because removing only the hidden text layer leaves the
+          // visible pixels. Disclosed before apply.
+          let raster = try RedactionPaintAnalyzer.imageDraws(
+            pageID: mark.pageID, regions: mark.rects, graph: graph, limits: limits)
+          if !raster.refusals.isEmpty {
+            throw PDFError(.unsupported, raster.refusals.joined(separator: " "))
+          }
+          if raster.imageCount > 0 {
+            images += raster.imageCount
+            removalItems.append(
+              contentsOf: raster.items.filter(\.isRemovable).map(\.description))
+            notes.append(
+              "The reviewed text sits over a scan: the whole intersecting image draw is removed "
+                + "so the raster pixels do not retain the text.")
+          } else {
+            notes.append("No intersecting scanned image was found; only the text layer is removed.")
+          }
+        }
       } catch {
         status = .refused(error.localizedDescription)
+      }
+    }
+    if status.refusal != nil { paintsFill = false }
+    // RED-03: the reviewed overlay must be exactly paintable before apply.
+    let overlayText = (status == .pending && !mark.isHiddenText)
+      ? overlay.lines(for: mark) : []
+    if status == .pending, !mark.isHiddenText, paintsFill, overlay.paintsText {
+      do {
+        try RedactionOverlayPainter.validate(
+          mark: mark, options: overlay, pageID: mark.pageID, in: graph, limits: limits)
+      } catch {
+        status = .refused(error.localizedDescription)
+        paintsFill = false
       }
     }
     if status.refusal != nil { paintsFill = false }
@@ -571,7 +676,8 @@ public enum RedactionMarkPlanner {
       id: mark.id, pageIndex: pageIndex, kind: mark.kind, summary: mark.summary,
       status: status, textRuns: textRuns, hiddenTextRuns: hiddenRuns,
       annotations: annotations, formFields: formFields, images: images,
-      paintsFill: paintsFill, notes: notes)
+      paintsFill: paintsFill, notes: notes, overlayText: overlayText,
+      removalItems: removalItems)
   }
 
   private static func pageFieldCount(

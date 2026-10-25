@@ -13,6 +13,10 @@ final class RedactionMarksSession: NSObject {
   var store = RedactionMarkStore()
   var termSets = RedactionTermSetLibrary()
   var options = RedactionApplicationOptions()
+  /// RED-03: exactly what apply paints over each reviewed area (fill and
+  /// optional replacement text / reason code). Kept separate from `options`,
+  /// which controls removal behavior.
+  var overlay = RedactionOverlayOptions()
   var reviewQueue: RedactionReviewQueue?
   var lastSearchRequest: RedactionSearchRequest?
   var lastAppliedMarkIDs: Set<UUID> = []
@@ -216,7 +220,30 @@ extension SPDFDocument {
     return try? RedactionMarkPlanner.plan(
       store: redactionMarksSession.store, graph: graph,
       pageIDs: editSession.pageIDs, options: options,
+      overlay: redactionMarksSession.overlay,
       limits: SPDFDocumentResourcePolicy.parsingLimits)
+  }
+
+  /// RED-03: stage the same rectangle on a 1-based page range such as "1-3, 5".
+  /// Nothing is applied; the marks are pending until Apply.
+  @discardableResult
+  func markRepeatedRedactionRegion(pageRange: String, rect: [Double]) -> Int {
+    guard requireContentEditing(for: "Mark for Redaction") else { return 0 }
+    let session = redactionMarksSession
+    let marks: [RedactionMark]
+    do {
+      marks = try session.store.addRepeatedRegion(
+        pageIDs: editSession.pageIDs, pageRange: pageRange, rects: [rect],
+        source: "Repeated region")
+    } catch {
+      presentError(error)
+      return 0
+    }
+    showRedactionMarks()
+    session.panelController?.refresh()
+    session.panelController?.note(
+      "Staged " + String(marks.count) + " repeated region mark(s) as pending — nothing has been removed yet.")
+    return marks.count
   }
 
   func redactionSearchPreview(
@@ -262,7 +289,22 @@ extension SPDFDocument {
     guard requireContentEditing(for: "Apply Redactions") else { return false }
     guard finishPendingEdits() else { return false }
     guard let graph = editSession.currentGraph else { return false }
-    let command = RedactMarksCommand(store: session.store, options: session.options)
+    // Apply the reviewed plan's command so the painted overlay (RED-03) is
+    // exactly what the panel listed; the plan refuses when any mark cannot
+    // apply. Planning itself removes and paints nothing.
+    let plan = try? RedactionMarkPlanner.plan(
+      store: session.store, graph: graph, pageIDs: editSession.pageIDs,
+      options: session.options, overlay: session.overlay,
+      limits: SPDFDocumentResourcePolicy.parsingLimits)
+    guard let command = plan?.command(marks: session.store.pendingMarks) else {
+      presentError(
+        PDFError(
+          .unsupported,
+          plan?.statusDescription
+            ?? "The pending redaction marks cannot be applied; resolve the refusals first."))
+      session.panelController?.refresh()
+      return false
+    }
     do {
       try command.validate(in: graph)
     } catch {

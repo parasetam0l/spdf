@@ -32,11 +32,13 @@ Supported images already present in the PDF can also be selected and dragged or 
 
 ## Annotate, fill forms, and organize pages
 
+File → **Create PDF → From Clipboard, Scanner or Images…** builds a PDF from ordered images, pasted text/images or a documented Image Capture / Print & Scan handoff, with page size, orientation, margins and background options.
+
 Tools → **Review Reports…** exports a printable review summary (page context, numbered comment anchors, reply threads and filters) or, while a comparison is open, a portable comparison report (chosen options, page mapping, change entries with page-space bounds and region images, uncertainty records). Both are local files that never modify the document; larger sets are bounded and refused rather than written partially.
 
 Click **Comments** for Highlight, Add Note and Draw controls. The comments sidebar supports navigation, replies, and review state. The Edit and Annotate menus retain advanced annotation commands and drawn signatures. Common form fields can be filled in the page or Forms sidebar; press Return to commit a text value. Form properties and authoring commands are available in the Form menu.
 
-Click **Pages** for Organize Pages, Insert Blank Page and Rotate Right. The Page menu includes importing, reordering, rotation and deletion. Operations that would damage references are refused or require a supported resolution.
+Click **Pages** for the thumbnail organizer (drag block reorder, click/⌘/⇧ selection, range field, zoom, page labels/rotation and one-undo batch move/rotate/duplicate/delete/extract), Insert Blank Page and Rotate Right. The organizer also hosts **Replace Pages**, which previews exactly which destination annotations, links, labels and form fields survive; its retention matrix is shown before applying and source fields follow the chosen rename/refuse policy. The Page menu includes importing, reordering, rotation and deletion. Operations that would damage references are refused or require a supported resolution.
 
 Page → Page Marks adds headers, footers, page numbers, watermarks and Bates numbering with a preview, page list, font, size, opacity, angle, color and margin. An applied mark set is listed in the same dialog and can be edited in place: the previous paint is replaced instead of stacking a second mark, other page content and other mark sets stay intact, and the change is one undo step. **Verify the applied mark sets** shows the text each set actually paints and flags a missing, changed or duplicated mark. Sets saved by an older version, or authored with an embedded custom font, can be verified and removed but not edited in place. Page → Remove Page Mark removes one set as a unit.
 
@@ -44,7 +46,7 @@ Page → **Bates Numbering (Batch)…** numbers a set of PDF files without openi
 
 ## OCR and exports
 
-OCR in the Annotate menu uses on-device recognition to add searchable text to scans. Tools → Review Tables shows detected cells before CSV or XLSX export. File → Export groups text, page images, HTML, DOCX, table, attachment and printed PDF exports; [Exports](Exports.md) explains their fidelity limits. Tools groups comparison, optimization, repair, security and print-production commands.
+OCR in the Annotate menu uses on-device recognition to add searchable text to scans. **Clean Up Scan…** previews deskew, orientation, crop, contrast and background cleanup per page and applies a selective, recoverable replacement; **Reconstruct Scanned Text…** replaces one reviewed word's pixels with the sampled background and adds a visible, searchable, editable text run (complex/colour backgrounds, non-Latin text and ambiguous regions refuse). Tools → Review Tables shows detected cells before CSV or XLSX export. File → Export groups text, page images, HTML, DOCX, table, attachment and printed PDF exports; [Exports](Exports.md) explains their fidelity limits. Tools groups comparison, optimization, repair, security and print-production commands.
 
 ## Save and recover
 

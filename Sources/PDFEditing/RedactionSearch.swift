@@ -211,12 +211,19 @@ public struct RedactionSearchHit: Identifiable, Sendable, Equatable {
   /// unremovable.
   public let isExcludedByScope: Bool
   public let eligibility: Eligibility
+  /// RED-04: true when the match sits over page raster content. Applying such a
+  /// mark also removes the whole intersecting scanned image draw, because
+  /// removing only the hidden text layer would leave the visible pixels.
+  public let requiresRasterRemoval: Bool
+  /// RED-04 review note for a raster-backed match (nil otherwise).
+  public let rasterNote: String?
 
   public init(
     id: String, pageID: PDFObjectID, pageIndex: Int, lineIndex: Int, text: String,
     contextBefore: String, contextAfter: String, bounds: [[Double]], runIndices: [Int],
     sources: [String], isHidden: Bool, isExcludedByScope: Bool,
-    eligibility: Eligibility
+    eligibility: Eligibility, requiresRasterRemoval: Bool = false,
+    rasterNote: String? = nil
   ) {
     self.id = id
     self.pageID = pageID
@@ -231,9 +238,13 @@ public struct RedactionSearchHit: Identifiable, Sendable, Equatable {
     self.isHidden = isHidden
     self.isExcludedByScope = isExcludedByScope
     self.eligibility = eligibility
+    self.requiresRasterRemoval = requiresRasterRemoval
+    self.rasterNote = rasterNote
   }
 
   public var pageLabel: String { "Page \(pageIndex + 1)" }
+  /// RED-04: applying this hit removes the whole intersecting scan draw too.
+  public var removesRasterPaint: Bool { requiresRasterRemoval }
   public var isEligible: Bool { eligibility.isEligible }
   public var refusal: String? { eligibility.reason }
 
@@ -261,6 +272,10 @@ public struct RedactionSearchPreview: Sendable, Equatable {
   public var refusedCount: Int { hits.count - eligibleCount }
   public var hiddenCount: Int { hits.filter(\.isHidden).count }
   public var scopeExcludedCount: Int { hits.filter(\.isExcludedByScope).count }
+  /// RED-04: eligible matches that also remove an intersecting scanned image.
+  public var rasterRemovalCount: Int {
+    hits.filter { $0.isEligible && $0.requiresRasterRemoval }.count
+  }
 
   public var summary: String {
     if hits.isEmpty { return "No matches." }
@@ -356,7 +371,8 @@ public enum RedactionSearch {
       let runs = try TextRunIndexer.runs(in: content, graph: graph, limits: limits)
       let hiddenInfo = try RedactionHiddenText.hiddenInfo(
         pageID: pageID, in: graph, content: content, runs: runs, limits: limits)
-      let placements = (try? ImageInventory.placements(in: graph, pageID: pageID)) ?? []
+      let imageBounds = ((try? StructureTaggingAssistant.imagePlacements(
+        in: content, graph: graph)) ?? []).map(\.bounds)
       var matches: [Match] = []
       for query in queries {
         for match in TextSearch.search(
@@ -421,6 +437,8 @@ public enum RedactionSearch {
         let context = lineContext(layout: layout, lineIndex: first.lineIndex, clusterRange: clusterRange)
         var eligibility: RedactionSearchHit.Eligibility = .eligible
         var excludedByScope = false
+        var requiresRasterRemoval = false
+        var rasterNote: String?
         if mixed {
           eligibility = .refused(
             "The match crosses visible and hidden text; review each appearance separately.")
@@ -429,15 +447,18 @@ public enum RedactionSearch {
           eligibility = .refused(
             "Hidden/OCR text is excluded by the selected scope. Enable hidden and OCR text to review and remove it.")
         } else if isHidden {
-          if let raster = rasterRefusal(bounds: bounds, placements: placements) {
-            eligibility = .refused(raster)
-          } else {
-            do {
-              _ = try RedactionTextPrecision.analyze(
-                pageID: pageID, rects: bounds, hiddenOnly: true, in: graph, limits: limits)
-            } catch {
-              eligibility = .refused(error.localizedDescription)
-            }
+          // RED-04: OCR/text over a scan is now reviewable. Applying the mark
+          // removes the whole intersecting image draw so pixels cannot retain
+          // the text; the review note says so before anything is staged.
+          if let note = rasterRemovalNote(bounds: bounds, imageBounds: imageBounds) {
+            requiresRasterRemoval = true
+            rasterNote = note
+          }
+          do {
+            _ = try RedactionTextPrecision.analyze(
+              pageID: pageID, rects: bounds, hiddenOnly: true, in: graph, limits: limits)
+          } catch {
+            eligibility = .refused(error.localizedDescription)
           }
         } else {
           do {
@@ -455,7 +476,8 @@ public enum RedactionSearch {
             text: layout.text(in: clusterRange),
             contextBefore: context.before, contextAfter: context.after, bounds: bounds,
             runIndices: runIndices, sources: [label], isHidden: isHidden,
-            isExcludedByScope: excludedByScope, eligibility: eligibility))
+            isExcludedByScope: excludedByScope, eligibility: eligibility,
+            requiresRasterRemoval: requiresRasterRemoval, rasterNote: rasterNote))
       }
     }
     // Merge identical geometry found by several sources.
@@ -479,7 +501,9 @@ public enum RedactionSearch {
         contextBefore: candidate.contextBefore, contextAfter: candidate.contextAfter,
         bounds: candidate.bounds, runIndices: candidate.runIndices,
         sources: candidate.sources.sorted(), isHidden: candidate.isHidden,
-        isExcludedByScope: candidate.isExcludedByScope, eligibility: candidate.eligibility)
+        isExcludedByScope: candidate.isExcludedByScope, eligibility: candidate.eligibility,
+        requiresRasterRemoval: candidate.requiresRasterRemoval,
+        rasterNote: candidate.rasterNote)
     }
     return RedactionSearchPreview(hits: hits, includeHiddenText: request.includeHiddenText)
   }
@@ -504,6 +528,9 @@ public enum RedactionSearch {
     let isHidden: Bool
     let isExcludedByScope: Bool
     let eligibility: RedactionSearchHit.Eligibility
+    /// RED-04: the match sits over scanned raster content.
+    let requiresRasterRemoval: Bool
+    let rasterNote: String?
 
     /// The source carrying this candidate into the merge step.
     var pendingSource: String { sources.first ?? "" }
@@ -549,16 +576,19 @@ public enum RedactionSearch {
     }
   }
 
-  static func rasterRefusal(
-    bounds: [[Double]], placements: [ImagePlacement]
+  /// RED-04: a hidden/OCR match over an image draw is markable; applying it
+  /// removes the whole intersecting scan so the pixels do not retain the text.
+  /// Returns the review note when raster paint backs the match.
+  static func rasterRemovalNote(
+    bounds: [[Double]], imageBounds: [[Double]]
   ) -> String? {
-    let covering = placements.contains { placement in
-      RedactRegionsCommand.intersects(placement.bounds, anyRegion: bounds)
+    let covering = imageBounds.contains { placementBounds in
+      RedactRegionsCommand.intersects(placementBounds, anyRegion: bounds)
     }
     guard covering else { return nil }
     return
-      "Hidden or OCR text sits over page raster content; removing only the text layer would leave the pixels. "
-      + "Use a rectangle or whole-page redaction mark instead."
+      "This OCR/text match sits over scanned page content. Applying it removes the whole "
+      + "intersecting scanned image draw so the pixels do not retain the text."
   }
 
   static func lineContext(
@@ -674,7 +704,7 @@ public struct RedactionReviewQueue: Sendable, Equatable {
       let mark = try store.add(
         kind: .text, pageID: hit.pageID, pageIndex: pageIndex, rects: hit.bounds,
         reason: reason, matchedText: hit.text, sources: hit.sources,
-        isHiddenText: hit.isHidden)
+        isHiddenText: hit.isHidden, removesRasterPaint: hit.requiresRasterRemoval)
       added += 1
       selectedHitIDs.remove(hit.id)
       _ = mark

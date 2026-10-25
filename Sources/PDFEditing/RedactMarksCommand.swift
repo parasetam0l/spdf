@@ -113,18 +113,25 @@ enum RedactionWholePage {
 public struct RedactMarksCommand: PDFEditCommand, Equatable, Sendable {
   public let marks: [RedactionMark]
   public let options: RedactionApplicationOptions
+  /// RED-03: the overlay painted after removal. It is deliberately a separate
+  /// value from the removal options; the reviewed overlay lines and the
+  /// committed paint come from the same options.
+  public let overlay: RedactionOverlayOptions
 
   public init(
-    marks: [RedactionMark], options: RedactionApplicationOptions = RedactionApplicationOptions()
+    marks: [RedactionMark], options: RedactionApplicationOptions = RedactionApplicationOptions(),
+    overlay: RedactionOverlayOptions? = nil
   ) {
     self.marks = marks
     self.options = options
+    self.overlay = overlay ?? RedactionOverlayOptions(applicationOptions: options)
   }
 
   public init(
-    store: RedactionMarkStore, options: RedactionApplicationOptions = RedactionApplicationOptions()
+    store: RedactionMarkStore, options: RedactionApplicationOptions = RedactionApplicationOptions(),
+    overlay: RedactionOverlayOptions? = nil
   ) {
-    self.init(marks: store.pendingMarks, options: options)
+    self.init(marks: store.pendingMarks, options: options, overlay: overlay)
   }
 
   public var name: String { "Apply Redactions" }
@@ -148,6 +155,7 @@ public struct RedactMarksCommand: PDFEditCommand, Equatable, Sendable {
       throw PDFError(.malformed, "There are no pending redaction marks to apply")
     }
     try AnnotationSupport.validateColor(options.fillColor, label: "Redaction fill")
+    try overlay.validate()
     let pageIDs = try PageTreeView(graph: graph).pages
     let pageSet = Set(pageIDs)
     var grouped: [PDFObjectID: [RedactionMark]] = [:]
@@ -168,6 +176,11 @@ public struct RedactMarksCommand: PDFEditCommand, Equatable, Sendable {
         }
         try RedactionWholePage.validate(
           pageID: pageID, rect: pageMarksOnly[0].rects[0], in: graph, limits: limits)
+        if !pageMarksOnly[0].isHiddenText {
+          try RedactionOverlayPainter.validate(
+            mark: pageMarksOnly[0], options: overlay, pageID: pageID, in: graph,
+            limits: limits)
+        }
         continue
       }
       let hidden = try RedactionHiddenText.inventory(
@@ -177,14 +190,26 @@ public struct RedactMarksCommand: PDFEditCommand, Equatable, Sendable {
           .unsupported,
           "This page carries hidden or OCR text and the hidden-text policy refuses to apply; nothing was removed")
       }
+      // RED-03: the overlay is reviewed per mark and must be paintable exactly.
+      for mark in pageMarks where !mark.isHiddenText {
+        try RedactionOverlayPainter.validate(
+          mark: mark, options: overlay, pageID: pageID, in: graph, limits: limits)
+      }
       let regionMarks = pageMarks.filter { $0.kind == .region }
       if !regionMarks.isEmpty {
-        try RedactRegionsCommand(
-          pageID: pageID, regions: regionMarks.flatMap(\.rects),
-          fillColor: options.fillColor, paintsFill: options.paintsFill
+        // RED-04: broadened paint profile (images incl. masks/scans, whole
+        // covered forms, fully covered vector paint).
+        try RedactPaintRegionsCommand(
+          pageID: pageID, regions: regionMarks.flatMap(\.rects)
         ).validate(in: graph)
       }
       let textMarks = pageMarks.filter { $0.kind == .text }
+      let rasterMarks = textMarks.filter(\.removesRasterPaint)
+      if !rasterMarks.isEmpty {
+        try RedactPaintRegionsCommand(
+          pageID: pageID, regions: rasterMarks.flatMap(\.rects), scope: .imagesOnly
+        ).validate(in: graph)
+      }
       let visible = textMarks.filter { !$0.isHiddenText }
       if !visible.isEmpty {
         let rects = visible.flatMap(\.rects)
@@ -218,16 +243,22 @@ public struct RedactMarksCommand: PDFEditCommand, Equatable, Sendable {
     for pageID in pageIDs {
       guard let pageMarks = grouped[pageID], !pageMarks.isEmpty else { continue }
       if let pageMark = pageMarks.first(where: { $0.kind == .page }) {
+        // The whole page is replaced; the overlay (if any) paints in its place.
         graph = try RedactionWholePage.apply(
           pageID: pageID, rect: pageMark.rects[0], fillColor: options.fillColor,
-          paintsFill: options.paintsFill, in: graph, limits: limits)
+          paintsFill: false, in: graph, limits: limits)
+        if !pageMark.isHiddenText {
+          graph = try RedactionOverlayPainter.paint(
+            marks: [pageMark], options: overlay, pageID: pageID, in: graph, limits: limits)
+        }
         continue
       }
       let regionMarks = pageMarks.filter { $0.kind == .region }
       if !regionMarks.isEmpty {
-        graph = try RedactRegionsCommand(
-          pageID: pageID, regions: regionMarks.flatMap(\.rects),
-          fillColor: options.fillColor, paintsFill: options.paintsFill
+        // RED-04: broadened removal only; the RED-03 overlay is painted below
+        // so removal and paint stay separate operations.
+        graph = try RedactPaintRegionsCommand(
+          pageID: pageID, regions: regionMarks.flatMap(\.rects)
         ).apply(to: graph)
       }
       let textMarks = pageMarks.filter { $0.kind == .text }
@@ -257,6 +288,14 @@ public struct RedactMarksCommand: PDFEditCommand, Equatable, Sendable {
         graph = try RedactionTextPrecision.apply(
           pageID: pageID, removals: removals, in: graph, limits: limits)
       }
+      // RED-04: a text mark over a scan removes the whole intersecting image
+      // draw, because removing only the hidden text layer would leave pixels.
+      let rasterMarks = textMarks.filter(\.removesRasterPaint)
+      if !rasterMarks.isEmpty {
+        graph = try RedactPaintRegionsCommand(
+          pageID: pageID, regions: rasterMarks.flatMap(\.rects), scope: .imagesOnly
+        ).apply(to: graph)
+      }
       if options.hiddenTextPolicy == .removeFromAffectedPages {
         try OCRLayer.removeLayer(pageID: pageID, in: &graph)
       }
@@ -264,10 +303,13 @@ public struct RedactMarksCommand: PDFEditCommand, Equatable, Sendable {
         graph = try removeIntersectingAnnotations(pageID: pageID, rects: visibleRects, in: graph)
         graph = try RedactRegionsCommand(pageID: pageID, regions: visibleRects)
           .removeIntersectingFields(in: graph)
-        if options.paintsFill {
-          graph = try RedactRegionsCommand.appendFillStream(
-            regions: visibleRects, color: options.fillColor, pageID: pageID, in: graph)
-        }
+      }
+      // RED-03: paint the reviewed overlay over every removable mark of this
+      // page. Hidden text marks never paint visible overlay.
+      let overlayMarks = (regionMarks + textMarks.filter { !$0.isHiddenText })
+      if !overlayMarks.isEmpty {
+        graph = try RedactionOverlayPainter.paint(
+          marks: overlayMarks, options: overlay, pageID: pageID, in: graph, limits: limits)
       }
     }
     let allPages = try PDFPageTree.pageIDs(in: graph)

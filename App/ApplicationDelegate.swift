@@ -541,6 +541,15 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
   @objc private func showReviewReports(_ sender: Any?) {
     currentDocument?.showReviewReports()
   }
+  @objc private func showCreatePDFPanel(_ sender: Any?) {
+    CreatePDFPanelHost.present(document: currentDocument)
+  }
+  @objc private func showScanCleanup(_ sender: Any?) {
+    currentDocument?.showScanCleanup()
+  }
+  @objc private func showScannedTextReconstruction(_ sender: Any?) {
+    currentDocument?.showScannedTextReconstruction()
+  }
   @objc private func showFormDesignPanel(_ sender: Any?) {
     currentDocument?.showFormDesign()
   }
@@ -604,7 +613,7 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
     currentDocument?.placeGraphicalSignature()
   }
   @objc private func organizePages(_ sender: Any?) {
-    currentDocument?.organizePages()
+    currentDocument?.presentPageOrganizer()
   }
   @objc private func repairDocument(_ sender: Any?) {
     currentDocument?.repairDocument()
@@ -828,6 +837,9 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
     if menuItem.action == #selector(showUpdateSettings) {
       return true
     }
+    if menuItem.action == #selector(showCreatePDFPanel) {
+      return true
+    }
     if menuItem.action == #selector(createPDFFromImages) {
       return true
     }
@@ -910,6 +922,10 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
       return document.canShowOCRReviewPanel
     case #selector(showReviewReports):
       return document.canShowReviewReports
+    case #selector(showScanCleanup):
+      return document.canShowScanCleanupPanel
+    case #selector(showScannedTextReconstruction):
+      return document.canShowScannedTextPanel
     case #selector(showFormDesignPanel):
       return document.canShowFormDesign
     case #selector(detectFormFields):
@@ -1092,6 +1108,10 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
       "From Images…", #selector(createPDFFromImages), target: self, to: create)
     add(
       "From Text…", #selector(createPDFFromText), target: self, to: create)
+    // PAG-08: multi-image/text/clipboard creation with page options and a
+    // documented Image Capture / Print & Scan handoff.
+    add(
+      "From Clipboard, Scanner or Images…", #selector(showCreatePDFPanel), target: self, to: create)
     add("Document Metadata…", #selector(documentMetadata), target: self, to: file)
     add(
       "Open…", #selector(NSDocumentController.openDocument(_:)), key: "o", target: documents,
@@ -1371,6 +1391,12 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
     // OCR-03/OCR-07: suspect-word review and multi-file OCR jobs.
     add("Review OCR Text…", #selector(showOCRReview), target: self, to: annotate)
     add("OCR Files…", #selector(showOCRBatch), target: self, to: annotate)
+    // OCR-04/OCR-05: scan cleanup previews and editable scanned-text
+    // reconstruction.
+    add("Clean Up Scan…", #selector(showScanCleanup), target: self, to: annotate)
+    add(
+      "Reconstruct Scanned Text…", #selector(showScannedTextReconstruction),
+      target: self, to: annotate)
 
     let tools = submenu("Tools", in: bar)
     add("Manage Attachments…", #selector(manageAttachments), target: self, to: tools)

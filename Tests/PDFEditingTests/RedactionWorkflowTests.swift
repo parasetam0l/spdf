@@ -490,7 +490,7 @@ struct RedactionSearchTests {
     #expect(addedAgain == 0)
   }
 
-  @Test func hiddenTextScopeIsExplicitAndOCRMatchesRefuseRasterRemoval() throws {
+  @Test func hiddenTextScopeIsExplicitAndOCRMatchesNowRemoveTheScannedRaster() throws {
     let scanned = try PDFParser.parse(PDFFixtures.scannedPages())
     let pageID = scanned.pageIDs[0]
     let withLayer = try PDFEditingEngine.commit(
@@ -514,10 +514,14 @@ struct RedactionSearchTests {
       queries: ["SECRET-SCAN"], includeHiddenText: true)
     let includedPreview = try RedactionSearch.preview(included, in: withLayer)
     let includedHit = try #require(includedPreview.hits.first)
+    // RED-04: an OCR/text match over a scan is now reviewable; applying it
+    // removes the whole intersecting scanned image draw, disclosed per hit.
     #expect(includedHit.isHidden)
-    #expect(!includedHit.isEligible)
-    #expect(includedHit.refusal?.contains("raster") == true)
-    #expect(includedPreview.eligibleCount == 0)
+    #expect(includedHit.isEligible)
+    #expect(includedHit.requiresRasterRemoval)
+    #expect(includedHit.rasterNote?.contains("scan") == true)
+    #expect(includedPreview.eligibleCount == 1)
+    #expect(includedPreview.rasterRemovalCount == 1)
   }
 
   @Test func hiddenOnlyOCRLayerCanBeRemovedWhenItHasNoRasterBehindIt() throws {

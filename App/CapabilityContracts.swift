@@ -313,7 +313,8 @@ enum CapabilityContractAudit {
     "signExistingSignatureField:", "showSignatureDetails:",
     "showReviewReports:", "exportReviewSummaryPDF:", "exportComparisonReportPDF:",
     "toggleArrangeObjects:", "arrangeSelectedObjects:",
-    "showFormDesignPanel:", "detectFormFields:",
+    "showFormDesignPanel:", "detectFormFields:", "showCreatePDFPanel:",
+    "showScanCleanup:", "showScannedTextReconstruction:",
     "repairDocument:", "reviewTables:", "previewDOCX:", "convertColors:",
     "createArchivalCopy:", "exportComments:", "importComments:", "printDocument:",
   ]
