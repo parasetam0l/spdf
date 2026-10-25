@@ -1972,9 +1972,11 @@ final class SPDFDocument: NSDocument {
 
   /// P18-021: resolve editable document text targets for keyboard traversal
   /// and pointer hit testing, sharing the revision-scoped cache.
-  /// TXT-09: visible page text drawn with a 90/180/270-degree text matrix.
-  /// The overlay opens the single-run editor for these runs; the replacement
-  /// keeps the run's text-show matrix and compensates only the advance.
+  /// TXT-09: visible page text drawn with a rotated page-space text matrix
+  /// (any supported angle with uniform positive scale and no shear). The
+  /// overlay opens a caret-aligned single-run editor for these runs; the
+  /// replacement keeps the run's text-show matrix and compensates only the
+  /// advance.
   private func rotatedTextTargets(pageIndex: Int) -> [PageTextTarget] {
     guard canEditContent, pageIndex >= 0, pageIndex < editSession.pageIDs.count,
       let graph = editSession.currentGraph,
@@ -2012,7 +2014,9 @@ final class SPDFDocument: NSDocument {
       }
       guard rect.count == 4, rect[2] > rect[0], rect[3] > rect[1] else { continue }
       targets.append(PageTextTarget(
-        pageIndex: pageIndex, runIndex: run.runIndex, rect: rect, text: run.text))
+        pageIndex: pageIndex, runIndex: run.runIndex, rect: rect, text: run.text,
+        rotatedAnchor: run.anchor, rotatedDirection: run.direction,
+        rotatedFontSize: run.fontSize))
     }
     rotatedTextCache[pageIndex] = targets
     return targets

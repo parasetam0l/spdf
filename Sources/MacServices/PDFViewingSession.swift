@@ -38,11 +38,19 @@ public struct PageTextTarget: Sendable, Equatable {
   public let style: TextInputStyle?
   public let runIndices: [Int]
   public let paragraph: PageTextParagraph?
+  /// TXT-09: page-space baseline start, unit text direction and page-space
+  /// font size for text drawn with a rotated page-space matrix. Nil for
+  /// ordinary horizontal blocks; the single-run editor uses these to place a
+  /// caret-aligned field.
+  public let rotatedAnchor: [Double]?
+  public let rotatedDirection: [Double]?
+  public let rotatedFontSize: Double?
 
   public init(
     pageIndex: Int, runIndex: Int, rect: [Double], text: String,
     style: TextInputStyle? = nil, runIndices: [Int]? = nil,
-    paragraph: PageTextParagraph? = nil
+    paragraph: PageTextParagraph? = nil, rotatedAnchor: [Double]? = nil,
+    rotatedDirection: [Double]? = nil, rotatedFontSize: Double? = nil
   ) {
     self.pageIndex = pageIndex
     self.runIndex = runIndex
@@ -51,6 +59,9 @@ public struct PageTextTarget: Sendable, Equatable {
     self.style = style
     self.runIndices = runIndices ?? [runIndex]
     self.paragraph = paragraph
+    self.rotatedAnchor = rotatedAnchor
+    self.rotatedDirection = rotatedDirection
+    self.rotatedFontSize = rotatedFontSize
   }
 }
 

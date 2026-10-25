@@ -40,4 +40,58 @@ struct RotatedTextRunTests {
     let stream = String(decoding: content.bytes, as: UTF8.self)
     #expect(stream.contains("0 1 -1 0 200 200 Tm"))
   }
+
+  /// A one-page graph whose only text is a single run drawn at `degrees`.
+  private func angledPage(degrees: Double) throws -> (graph: PDFGraph, pageID: PDFObjectID) {
+    var graph = try PDFParser.parse(PDFFixtures.textWidthsPages()).graph
+    let pageID = PDFObjectID(3)
+    let radians = degrees * .pi / 180
+    let cosine = cos(radians), sine = sin(radians)
+    let content = String(
+      format: "BT /F1 12 Tf %.6f %.6f %.6f %.6f 120 400 Tm (Angled line) Tj ET",
+      cosine, sine, -sine, cosine)
+    graph.objects[PDFObjectID(5)] = .stream(PDFStream(bytes: Data(content.utf8)))
+    return (graph, pageID)
+  }
+
+  @Test func finderSupportsExplicitArbitraryAngles() throws {
+    let (graph, pageID) = try angledPage(degrees: 30)
+    let runs = try PageTextEditing.rotatedTextRuns(pageID: pageID, in: graph)
+    let run = try #require(runs.first(where: { $0.text.contains("Angled") }))
+    #expect(abs(run.rotationDegrees - 30) < 0.01)
+    #expect(abs(run.anchor[0] - 120) < 0.01 && abs(run.anchor[1] - 400) < 0.01)
+    let radians = 30.0 * .pi / 180
+    #expect(abs(run.direction[0] - cos(radians)) < 1e-6)
+    #expect(abs(run.direction[1] - sin(radians)) < 1e-6)
+    #expect(abs(run.fontSize - 12) < 0.01)
+    // The horizontal paragraph profile must not claim the angled run.
+    #expect(try PageTextEditing.blocks(pageID: pageID, in: graph).isEmpty)
+  }
+
+  @Test func replacingAnAngledRunKeepsItsMatrix() throws {
+    let (graph, pageID) = try angledPage(degrees: 30)
+    let target = try #require(
+      try PageTextEditing.rotatedTextRuns(pageID: pageID, in: graph)
+        .first(where: { $0.text.contains("Angled") }))
+    let edited = try PDFEditingEngine.commit(
+      PDFTransaction([
+        ReplaceTextCommand(
+          pageID: pageID, runIndex: target.runIndex, replacement: "Angled edits")
+      ]), to: graph)
+    let bytes = try PDFWriter.write(edited)
+    let reopened = try PDFDocument(data: bytes)
+    #expect(reopened?.string?.contains("Angled edits") == true)
+    #expect(reopened?.string?.contains("Angled line") == false)
+    let radians = 30.0 * .pi / 180
+    let cosine = cos(radians), sine = sin(radians)
+    let matrix = String(
+      format: "%.6f %.6f %.6f %.6f 120 400 Tm", cosine, sine, -sine, cosine)
+    let reparsed = try PDFParser.parse(bytes)
+    let content = try PageContent.load(pageID: pageID, in: reparsed.graph)
+    let stream = String(decoding: content.bytes, as: UTF8.self)
+    #expect(stream.contains(matrix))
+    let again = try PageTextEditing.rotatedTextRuns(pageID: pageID, in: reparsed.graph)
+    let replaced = try #require(again.first(where: { $0.text.contains("Angled edits") }))
+    #expect(abs(replaced.rotationDegrees - 30) < 0.01)
+  }
 }

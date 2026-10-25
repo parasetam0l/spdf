@@ -352,7 +352,7 @@ public enum PageTextEditing {
         && abs(run.wordSpacing) < 1e-6 && abs(run.horizontalScale - 100) < 1e-6
       if !ordinaryTransform {
         detail =
-          "This text is rotated or transformed in page space; inline editing supports horizontal text, including on rotated pages"
+          "This text uses a transform the editor cannot preserve; inline editing supports horizontal paragraph text, and single-run text rotated by any angle with a uniform scale"
       } else if !ordinarySpacing {
         detail = "This text uses adjusted character spacing that the inline editor cannot preserve"
       } else if hasAdjustedTJ(run, content: content) {
@@ -423,12 +423,15 @@ public enum PageTextEditing {
       ], in: graph, limits: PDFLimits())
   }
 
-  /// TXT-09: single-run text drawn with a rotated page-space text matrix.
+  /// TXT-09: single-run text drawn with a rotated page-space text matrix at
+  /// any supported angle (pure rotation with positive uniform scale, no
+  /// shear).
   ///
-  /// These runs are outside the inline paragraph profile because the editor
-  /// lays out horizontal text. The single-run editor can still replace their
+  /// These runs are outside the inline paragraph profile because the paragraph
+  /// editor lays out horizontal text. The single-run editor replaces their
   /// characters in place: the text-show matrix and text state are preserved
-  /// and only the operand (plus TJ advance compensation) changes.
+  /// and only the operand (plus TJ advance compensation) changes. The returned
+  /// anchor and direction let the app place a caret-aligned editor.
   public static func rotatedTextRuns(
     pageID: PDFObjectID, in graph: PDFGraph
   ) throws -> [RotatedTextRun] {
@@ -437,8 +440,6 @@ public enum PageTextEditing {
     let layout = try PageTextLayout.build(pageID: pageID, in: graph)
     let clustersByRun = Dictionary(grouping: layout.clusters, by: \.runIndex)
     return runs.indices.compactMap { index -> RotatedTextRun? in
-      // Only whole quarter turns; horizontal runs stay with the inline
-      // paragraph profile, which refuses rotated transforms itself.
       guard TextCanvasSupport.renderingMode(at: runs[index].instructionIndex, in: content) == 0,
         let clusters = clustersByRun[index] else { return nil }
       let visible = clusters.filter { !$0.isWhitespace }
@@ -446,41 +447,58 @@ public enum PageTextEditing {
         !runs[index].text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
       else { return nil }
       let transform = TextCanvasSupport.concatenate(runs[index].ctm, runs[index].matrix)
-      guard let degrees = TextCanvasSupport.quarterTurnDegrees(for: transform) else { return nil }
+      guard let profile = TextCanvasSupport.rotationProfile(for: transform) else { return nil }
+      let radians = profile.degrees * .pi / 180
+      let cosine = cos(radians), sine = sin(radians)
+      // The run's baseline start is the matrix translation advanced by any TJ
+      // offset accumulated inside its own array.
+      let anchor = [
+        transform[4] + cosine * runs[index].textSpaceOffset * profile.scale,
+        transform[5] + sine * runs[index].textSpaceOffset * profile.scale,
+      ]
       let xs = visible.flatMap { [$0.bounds[0], $0.bounds[2]] }
       let ys = visible.flatMap { [$0.bounds[1], $0.bounds[3]] }
       guard let minX = xs.min(), let maxX = xs.max(),
         let minY = ys.min(), let maxY = ys.max(),
-        [minX, maxX, minY, maxY].allSatisfy(\.isFinite)
+        [minX, maxX, minY, maxY].allSatisfy(\.isFinite), anchor.allSatisfy(\.isFinite)
       else { return nil }
       let padding = max(2, runs[index].fontSize * 0.08)
       return RotatedTextRun(
         runIndex: index,
         rect: [minX - padding, minY - padding, maxX + padding, maxY + padding],
-        text: runs[index].text, rotationDegrees: degrees,
-        fontSize: runs[index].fontSize * (TextCanvasSupport.quarterTurnScale(for: transform) ?? 1))
+        text: runs[index].text, rotationDegrees: profile.degrees,
+        anchor: anchor, direction: [cosine, sine],
+        fontSize: runs[index].fontSize * profile.scale)
     }
   }
 }
 
-/// TXT-09: one page-space run drawn at a whole-quarter-turn (90/180/270)
-/// rotation, offered to the single-run in-place editor.
+/// TXT-09: one page-space run drawn at a supported rotation, offered to the
+/// in-place single-run editor.
 public struct RotatedTextRun: Sendable, Equatable {
   public let runIndex: Int
   /// Page-space bounds of the run's visible glyphs, lightly padded.
   public let rect: [Double]
   public let text: String
-  /// Page-space text direction in degrees, normalized to 0..<360.
+  /// Page-space text direction in degrees, normalized to (-180, 180].
   public let rotationDegrees: Double
+  /// Page-space baseline start of the run.
+  public let anchor: [Double]
+  /// Unit page-space text direction.
+  public let direction: [Double]
+  /// Page-space font size (the raw text state size times the transform scale).
   public let fontSize: Double
 
   public init(
-    runIndex: Int, rect: [Double], text: String, rotationDegrees: Double, fontSize: Double
+    runIndex: Int, rect: [Double], text: String, rotationDegrees: Double,
+    anchor: [Double], direction: [Double], fontSize: Double
   ) {
     self.runIndex = runIndex
     self.rect = rect
     self.text = text
     self.rotationDegrees = rotationDegrees
+    self.anchor = anchor
+    self.direction = direction
     self.fontSize = fontSize
   }
 }
@@ -534,10 +552,11 @@ enum TextCanvasSupport {
     ]
   }
 
-  /// TXT-09: page-space direction in degrees when the composed text matrix is
-  /// a positive uniform scale plus a whole quarter turn (90/180/270). Anything
-  /// else returns nil and keeps the inline refusal.
-  static func quarterTurnDegrees(for transform: [Double]) -> Double? {
+  /// TXT-09: page-space rotation and uniform scale when the composed text
+  /// matrix is a pure rotation with a positive uniform scale (no shear, no
+  /// flip). Horizontal matrices return nil: they stay with the inline
+  /// paragraph profile. The angle is normalized to (-180, 180].
+  static func rotationProfile(for transform: [Double]) -> (degrees: Double, scale: Double)? {
     guard transform.count == 6, transform.allSatisfy(\.isFinite) else { return nil }
     let scale = hypot(transform[0], transform[1])
     guard scale > 1e-6 else { return nil }
@@ -547,18 +566,11 @@ enum TextCanvasSupport {
       transform[0] * transform[3] - transform[1] * transform[2] > 0
     else { return nil }
     var degrees = atan2(transform[1], transform[0]) * 180 / .pi
-    degrees = degrees.truncatingRemainder(dividingBy: 360)
-    if degrees < 0 { degrees += 360 }
-    let quarter = (degrees / 90).rounded()
-    guard abs(degrees - quarter * 90) <= 1e-3, abs(quarter) >= 0.5 else { return nil }
-    let normalized = (quarter * 90).truncatingRemainder(dividingBy: 360)
-    return normalized < 0 ? normalized + 360 : normalized
-  }
-
-  /// The uniform page-space scale of a supported quarter-turn transform.
-  static func quarterTurnScale(for transform: [Double]) -> Double? {
-    guard quarterTurnDegrees(for: transform) != nil else { return nil }
-    return hypot(transform[0], transform[1])
+    // Exactly horizontal text belongs to the paragraph profile.
+    guard abs(degrees) >= 0.05, abs(abs(degrees) - 360) >= 0.05 else { return nil }
+    if degrees > 180 { degrees -= 360 }
+    if degrees <= -180 { degrees += 360 }
+    return (degrees, scale)
   }
 
   /// Inline paragraph output uses a page-space baseline and can faithfully

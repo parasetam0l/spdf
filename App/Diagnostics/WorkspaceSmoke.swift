@@ -2164,6 +2164,20 @@
           "Clicking rotated text did not open the single-run editor "
             + "(targets=\(rotatedTextTargets.map(\.text)), rect=\(rotatedLine.rect))")
       }
+      // TXT-09: the line editor follows the run's direction so the caret and
+      // selection align with the turned baseline instead of sitting beside it.
+      guard abs(abs(Double(rotatedField.frameRotation)) - 90) < 1 else {
+        throw PDFError(
+          .malformed,
+          "The rotated text editor is not caret-aligned (rotation "
+            + "\(rotatedField.frameRotation))")
+      }
+      guard rotatedField.frame.height >= 15, rotatedField.frame.width >= 120 else {
+        throw PDFError(
+          .malformed,
+          "The rotated text editor frame is unusable "
+            + "(width=\(rotatedField.frame.width), height=\(rotatedField.frame.height))")
+      }
       rotatedField.stringValue = "Rotated edits"
       guard rotatedTextOverlay.commitEditing() else {
         throw PDFError(.malformed, "The rotated text edit did not commit")

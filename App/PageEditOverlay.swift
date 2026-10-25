@@ -348,7 +348,7 @@ final class PageEditOverlayView: NSView, NSTextFieldDelegate {
         let alert = NSAlert()
         alert.messageText = "Inline Editing Unavailable"
         alert.informativeText =
-          "Inline editing supports horizontal page text with ordinary character spacing; rotated pages are shown upright while their text is edited. No text was changed. To add a separate text overlay, choose Add Text; for text drawn rotated in page space, edit a copy whose text is horizontal."
+          "Inline editing supports horizontal page text with ordinary character spacing; rotated pages are shown upright while their text is edited, and single-run text drawn at an angle uses the caret-aligned line editor. No text was changed. To add a separate text overlay, choose Add Text."
         alert.runModal()
         return
       }
@@ -365,21 +365,63 @@ final class PageEditOverlayView: NSView, NSTextFieldDelegate {
     }
 
     var fieldFrame = localRect
-    if case .rotatedText = target {
-      // The run itself is drawn vertically or upside down on the page; the
-      // in-place field stays horizontal and readable next to it.
-      let width = max(220, min(460, localRect.width + 240))
+    var rotatedFieldAngle: CGFloat = 0
+    var rotatedFieldFontSize: CGFloat = 0
+    if case .rotatedText(let rotatedTarget) = target,
+      let anchor = rotatedTarget.rotatedAnchor, anchor.count == 2,
+      let direction = rotatedTarget.rotatedDirection, direction.count == 2,
+      let pageFontSize = rotatedTarget.rotatedFontSize
+    {
+      // TXT-09: place a caret-aligned editor along the run's page-space text
+      // direction. The field is rotated with the text so the caret, selection
+      // and typing follow the same baseline as the run.
+      let pageAnchor = NSPoint(x: anchor[0], y: anchor[1])
+      let pageUnit = NSPoint(x: anchor[0] + direction[0], y: anchor[1] + direction[1])
+      let viewAnchor = viewer.view.convert(pageAnchor, from: page)
+      let viewUnit = viewer.view.convert(pageUnit, from: page)
+      let dx = viewUnit.x - viewAnchor.x
+      let dy = viewUnit.y - viewAnchor.y
+      let scale = max(0.01, hypot(dx, dy))
+      let angle = atan2(dy, dx) * 180 / .pi
+      let fontSize = max(6, pageFontSize * scale)
+      // Size the editor along the run's own direction: project the visible run
+      // bounds onto that direction instead of guessing from the glyph count.
+      let dirX = dx / scale, dirY = dy / scale
+      let projections = [
+        (localRect.minX, localRect.minY), (localRect.maxX, localRect.minY),
+        (localRect.minX, localRect.maxY), (localRect.maxX, localRect.maxY),
+      ].map { $0.0 * dirX + $0.1 * dirY }
+      let visibleLength = (projections.max() ?? 0) - (projections.min() ?? 0)
+      let textLength = max(120, min(1_000, visibleLength + 1.2 * fontSize))
+      let fieldHeight = max(20, fontSize * 1.55)
+      let radians = angle * .pi / 180
+      // Frame rotation happens about the frame origin; shift the origin by the
+      // local descent so the field's text baseline lands on the run baseline.
+      let descent = fontSize * 0.28
+      let originView = NSPoint(
+        x: viewAnchor.x + sin(radians) * descent,
+        y: viewAnchor.y - cos(radians) * descent)
+      let overlayOrigin = convert(originView, from: viewer.view)
       fieldFrame = NSRect(
-        x: min(max(4, localRect.midX - width / 2), max(4, bounds.maxX - width - 4)),
-        y: max(4, min(localRect.midY - 12, bounds.maxY - 28)),
-        width: width, height: 24)
+        x: overlayOrigin.x, y: overlayOrigin.y, width: textLength, height: fieldHeight)
+      rotatedFieldAngle = angle
+      rotatedFieldFontSize = fontSize
     }
     let field = NSTextField(frame: fieldFrame)
     field.identifier = NSUserInterfaceItemIdentifier(target.editorIdentifier)
     field.stringValue = target.value
-    field.font = .systemFont(ofSize: max(9, min(28, localRect.height * 0.62)))
+    field.font = .systemFont(
+      ofSize: rotatedFieldFontSize > 0 ? rotatedFieldFontSize
+        : max(9, min(28, localRect.height * 0.62)))
     field.bezelStyle = .squareBezel
     field.focusRingType = .none
+    if rotatedFieldAngle != 0 {
+      field.isBezeled = false
+      field.drawsBackground = true
+      field.backgroundColor = NSColor.textBackgroundColor.withAlphaComponent(0.92)
+      field.frameRotation = rotatedFieldAngle
+      field.placeholderString = "Rotated text"
+    }
     field.delegate = self
     field.target = self
     field.action = #selector(commitFromEditor(_:))
