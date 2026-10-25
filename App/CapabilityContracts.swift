@@ -173,7 +173,8 @@ enum CapabilityContractAudit {
 
   private static let extraDocumentSelectors: Set<String> = [
     "documentMetadata:", "printDocument:",
-    "copyAsRichText:", "showFind:", "findNext:", "findPrevious:",
+    "copyAsRichText:", "copyTextBox:", "pasteTextBox:", "duplicateTextBox:",
+    "showFind:", "findNext:", "findPrevious:",
     "editSelectedText:", "reflowParagraph:", "redactSelection:",
     "togglePageTextBold:", "togglePageTextItalic:",
     "selectNextPageObject:", "selectPreviousPageObject:",
@@ -282,7 +283,8 @@ enum CapabilityContractAudit {
     "importPages:", "rotateLeft:", "rotateRight:", "movePageUp:", "movePageDown:",
     "insertBlankPage:", "deletePage:", "organizePages:", "addPageMark:", "flattenForm:",
     "renameFormField:", "deleteFormField:", "duplicateFormField:", "alignFormFields:",
-    "editFormTabOrder:", "copyAsRichText:", "showFind:", "editSelectedText:",
+    "editFormTabOrder:", "copyAsRichText:", "copyTextBox:", "pasteTextBox:",
+    "duplicateTextBox:", "showFind:", "editSelectedText:",
     "reflowParagraph:", "redactSelection:", "selectNextPageObject:",
     "selectPreviousPageObject:", "highlightSelection:", "exportReviewSummary:",
     "showCompatibilityReport:", "exportFormValues:", "importFormValues:",

@@ -2208,6 +2208,115 @@
       window.makeKeyAndOrderFront(nil)
       try await Task.sleep(for: .milliseconds(200))
 
+      // TXT-10: authored text boxes copy between pages, duplicate, save as
+      // real editable page text and undo as one step.
+      let clipboardSource = output.appendingPathComponent("text-box-clipboard.pdf")
+      try? FileManager.default.removeItem(at: clipboardSource)
+      try FileManager.default.copyItem(
+        at: URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+          .appendingPathComponent("Tests/Fixtures/three-pages.pdf"),
+        to: clipboardSource)
+      let (clipboardOpened, _) = try await controller.openDocument(
+        withContentsOf: clipboardSource, display: true)
+      guard let clipboardDocument = clipboardOpened as? SPDFDocument,
+        let clipboardViewer = clipboardDocument.viewer,
+        let clipboardWindow = clipboardDocument.windowControllers.first?.window,
+        let clipboardContent = clipboardWindow.contentView,
+        let clipboardPage = clipboardViewer.view.document?.page(at: 0),
+        clipboardViewer.pageCount >= 3
+      else { throw PDFError(.malformed, "Could not open the text-box clipboard source") }
+      clipboardWindow.makeKeyAndOrderFront(nil)
+      NSApp.activate(ignoringOtherApps: true)
+      try await Task.sleep(for: .milliseconds(250))
+      _ = clipboardViewer.activateTool(.addText)
+      try await Task.sleep(for: .milliseconds(100))
+      guard let clipboardOverlay = findOverlay(clipboardContent) else {
+        throw PDFError(.malformed, "Missing text overlay for the clipboard source")
+      }
+      let clipboardAddView = clipboardViewer.view.convert(
+        NSPoint(x: 120, y: 520), from: clipboardPage)
+      let clipboardAddPointer = clipboardViewer.view.convert(clipboardAddView, to: nil)
+      clipboardOverlay.mouseDown(with: try mouse(.leftMouseDown, point: clipboardAddPointer))
+      clipboardOverlay.mouseUp(with: try mouse(.leftMouseUp, point: clipboardAddPointer))
+      try await Task.sleep(for: .milliseconds(100))
+      guard clipboardViewer.isTypingPageText, let clipboardCanvas = findCanvas(clipboardContent)
+      else { throw PDFError(.malformed, "Add Text did not start the clipboard source box") }
+      clipboardCanvas.textView.insertText(
+        "Clipboard box",
+        replacementRange: NSRange(
+          location: 0, length: (clipboardCanvas.textView.string as NSString).length))
+      guard clipboardCanvas.commit() else {
+        throw PDFError(.malformed, "The clipboard source text box did not commit")
+      }
+      let clipboardPageID = clipboardDocument.editSession.pageIDs[0]
+      guard let clipboardGraph = clipboardDocument.editSession.currentGraph,
+        try AuthoredPageTextBoxes.read(pageID: clipboardPageID, in: clipboardGraph).count == 1
+      else { throw PDFError(.malformed, "The Add Text flow produced no authored text box") }
+      guard let sourceTextSelection = clipboardViewer.view.document?.findString(
+        "Clipboard box", withOptions: []).first
+      else { throw PDFError(.malformed, "Cannot select the authored text box text") }
+      clipboardViewer.view.setCurrentSelection(sourceTextSelection, animate: false)
+      KeyboardAudit.find("Copy Text Box")?.menu?.update()
+      guard KeyboardAudit.find("Copy Text Box")?.isEnabled == true,
+        KeyboardAudit.invoke("Copy Text Box")
+      else { throw PDFError(.malformed, "Copy Text Box did not copy the authored box") }
+      KeyboardAudit.find("Paste Text Box")?.menu?.update()
+      guard KeyboardAudit.find("Paste Text Box")?.isEnabled == true else {
+        throw PDFError(.malformed, "Paste Text Box is disabled after copying a box")
+      }
+      let beforePaste = try clipboardDocument.editSession.bytesForSave()
+      clipboardViewer.go(to: 3)
+      try await Task.sleep(for: .milliseconds(250))
+      guard clipboardViewer.pageNumber == 3 else {
+        throw PDFError(
+          .malformed, "Page navigation did not reach page 3 for the paste")
+      }
+      guard KeyboardAudit.invoke("Paste Text Box") else {
+        throw PDFError(.malformed, "Paste Text Box did not run")
+      }
+      guard clipboardDocument.editSession.pageIDs.count > 2 else {
+        throw PDFError(.malformed, "The paste destination page disappeared")
+      }
+      let pastedPageID = clipboardDocument.editSession.pageIDs[2]
+      guard let pastedGraph = clipboardDocument.editSession.currentGraph,
+        try AuthoredPageTextBoxes.read(pageID: pastedPageID, in: pastedGraph).count == 1,
+        try PageTextEditing.blocks(pageID: pastedPageID, in: pastedGraph)
+          .contains(where: { $0.text.contains("Clipboard box") })
+      else { throw PDFError(.malformed, "The pasted box is missing or not editable on page 3") }
+      let pastedSaved = output.appendingPathComponent("text-box-clipboard-pasted.pdf")
+      try clipboardDocument.editSession.bytesForSave().write(to: pastedSaved)
+      guard let pastedReader = PDFDocument(url: pastedSaved),
+        pastedReader.string?.contains("Clipboard box") == true
+      else { throw PDFError(.malformed, "The saved pasted box is not real page text") }
+      clipboardDocument.undoEdit()
+      guard try clipboardDocument.editSession.bytesForSave() == beforePaste else {
+        throw PDFError(.malformed, "One Undo did not remove the entire pasted box")
+      }
+      clipboardDocument.redoEdit()
+      guard let redoneGraph = clipboardDocument.editSession.currentGraph,
+        try AuthoredPageTextBoxes.read(pageID: pastedPageID, in: redoneGraph).count == 1
+      else { throw PDFError(.malformed, "Redo did not restore the pasted box") }
+      // Duplicate the box in place: one more authored box, one step to undo.
+      guard let pastedSelection = clipboardViewer.view.document?.findString(
+        "Clipboard box", withOptions: []).last else {
+        throw PDFError(.malformed, "Cannot select the pasted box text")
+      }
+      clipboardViewer.view.setCurrentSelection(pastedSelection, animate: false)
+      guard KeyboardAudit.invoke("Duplicate Text Box") else {
+        throw PDFError(.malformed, "Duplicate Text Box did not run")
+      }
+      guard let duplicatedGraph = clipboardDocument.editSession.currentGraph,
+        try AuthoredPageTextBoxes.read(pageID: pastedPageID, in: duplicatedGraph).count == 2
+      else { throw PDFError(.malformed, "Duplicate Text Box did not create a second box") }
+      clipboardDocument.undoEdit()
+      guard let afterDuplicateUndo = clipboardDocument.editSession.currentGraph,
+        try AuthoredPageTextBoxes.read(pageID: pastedPageID, in: afterDuplicateUndo).count == 1
+      else { throw PDFError(.malformed, "Undo after duplication did not remove the copy") }
+      checkpoint("text box copy, paste, duplication and undo passed")
+      clipboardDocument.close()
+      window.makeKeyAndOrderFront(nil)
+      try await Task.sleep(for: .milliseconds(200))
+
       window.setContentSize(NSSize(width: 960, height: 650))
       try await Task.sleep(for: .milliseconds(150))
       let originalFrame = window.frame

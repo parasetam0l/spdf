@@ -10,6 +10,9 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
   private var welcome: NSWindowController?
   private let documents = NSDocumentController.shared
   private var updateSettingsWindow: NSWindow?
+  /// TXT-10: the last copied authored text box, shared across document windows
+  /// so paste works between pages and between documents in this app.
+  private var textBoxClipboard: TextBoxClipboard?
 
   func applicationDidFinishLaunching(_ notification: Notification) {
     installMenus()
@@ -639,6 +642,20 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
   @objc private func copyAsRichText(_ sender: Any?) {
     currentDocument?.copySelectionAsRichText()
   }
+  @objc private func copyTextBox(_ sender: Any?) {
+    guard let clipboard = currentDocument?.selectedTextBoxClipboard() else {
+      NSSound.beep()
+      return
+    }
+    textBoxClipboard = clipboard
+  }
+  @objc private func pasteTextBox(_ sender: Any?) {
+    guard let clipboard = textBoxClipboard else { return }
+    _ = currentDocument?.pasteTextBox(clipboard)
+  }
+  @objc private func duplicateTextBox(_ sender: Any?) {
+    _ = currentDocument?.duplicateSelectedTextBox()
+  }
   @objc private func exportEncryptedCopy(_ sender: Any?) {
     currentDocument?.exportEncryptedCopy()
   }
@@ -776,6 +793,10 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
     }
     guard let document = currentDocument else { return false }
     switch menuItem.action {
+    case #selector(copyTextBox), #selector(duplicateTextBox):
+      return document.selectedTextBoxClipboard() != nil
+    case #selector(pasteTextBox):
+      return textBoxClipboard != nil
     case #selector(togglePageTextBold), #selector(togglePageTextItalic),
       #selector(togglePageTextUnderline), #selector(togglePageTextStrikeout),
       #selector(togglePageTextSuperscript), #selector(togglePageTextSubscript):
@@ -1045,6 +1066,15 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
       "Paste Rich Text", #selector(NSTextView.pasteAsRichText(_:)), key: "v",
       modifiers: [.command, .shift], to: edit)
     add("Copy as Rich Text", #selector(copyAsRichText), target: self, to: edit)
+    // TXT-10: authored text boxes carry their content, styles, geometry and
+    // licensed font programs between pages/documents; each insertion is one
+    // Undo step.
+    add("Copy Text Box", #selector(copyTextBox), key: "c", modifiers: [.command, .option],
+      target: self, to: edit)
+    add("Paste Text Box", #selector(pasteTextBox), key: "v",
+      modifiers: [.command, .option, .shift], target: self, to: edit)
+    add("Duplicate Text Box", #selector(duplicateTextBox), key: "d",
+      modifiers: [.command, .option], target: self, to: edit)
     add("Select All", #selector(NSText.selectAll(_:)), key: "a", to: edit)
     add("Select Next Page Object", #selector(selectNextPageObject(_:)), key: "\u{F701}",
       modifiers: [.command, .option], target: self, to: edit)

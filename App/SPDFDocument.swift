@@ -5684,6 +5684,68 @@ final class SPDFDocument: NSDocument {
     return true
   }
 
+  // MARK: - Text box clipboard (TXT-10)
+
+  /// TXT-10: the authored text box under the current page selection. Nil when
+  /// the selection is not inside a box (or the box uses an original PDF font
+  /// that cannot be re-created elsewhere).
+  func selectedTextBoxClipboard() -> TextBoxClipboard? {
+    guard canEditContent, let viewer, let graph = editSession.currentGraph,
+      let selection = viewer.view.currentSelection,
+      let page = selection.pages.first,
+      let document = viewer.view.document
+    else { return nil }
+    let index = document.index(for: page)
+    guard index >= 0, index < editSession.pageIDs.count else { return nil }
+    let bounds = selection.bounds(for: page)
+    return try? TextBoxCopy.clipboard(
+      pageID: editSession.pageIDs[index], in: graph,
+      selectionBounds: [bounds.minX, bounds.minY, bounds.maxX, bounds.maxY])
+  }
+
+  /// TXT-10: duplicate the selected authored text box on its page. The whole
+  /// insertion is one transaction, so one Undo removes it completely.
+  @discardableResult
+  func duplicateSelectedTextBox() -> Bool {
+    guard requireContentEditing(for: "Duplicate Text Box") else { return false }
+    guard let clipboard = selectedTextBoxClipboard() else {
+      presentError(PDFError(
+        .unsupported,
+        "Select the text inside an sPDF text box to duplicate it. Boxes created "
+          + "with Add Text can be duplicated; copy original PDF text into a new box first."))
+      return false
+    }
+    return insertTextBox(clipboard)
+  }
+
+  /// TXT-10: paste a copied authored text box on the page in view.
+  @discardableResult
+  func pasteTextBox(_ clipboard: TextBoxClipboard) -> Bool {
+    guard requireContentEditing(for: "Paste Text Box") else { return false }
+    return insertTextBox(clipboard)
+  }
+
+  private func insertTextBox(_ clipboard: TextBoxClipboard) -> Bool {
+    guard let viewer, let graph = editSession.currentGraph,
+      let document = viewer.view.document,
+      let page = viewer.view.currentPage ?? document.page(at: 0)
+    else { return false }
+    let index = document.index(for: page)
+    guard index >= 0, index < editSession.pageIDs.count else { return false }
+    do {
+      let command = try TextBoxPaste.command(
+        clipboard, on: editSession.pageIDs[index], in: graph,
+        offsetX: 14, offsetY: -14)
+      try editSession.apply(PDFTransaction([command]))
+      noteUserEdit()
+      refreshViewer(preservingPage: index + 1)
+      return true
+    } catch {
+      presentError(error)
+      return false
+    }
+  }
+
   /// P22-014: add a threaded reply to a comment through a native prompt.
   func addReply(to comment: Comment) {
     guard canEditContent, comment.annotation.objectID != nil else { return }
