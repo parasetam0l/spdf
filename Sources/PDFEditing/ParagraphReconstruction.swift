@@ -113,6 +113,23 @@ public enum ParagraphReconstruction {
     guard !layout.clusters.isEmpty else { return [] }
     let content = try PageContent.load(pageID: pageID, in: graph)
     let runs = try TextRunIndexer.runs(in: content, graph: graph)
+    // TXT-04: authored boxes carry paragraph identity independently of the
+    // vertical-gap heuristic. Reopened authored lines can use deliberately
+    // wide leading; their metadata is the stronger boundary signal.
+    let authoredOwnerByRun: [Int: Int] = {
+      guard content.segments.contains(where: { segment in
+        segment.dictionary[PDFName("SPDFAdded")] == .boolean(true)
+          && segment.dictionary[PDFName("SPDFTextVersion")] == .integer(1)
+      }), let boxes = try? AuthoredPageTextBoxes.read(pageID: pageID, in: graph)
+      else { return [:] }
+      var owners: [Int: Int] = [:]
+      for (owner, box) in boxes.enumerated() {
+        for runIndex in box.originalText.keys where runs.indices.contains(runIndex) {
+          owners[runIndex] = owner
+        }
+      }
+      return owners
+    }()
     // TXT-01: paragraph geometry uses page-space font size so a raw `1 Tf`
     // multiplied by a uniform text matrix groups by its visible size.
     let effectiveFontSizes = runs.map(\.pageSpaceFontSize)
@@ -146,7 +163,8 @@ public enum ParagraphReconstruction {
       for segment in segments where !segment.isEmpty {
         lineInfo.append(makeLineInfo(
           segment: segment, lineIndex: lineIndex, bodySize: bodySize,
-          mcidByCluster: mcidByCluster, effectiveFontSizes: effectiveFontSizes))
+          mcidByCluster: mcidByCluster, effectiveFontSizes: effectiveFontSizes,
+          authoredOwnerByRun: authoredOwnerByRun))
       }
     }
     guard !lineInfo.isEmpty else { return [] }
@@ -167,19 +185,30 @@ public enum ParagraphReconstruction {
       for (index, block) in blocks.enumerated() {
         guard let previous = block.last else { continue }
         let gap = previous.baseline - line.baseline
-        guard gap >= 0, gap <= 1.8 * max(previous.maxFontSize, line.maxFontSize) else {
-          continue
-        }
-        guard abs(previous.maxFontSize - line.maxFontSize)
-          <= max(0.5, 0.15 * previous.maxFontSize)
-        else { continue }
-        guard previous.mcid == nil || line.mcid == nil || previous.mcid == line.mcid else {
-          continue
-        }
+        guard gap >= 0 else { continue }
         let overlap = min(previous.bounds[2], line.bounds[2])
           - max(previous.bounds[0], line.bounds[0])
-        guard overlap > 0 else { continue }
-        let score = overlap - gap
+        let score: Double
+        if previous.hasAuthoredText || line.hasAuthoredText {
+          // Authored boxes are explicit paragraph boundaries. A line can only
+          // join its own box; otherwise intentional leading or a nearby box
+          // must not merge two authored paragraphs.
+          guard let owner = previous.authoredOwner, owner == line.authoredOwner
+          else { continue }
+          score = overlap > 0 ? overlap - gap : -gap
+        } else {
+          guard gap <= 1.8 * max(previous.maxFontSize, line.maxFontSize) else {
+            continue
+          }
+          guard abs(previous.maxFontSize - line.maxFontSize)
+            <= max(0.5, 0.15 * previous.maxFontSize)
+          else { continue }
+          guard previous.mcid == nil || line.mcid == nil || previous.mcid == line.mcid else {
+            continue
+          }
+          guard overlap > 0 else { continue }
+          score = overlap - gap
+        }
         if best == nil || score > best!.score { best = (index, score) }
       }
       if let best {
@@ -279,7 +308,8 @@ public enum ParagraphReconstruction {
 
   private static func makeLineInfo(
     segment: [(index: Int, cluster: TextCluster)], lineIndex: Int, bodySize: Double,
-    mcidByCluster: [Int: Int], effectiveFontSizes: [Double]
+    mcidByCluster: [Int: Int], effectiveFontSizes: [Double],
+    authoredOwnerByRun: [Int: Int] = [:]
   ) -> LineInfo {
     var bounds = [Double.greatestFiniteMagnitude, Double.greatestFiniteMagnitude,
                   -Double.greatestFiniteMagnitude, -Double.greatestFiniteMagnitude]
@@ -304,11 +334,14 @@ public enum ParagraphReconstruction {
     let baseline = segment.map { $0.cluster.origin[1] }.reduce(0, +) / Double(segment.count)
     let firstIndex = segment.first?.index ?? 0
     let lastIndex = segment.last?.index ?? firstIndex
+    let authoredOwners = Set(segment.compactMap { authoredOwnerByRun[$0.cluster.runIndex] })
     return LineInfo(
       lineIndex: lineIndex, range: firstIndex..<(lastIndex + 1), bounds: bounds,
       baseline: baseline, maxFontSize: segment.map { effectiveFontSizes[$0.cluster.runIndex] }.max() ?? bodySize,
       runIndices: unique(segment.map { $0.cluster.runIndex }),
-      mcid: mcidByCluster[firstIndex])
+      mcid: mcidByCluster[firstIndex],
+      authoredOwner: authoredOwners.count == 1 ? authoredOwners.first : nil,
+      hasAuthoredText: !authoredOwners.isEmpty)
   }
 
   private struct LineInfo {
@@ -319,6 +352,8 @@ public enum ParagraphReconstruction {
     let maxFontSize: Double
     let runIndices: [Int]
     let mcid: Int?
+    let authoredOwner: Int?
+    let hasAuthoredText: Bool
   }
 
   /// MCID -> structure role for a page (P19-002).

@@ -1629,8 +1629,10 @@
         try document.editSession.bytesForSave() == paragraphBaseline
       else { throw PDFError(.malformed, "A paragraph was not selected as one non-mutating object") }
       let styleBefore = paragraphCanvas.pageLines()
+      // TXT-04: deliberately wide leading (42 pt for 16 pt type) must not
+      // make the reopened paragraph split apart under the 1.8× gap heuristic.
       let paragraphStyle = PageTextParagraphStyle(
-        alignment: .center, leading: 22, spacingBefore: 5, spacingAfter: 7,
+        alignment: .center, leading: 42, spacingBefore: 5, spacingAfter: 7,
         leftIndent: 12, rightIndent: 10, firstLineIndent: 8)
       viewer.pageTextParagraphStyleApplier?(paragraphStyle)
       let styleAfter = paragraphCanvas.pageLines()

@@ -233,6 +233,56 @@ struct ParagraphReconstructionTests {
     #expect(paragraph.runStyles.allSatisfy { abs($0.fontSize - 10.02) < 0.02 })
   }
 
+  @Test func authoredParagraphIdentitySurvivesWideSpacingAndNeighbor() throws {
+    let parsed = try PDFParser.parse(BlankPDF.data())
+    let pageID = try #require(parsed.pageIDs.first)
+    let format = PageTextFormat(font: .helvetica, size: 12)
+    func line(_ text: String, _ baseline: Double) -> PageTextLine {
+      PageTextLine(text: text, x: 72, baseline: baseline,
+        segments: [PageTextSegment(text: text, x: 72, format: format)])
+    }
+    var graph = parsed.graph
+    graph = try PDFEditingEngine.commit(PDFTransaction([
+      AddPageTextLinesCommand(
+        pageID: pageID,
+        lines: [
+          line("First line of a deliberately wide paragraph.", 700),
+          line("Second line stays in the same paragraph.", 650),
+          line("Third line stays in the same paragraph.", 600),
+        ],
+        box: PageTextBox(x: 72, firstBaseline: 700, width: 340,
+          lineSpacing: 50, wraps: true))
+    ]), to: graph)
+    // A neighboring authored box sits close to the wide paragraph's last
+    // line. Its metadata, not the vertical gap, must keep it separate.
+    graph = try PDFEditingEngine.commit(PDFTransaction([
+      AddPageTextLinesCommand(
+        pageID: pageID,
+        lines: [line("Neighbor paragraph stays separate.", 592)],
+        box: PageTextBox(x: 72, firstBaseline: 592, width: 220,
+          lineSpacing: 14, wraps: true))
+    ]), to: graph)
+    let reopened = try PDFParser.parse(PDFWriter.write(graph))
+    let reopenedPageID = try #require(reopened.pageIDs.first)
+    let authored = try AuthoredPageTextBoxes.read(pageID: reopenedPageID, in: reopened.graph)
+    #expect(authored.count == 2)
+    let candidates = try ParagraphReconstruction.candidatesForEditing(
+      pageID: reopenedPageID, in: reopened.graph)
+    let wide = try #require(candidates.first { $0.text.hasPrefix("First line") })
+    #expect(wide.lineIndices.count == 3)
+    #expect(abs(wide.lineSpacing - 50) < 0.01)
+    #expect(wide.text == [
+      "First line of a deliberately wide paragraph.",
+      "Second line stays in the same paragraph.",
+      "Third line stays in the same paragraph.",
+    ].joined(separator: "\n"))
+    #expect(!wide.text.contains("Neighbor"))
+    let neighbor = try #require(candidates.first { $0.text.hasPrefix("Neighbor") })
+    #expect(neighbor.text == "Neighbor paragraph stays separate.")
+    #expect(neighbor.lineIndices.count == 1)
+    #expect(candidates.count == 2)
+  }
+
   @Test func analysisStaysBoundedOnManyLines() throws {
     var lines: [(text: String, x: Double, y: Double, size: Double)] = []
     for index in 0..<200 {
