@@ -250,16 +250,23 @@ final class InlinePageTextCanvas: NSView, NSTextViewDelegate {
     viewer: PDFViewingSession, target: PageTextTarget?, pageIndex: Int, rect: CGRect,
     clickPoint: NSPoint
   ) {
-    guard let document = viewer.view.document, let page = document.page(at: pageIndex),
-      page.rotation % 360 == 0
+    guard let document = viewer.view.document, let page = document.page(at: pageIndex)
     else { return nil }
+    let rotatedPage = page.rotation % 360 != 0
     var preview: PDFDocument?
     if let target {
+      // The preview provider returns hidden source text on an upright copy of a
+      // rotated page, so page-space geometry stays axis-aligned while editing.
       guard let bytes = viewer.onTextBlockPreview?(target), let hidden = PDFDocument(data: bytes)
       else {
         return nil
       }
       preview = hidden
+    } else if rotatedPage {
+      guard let bytes = viewer.onUprightPagePreview?(pageIndex),
+        let upright = PDFDocument(data: bytes)
+      else { return nil }
+      preview = upright
     }
     self.viewer = viewer
     self.pageIndex = pageIndex
@@ -1082,12 +1089,18 @@ final class InlinePageTextCanvas: NSView, NSTextViewDelegate {
     updateClippingIssue()
     guard clippingLayoutIssue == nil else { NSSound.beep(); return false }
     isFinishing = true
+    // TXT-09: convert the draft to page space while the editing preview is
+    // still installed. A rotated page is shown upright only while editing, so
+    // mapping afterwards would use the rotated display and disagree with the
+    // box the draft was laid out in.
+    let committedLines = formatting == nil ? nil : pageLines()
+    let committedBox = formatting == nil ? nil : pageBox()
     swapRenderer(to: originalDocument)
     let accepted: Bool
     if let target = sourceTarget {
       accepted = viewer.onTextBlockCommit?(
         target, textView.string, style, dx, dy,
-        formatting == nil ? nil : pageLines(), formatting == nil ? nil : pageBox()) ?? false
+        committedLines, committedBox) ?? false
     } else if textView.string.isEmpty {
       accepted = true
     } else {
@@ -1095,7 +1108,7 @@ final class InlinePageTextCanvas: NSView, NSTextViewDelegate {
       accepted =
         viewer.onNewTextBlockCommit?(
           pageIndex, [rect.minX, rect.minY, rect.maxX, rect.maxY], textView.string, style,
-          pageLines(), pageBox()) ?? false
+          committedLines ?? pageLines(), committedBox ?? pageBox()) ?? false
     }
     if accepted {
       retire(committed: true)

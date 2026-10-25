@@ -321,7 +321,7 @@ final class PageEditOverlayView: NSView, NSTextFieldDelegate {
         let alert = NSAlert()
         alert.messageText = "Inline Editing Unavailable"
         alert.informativeText =
-          "Inline editing supports horizontal text with ordinary character spacing on unrotated pages. No text was changed. To add a separate text overlay, choose Add Text; to edit this original text, use an unrotated copy within the supported text profile."
+          "Inline editing supports horizontal page text with ordinary character spacing; rotated pages are shown upright while their text is edited. No text was changed. To add a separate text overlay, choose Add Text; for text drawn rotated in page space, edit a copy whose text is horizontal."
         alert.runModal()
         return
       }

@@ -340,7 +340,8 @@ public enum PageTextEditing {
       let ordinarySpacing = abs(run.charSpacing) < 1e-6
         && abs(run.wordSpacing) < 1e-6 && abs(run.horizontalScale - 100) < 1e-6
       if !ordinaryTransform {
-        detail = "This text is rotated or transformed; inline editing requires horizontal text on an unrotated page"
+        detail =
+          "This text is rotated or transformed in page space; inline editing supports horizontal text, including on rotated pages"
       } else if !ordinarySpacing {
         detail = "This text uses adjusted character spacing that the inline editor cannot preserve"
       } else if hasAdjustedTJ(run, content: content) {
@@ -409,6 +410,32 @@ public enum PageTextEditing {
         (range.lowerBound..<range.lowerBound, Array("\n3 Tr\n".utf8)),
         (range.upperBound..<range.upperBound, Array("\n0 Tr\n".utf8)),
       ], in: graph, limits: PDFLimits())
+  }
+}
+
+/// TXT-09: display-only upright copy of a rotated page for inline editing.
+///
+/// The editor places horizontal page-space text and maps it through the live
+/// PDF view. A page whose rotation turns that text on screen is shown
+/// unrotated while the draft is open, so selection, caret geometry, movement
+/// and width keep their ordinary page-space meaning. Only the temporary
+/// preview graph changes; the session graph and the saved page rotation are
+/// never touched.
+public enum PageRotationPreview {
+  /// Returns a copy of the graph with the page's own rotation overridden to an
+  /// explicit zero. The override also wins over a rotation inherited from the
+  /// page tree. Untouched objects are shared with the input graph.
+  public static func upright(pageID: PDFObjectID, in graph: PDFGraph) throws -> PDFGraph {
+    guard case .dictionary(var page)? = graph.objects[pageID],
+      page[PDFName("Type")] == .name(PDFName("Page"))
+    else {
+      throw PDFError(.malformed, "The page is missing")
+    }
+    guard page[PDFName("Rotate")] != .integer(0) else { return graph }
+    page[PDFName("Rotate")] = .integer(0)
+    var result = graph
+    result.objects[pageID] = .dictionary(page)
+    return result
   }
 }
 

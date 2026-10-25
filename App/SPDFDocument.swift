@@ -488,6 +488,21 @@ final class SPDFDocument: NSDocument {
               pageID: self.editSession.pageIDs[target.pageIndex], runIndex: run, in: preview)
           }
         }
+        // TXT-09: show a rotated page upright while its page-space text is
+        // being edited; the session graph and the saved rotation are untouched.
+        preview = try PageRotationPreview.upright(
+          pageID: self.editSession.pageIDs[target.pageIndex], in: preview)
+        return try PDFWriter.write(
+          preview, droppingLinearization: true, limits: SPDFDocumentResourcePolicy.parsingLimits)
+      } catch { return nil }
+    }
+    viewer.onUprightPagePreview = { [weak self] pageIndex in
+      guard let self, self.canEditContent, let graph = self.editSession.currentGraph,
+        self.editSession.pageIDs.indices.contains(pageIndex)
+      else { return nil }
+      do {
+        let preview = try PageRotationPreview.upright(
+          pageID: self.editSession.pageIDs[pageIndex], in: graph)
         return try PDFWriter.write(
           preview, droppingLinearization: true, limits: SPDFDocumentResourcePolicy.parsingLimits)
       } catch { return nil }

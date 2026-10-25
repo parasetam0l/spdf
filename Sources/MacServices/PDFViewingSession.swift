@@ -328,6 +328,9 @@ public final class PDFViewingSession: NSObject, ObservableObject, PDFViewDelegat
   public var pageTextStyleApplier: ((PageTextStyle) -> Void)?
   public var hasPendingTextGesture: (() -> Bool)?
   public var onTextBlockPreview: ((PageTextTarget) -> Data?)?
+  /// TXT-09: display-only upright bytes of a rotated page for inline editing.
+  /// The draft never changes the session graph or the saved page rotation.
+  public var onUprightPagePreview: ((Int) -> Data?)?
   /// A single atomic content transaction: replacement, formatting and movement.
   public var onTextBlockCommit: ((PageTextTarget, String, PageTextStyle, Double, Double, [PageTextLine]?, PageTextBox?) -> Bool)?
   public var onNewTextBlockCommit: ((Int, [Double], String, PageTextStyle, [PageTextLine], PageTextBox) -> Bool)?

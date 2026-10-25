@@ -2006,6 +2006,120 @@
       savedCanvas.cancel()
       checkpoint("character formatting passed")
 
+      // TXT-09: a page marked with /Rotate is edited upright while the saved
+      // rotation and neighboring page-space content stay unchanged.
+      let rotatedSource = output.appendingPathComponent("rotated-page-source.pdf")
+      try? FileManager.default.removeItem(at: rotatedSource)
+      try FileManager.default.copyItem(
+        at: URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+          .appendingPathComponent("Tests/Fixtures/text-edit.pdf"),
+        to: rotatedSource)
+      let (rotatedOpened, _) = try await controller.openDocument(
+        withContentsOf: rotatedSource, display: true)
+      guard let rotatedDocument = rotatedOpened as? SPDFDocument,
+        let rotatedViewer = rotatedDocument.viewer,
+        let rotatedWindow = rotatedDocument.windowControllers.first?.window,
+        let rotatedContent = rotatedWindow.contentView
+      else { throw PDFError(.malformed, "Could not open the rotated-page source") }
+      rotatedWindow.makeKeyAndOrderFront(nil)
+      try await Task.sleep(for: .milliseconds(200))
+      rotatedDocument.rotateCurrentPage(byDegrees: 90)
+      try await Task.sleep(for: .milliseconds(250))
+      guard let displayedRotatedPage = rotatedViewer.view.document?.page(at: 0),
+        displayedRotatedPage.rotation == 90 else {
+        throw PDFError(.malformed, "Page rotation did not reach the rendered page")
+      }
+      let rotatedBaseline = try rotatedDocument.editSession.bytesForSave()
+      _ = rotatedViewer.activateTool(.textEdit)
+      try await Task.sleep(for: .milliseconds(100))
+      guard let rotatedOverlay = findOverlay(rotatedContent),
+        let rotatedTargets = rotatedViewer.textTargetsProvider?(0),
+        let rotatedTarget = rotatedTargets.first(where: { $0.text.contains("Replace") })
+          ?? rotatedTargets.first
+      else { throw PDFError(.malformed, "No editable text target on the rotated page") }
+      let rotatedTargetRect = CGRect(
+        x: rotatedTarget.rect[0], y: rotatedTarget.rect[1],
+        width: rotatedTarget.rect[2] - rotatedTarget.rect[0],
+        height: rotatedTarget.rect[3] - rotatedTarget.rect[1])
+      let rotatedViewPoint = rotatedViewer.view.convert(
+        NSPoint(x: rotatedTargetRect.midX, y: rotatedTargetRect.midY), from: displayedRotatedPage)
+      let rotatedPointer = rotatedViewer.view.convert(rotatedViewPoint, to: nil)
+      rotatedOverlay.mouseDown(with: try mouse(.leftMouseDown, point: rotatedPointer, clicks: 2))
+      rotatedOverlay.mouseUp(with: try mouse(.leftMouseUp, point: rotatedPointer, clicks: 2))
+      guard rotatedViewer.isTypingPageText, let rotatedCanvas = findCanvas(rotatedContent) else {
+        throw PDFError(.malformed, "Double-click did not start editing on the rotated page")
+      }
+      guard rotatedViewer.view.document?.page(at: 0)?.rotation == 0 else {
+        throw PDFError(.malformed, "The rotated page was not shown upright while editing")
+      }
+      rotatedCanvas.textView.insertText(
+        "Replace that text",
+        replacementRange: NSRange(location: 0, length: (rotatedCanvas.textView.string as NSString).length))
+      guard rotatedViewer.hasPendingPageTextChanges else {
+        throw PDFError(.malformed, "Typing on the rotated page created no pending draft")
+      }
+      guard rotatedCanvas.commit() else {
+        throw PDFError(
+          .malformed,
+          "The rotated-page text edit did not commit (issue=\(rotatedViewer.pageTextFormattingIssue ?? "nil"), "
+            + "overflow=\(String(describing: rotatedViewer.pageTextOverflow)), "
+            + "target=\(rotatedTarget.text), paragraph=\(rotatedTarget.paragraph != nil))")
+      }
+      checkpoint("rotated page edit committed")
+      let rotatedBytes = try rotatedDocument.editSession.bytesForSave()
+      guard let rotatedReader = PDFDocument(data: rotatedBytes),
+        rotatedReader.page(at: 0)?.rotation == 90,
+        rotatedReader.string?.contains("Replace that text") == true,
+        rotatedViewer.view.document?.page(at: 0)?.rotation == 90
+      else {
+        throw PDFError(.malformed, "Saved rotated-page edit lost the text or the page rotation")
+      }
+      rotatedDocument.undoEdit()
+      guard try rotatedDocument.editSession.bytesForSave() == rotatedBaseline,
+        PDFDocument(data: try rotatedDocument.editSession.bytesForSave())?
+          .string?.contains("Replace this text") == true else {
+        throw PDFError(.malformed, "Undo after the rotated-page edit did not restore the source")
+      }
+      checkpoint("rotated page edit and undo passed")
+
+      // A new text box on the rotated page also edits upright and saves with
+      // the page rotation intact.
+      _ = rotatedViewer.activateTool(.addText)
+      try await Task.sleep(for: .milliseconds(100))
+      guard let addTargetPage = rotatedViewer.view.document?.page(at: 0) else {
+        throw PDFError(.malformed, "The rotated page disappeared before Add Text")
+      }
+      let addViewPoint = rotatedViewer.view.convert(NSPoint(x: 120, y: 300), from: addTargetPage)
+      let addPointer = rotatedViewer.view.convert(addViewPoint, to: nil)
+      rotatedOverlay.mouseDown(with: try mouse(.leftMouseDown, point: addPointer))
+      rotatedOverlay.mouseUp(with: try mouse(.leftMouseUp, point: addPointer))
+      guard rotatedViewer.isTypingPageText, let newTextCanvas = findCanvas(rotatedContent),
+        rotatedViewer.view.document?.page(at: 0)?.rotation == 0 else {
+        throw PDFError(.malformed, "Add Text on the rotated page did not start upright editing")
+      }
+      newTextCanvas.textView.insertText(
+        "Rotated new text",
+        replacementRange: NSRange(
+          location: 0, length: (newTextCanvas.textView.string as NSString).length))
+      guard newTextCanvas.commit() else {
+        throw PDFError(.malformed, "New text on the rotated page did not commit")
+      }
+      let addedRotatedBytes = try rotatedDocument.editSession.bytesForSave()
+      guard let addedRotatedReader = PDFDocument(data: addedRotatedBytes),
+        addedRotatedReader.page(at: 0)?.rotation == 90,
+        addedRotatedReader.string?.contains("Rotated new text") == true,
+        rotatedViewer.view.document?.page(at: 0)?.rotation == 90 else {
+        throw PDFError(.malformed, "New text on the rotated page lost the text or rotation")
+      }
+      rotatedDocument.undoEdit()
+      guard try rotatedDocument.editSession.bytesForSave() == rotatedBaseline else {
+        throw PDFError(.malformed, "Undo after adding rotated-page text did not restore the source")
+      }
+      checkpoint("rotated page new text and undo passed")
+      rotatedDocument.close()
+      window.makeKeyAndOrderFront(nil)
+      try await Task.sleep(for: .milliseconds(200))
+
       window.setContentSize(NSSize(width: 960, height: 650))
       try await Task.sleep(for: .milliseconds(150))
       let originalFrame = window.frame
