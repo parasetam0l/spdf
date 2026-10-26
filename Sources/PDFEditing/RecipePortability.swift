@@ -621,13 +621,17 @@ public enum RecipePortability {
 
   /// AUT-07: a human-readable compatibility report for an import dialog.
   public static func compatibilityReport(_ validation: RecipeValidation) -> String {
+    // Typed locals keep the CI type-checker from solving one huge expression.
+    let readVersions = RecipeDocument.supportedReadVersions.sorted()
+      .map(String.init).joined(separator: ", ")
+    let formatLine = "Format: sPDF recipe v"
+      + String(RecipeDocument.currentVersion)
+      + "; supported read versions: " + readVersions + "."
+    let migratedSuffix = validation.migratedFromVersion.map { " (migrated from v\($0))" } ?? ""
+    let statusLine = "Status: \(validation.isAccepted ? "accepted" : "not imported")"
+      + migratedSuffix + "."
     var lines = [
-      "# Recipe compatibility report", "",
-      "Format: sPDF recipe v\(RecipeDocument.currentVersion); supported read versions: "
-        + RecipeDocument.supportedReadVersions.sorted().map(String.init).joined(separator: ", ")
-        + ".",
-      "Status: \(validation.isAccepted ? "accepted" : "not imported")"
-        + (validation.migratedFromVersion.map { " (migrated from v\($0))" } ?? "") + ".",
+      "# Recipe compatibility report", "", formatLine, statusLine,
       "",
       "Recipes are declarative data: nothing in this file is code, and the validator "
         + "never executes an operation, resolves a destination or uses the network.",
