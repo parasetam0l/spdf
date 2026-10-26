@@ -565,6 +565,15 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
   @objc private func showFormRichTextEditor(_ sender: Any?) {
     currentDocument?.showFormRichTextFieldEditor()
   }
+  @objc private func showBidirectionalTextInsertion(_ sender: Any?) {
+    currentDocument?.showBidirectionalTextInsertion()
+  }
+  @objc private func showCJKTextInsertion(_ sender: Any?) {
+    currentDocument?.showCJKTextInsertion()
+  }
+  @objc private func showRedactionSanitization(_ sender: Any?) {
+    currentDocument?.showRedactionSanitization()
+  }
   @objc private func detectFormFields(_ sender: Any?) {
     guard let document = currentDocument else { return }
     document.showFormDesign()
@@ -950,6 +959,12 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
       return document.canShowFormRulesPanel
     case #selector(showFormRichTextEditor):
       return document.canShowFormRichTextEditor
+    case #selector(showRedactionSanitization):
+      return true
+    case #selector(showBidirectionalTextInsertion):
+      return document.canShowBidiTextInsertionPanel
+    case #selector(showCJKTextInsertion):
+      return document.canShowCJKTextInsertionPanel
     case #selector(toggleArrangeObjects):
       menuItem.state = document.pageObjectSelectionController.isArrangeMode ? .on : .off
       return document.canUsePageObjectArrangement
@@ -1438,6 +1453,13 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
     // REV-04/REV-07: visual review summary / comparison report exports.
     add("Review Reports…", #selector(showReviewReports), target: self, to: tools)
     add("Preview DOCX Reconstruction…", #selector(previewDOCX), target: self, to: tools)
+    // FNT-05/FNT-06: bounded bidi/Hebrew/Arabic/Indic and CJK horizontal/vertical
+    // text insertion.
+    let text = submenu("Text", in: tools)
+    add(
+      "Insert Bidirectional Text…", #selector(showBidirectionalTextInsertion),
+      target: self, to: text)
+    add("Insert CJK / Vertical Text…", #selector(showCJKTextInsertion), target: self, to: text)
     let security = submenu("Security", in: tools)
     add("Unlock Document…", #selector(unlockDocument), target: self, to: security)
     add("Lock Document", #selector(lockDocument), target: self, to: security)
@@ -1447,6 +1469,9 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
       "Redaction Marks…", #selector(showRedactionMarks), key: "r",
       modifiers: [.command, .option, .shift], target: self, to: security)
     add("Save Sanitized Copy…", #selector(saveSanitizedCopy), target: self, to: security)
+    // RED-05/RED-06: selective hidden-data review, sanitized verified copy and
+    // independent adversarial output validation.
+    add("Sanitize Hidden Data…", #selector(showRedactionSanitization), target: self, to: security)
     add("Export Encrypted Copy…", #selector(exportEncryptedCopy), target: self, to: security)
     add("Sign Document…", #selector(signDocument), target: self, to: security)
     // SIG-06: existing-field signing and signed-revision inspection.

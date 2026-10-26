@@ -293,7 +293,11 @@ public struct TrueTypeInspector: Sendable, Equatable {
     }
     let end = base + length
     let segCount = try u16(bytes, at: base + 6) / 2
-    guard segCount > 0, segCount <= 256 else {
+    // 256 segments is not a real Unicode cmap limit: full-coverage fonts such
+    // as Arial Unicode legitimately split the BMP into hundreds of segments.
+    // The bound below still rejects implausible counts while the length check
+    // above keeps every array access inside the subtable.
+    guard segCount > 0, segCount <= 4_096 else {
       throw PDFError(.malformed, "TrueType cmap segment count is implausible")
     }
     func array(at offset: Int, count: Int) throws -> [Int] {
@@ -311,7 +315,7 @@ public struct TrueTypeInspector: Sendable, Equatable {
       guard starts[segment] <= ends[segment] else {
         throw PDFError(.malformed, "TrueType cmap segment is inverted")
       }
-      guard ends[segment] - starts[segment] <= 4096 else {
+      guard ends[segment] - starts[segment] <= 65_535 else {
         throw PDFError(.malformed, "TrueType cmap segment is implausibly large")
       }
       let rangeOffset = try u16(bytes, at: rangeBase + segment * 2)
