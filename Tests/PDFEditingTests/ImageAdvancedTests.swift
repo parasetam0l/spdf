@@ -723,7 +723,7 @@ struct ImageAdvancedTests {
   // MARK: - P20-030 capability table
 
   @Test func capabilityTableCoversCodecsAndMasks() throws {
-    #expect(ImageCapabilities.rows.count == 17)
+    #expect(ImageCapabilities.rows.count == 22)
     func row(codec: String, mask: String) throws -> ImageCapabilityRow {
       try #require(ImageCapabilities.rows.first { $0.codec == codec && $0.mask == mask })
     }

@@ -944,11 +944,18 @@ public struct ExtractedImageOriginal: Sendable, Equatable {
   public let usableAsStandaloneFile: Bool
   public let suggestedExtension: String
   public let note: String
+  /// IMG-03: structured color/mask/codec semantics behind the flat fields.
+  public let colorFamily: ImageColorFamily
+  public let maskKind: ImageMaskKind
+  public let decodeArrayPresent: Bool
+  public let preservation: ImageOriginalPreservation
 
   public init(
     width: Int, height: Int, bitsPerComponent: Int, colorSpace: String, filters: [String],
     originalBytes: Data, decodedSamples: Data?, usableAsStandaloneFile: Bool,
-    suggestedExtension: String, note: String
+    suggestedExtension: String, note: String, colorFamily: ImageColorFamily,
+    maskKind: ImageMaskKind, decodeArrayPresent: Bool,
+    preservation: ImageOriginalPreservation
   ) {
     self.width = width
     self.height = height
@@ -960,6 +967,10 @@ public struct ExtractedImageOriginal: Sendable, Equatable {
     self.usableAsStandaloneFile = usableAsStandaloneFile
     self.suggestedExtension = suggestedExtension
     self.note = note
+    self.colorFamily = colorFamily
+    self.maskKind = maskKind
+    self.decodeArrayPresent = decodeArrayPresent
+    self.preservation = preservation
   }
 }
 
@@ -970,76 +981,40 @@ public enum ImageOriginalExtraction {
     guard case .stream(let stream)? = graph.objects[imageID] else {
       throw PDFError(.malformed, "Image resource is missing")
     }
-    let dictionary = stream.dictionary
-    guard dictionary[PDFName("Subtype")] == .name(PDFName("Image")) else {
+    guard stream.dictionary[PDFName("Subtype")] == .name(PDFName("Image")) else {
       throw PDFError(.malformed, "The object is not an image XObject")
     }
-    let width = ImageInstanceEditing.integers(dictionary[PDFName("Width")]) ?? 0
-    let height = ImageInstanceEditing.integers(dictionary[PDFName("Height")]) ?? 0
-    let bits = ImageInstanceEditing.integers(dictionary[PDFName("BitsPerComponent")]) ?? 0
-    let colorSpace: String
-    switch dictionary[PDFName("ColorSpace")] {
-    case .name(let name)?:
-      colorSpace = String(decoding: name.bytes, as: UTF8.self)
-    case .array(let values)? where !values.isEmpty:
-      if case .name(let name)? = values.first {
-        colorSpace = String(decoding: name.bytes, as: UTF8.self)
-      } else {
-        colorSpace = ""
-      }
-    default:
-      colorSpace = ""
+    let semantics = try ImageSemanticsInspector.describe(stream: stream, in: graph)
+    let preservation = ImageSemanticsInspector.preservation(for: semantics)
+    let decodedSamples: Data?
+    let usable: Bool
+    let extensionName: String
+    switch preservation {
+    case .originalEncodedBytes(let fileExtension, _):
+      usable = true
+      extensionName = fileExtension
+      decodedSamples = fileExtension == "png" ? (try? PDFFilters.decoded(stream)) : nil
+    case .alphaPreservingExport:
+      usable = false
+      extensionName = "png"
+      decodedSamples = try? PDFFilters.decoded(stream)
+    case .renderedReconstruction:
+      usable = false
+      extensionName = semantics.isStencil ? "bin" : "png"
+      decodedSamples = nil
+    case .explicitColorConversion:
+      usable = false
+      extensionName = "bin"
+      decodedSamples = nil
     }
-    let filters = ((try? PDFFilters.filterNames(in: dictionary)) ?? []).map {
-      String(decoding: $0.bytes, as: UTF8.self)
-    }
-    let isStencil = dictionary[PDFName("ImageMask")] == .boolean(true)
-    let hasMask =
-      dictionary[PDFName("SMask")] != nil || dictionary[PDFName("Mask")] != nil
-    if isStencil {
-      return ExtractedImageOriginal(
-        width: width, height: height, bitsPerComponent: bits, colorSpace: colorSpace,
-        filters: filters, originalBytes: stream.bytes, decodedSamples: nil,
-        usableAsStandaloneFile: false, suggestedExtension: "bin",
-        note: "Stencil masks paint with the current color and need rendering")
-    }
-    if hasMask {
-      return ExtractedImageOriginal(
-        width: width, height: height, bitsPerComponent: bits, colorSpace: colorSpace,
-        filters: filters, originalBytes: stream.bytes, decodedSamples: nil,
-        usableAsStandaloneFile: false, suggestedExtension: "png",
-        note: "Masked images need rendered reconstruction")
-    }
-    if filters == ["DCTDecode"] {
-      return ExtractedImageOriginal(
-        width: width, height: height, bitsPerComponent: bits, colorSpace: colorSpace,
-        filters: filters, originalBytes: stream.bytes, decodedSamples: nil,
-        usableAsStandaloneFile: true, suggestedExtension: "jpg",
-        note: "Original JPEG bytes preserved byte-for-byte")
-    }
-    if filters == ["JPXDecode"] {
-      return ExtractedImageOriginal(
-        width: width, height: height, bitsPerComponent: bits, colorSpace: colorSpace,
-        filters: filters, originalBytes: stream.bytes, decodedSamples: nil,
-        usableAsStandaloneFile: true, suggestedExtension: "jp2",
-        note: "Original JPEG 2000 bytes preserved byte-for-byte")
-    }
-    if (filters.isEmpty || filters == ["FlateDecode"]), bits == 8,
-      colorSpace == "DeviceRGB" || colorSpace == "DeviceGray"
-    {
-      let decoded = try? PDFFilters.decoded(stream)
-      return ExtractedImageOriginal(
-        width: width, height: height, bitsPerComponent: bits, colorSpace: colorSpace,
-        filters: filters, originalBytes: stream.bytes, decodedSamples: decoded,
-        usableAsStandaloneFile: true, suggestedExtension: "png",
-        note: "Stored samples wrap into a PNG without resampling")
-    }
-    let decoded = try? PDFFilters.decoded(stream)
     return ExtractedImageOriginal(
-      width: width, height: height, bitsPerComponent: bits, colorSpace: colorSpace,
-      filters: filters, originalBytes: stream.bytes, decodedSamples: decoded,
-      usableAsStandaloneFile: false, suggestedExtension: "bin",
-      note: "Unsupported codec or color space; original bytes are preserved, not converted")
+      width: semantics.width, height: semantics.height,
+      bitsPerComponent: semantics.bitsPerComponent,
+      colorSpace: semantics.colorSpaceDescription, filters: semantics.filters,
+      originalBytes: stream.bytes, decodedSamples: decodedSamples,
+      usableAsStandaloneFile: usable, suggestedExtension: extensionName,
+      note: preservation.note, colorFamily: semantics.family, maskKind: semantics.mask,
+      decodeArrayPresent: semantics.decode != nil, preservation: preservation)
   }
 }
 
@@ -1241,14 +1216,15 @@ public enum ImageCapabilities {
       codec: "FlateDecode", mask: "none", read: "supported", extract: "supported",
       edit: "supported", write: "FlateDecode"),
     ImageCapabilityRow(
-      codec: "FlateDecode", mask: "SMask", read: "supported", extract: "rendered",
-      edit: "dedicated soft-mask path", write: "FlateDecode"),
+      codec: "FlateDecode", mask: "SMask", read: "supported",
+      extract: "alpha-preserving PNG", edit: "dedicated soft-mask path",
+      write: "FlateDecode"),
     ImageCapabilityRow(
       codec: "FlateDecode", mask: "Mask array", read: "supported", extract: "rendered",
       edit: "unsupported (preserved)", write: "preserved"),
     ImageCapabilityRow(
-      codec: "FlateDecode", mask: "Decode array", read: "supported", extract: "supported",
-      edit: "unsupported (preserved)", write: "preserved"),
+      codec: "FlateDecode", mask: "Decode array", read: "supported",
+      extract: "explicit conversion", edit: "unsupported (preserved)", write: "preserved"),
     ImageCapabilityRow(
       codec: "Raw/FlateDecode", mask: "ImageMask stencil", read: "supported",
       extract: "rendered", edit: "dedicated stencil path", write: "preserved encoding"),
@@ -1283,8 +1259,24 @@ public enum ImageCapabilities {
       codec: "DeviceGray 8-bit", mask: "none", read: "supported", extract: "supported",
       edit: "crop/extract only", write: "FlateDecode"),
     ImageCapabilityRow(
-      codec: "Other color spaces/depths", mask: "any", read: "metadata only",
+      codec: "DeviceCMYK 8-bit", mask: "none", read: "supported",
+      extract: "explicit conversion", edit: "unsupported (preserved)", write: "preserved"),
+    ImageCapabilityRow(
+      codec: "ICCBased/CalRGB/Separation/DeviceN", mask: "none", read: "metadata only",
+      extract: "explicit conversion", edit: "unsupported (preserved)", write: "preserved"),
+    ImageCapabilityRow(
+      codec: "DCTDecode/JPXDecode", mask: "none", read: "metadata only",
       extract: "original bytes", edit: "unsupported (preserved)", write: "preserved"),
+    ImageCapabilityRow(
+      codec: "DCTDecode/JPXDecode", mask: "SMask or color-key", read: "metadata only",
+      extract: "explicit conversion", edit: "unsupported (preserved)", write: "preserved"),
+    ImageCapabilityRow(
+      codec: "Any color image", mask: "any", read: "supported",
+      extract: "explicit conversion", edit: "RGB conversion command",
+      write: "DeviceRGB Flate conversion"),
+    ImageCapabilityRow(
+      codec: "Other color spaces/depths", mask: "any", read: "metadata only",
+      extract: "explicit conversion", edit: "unsupported (preserved)", write: "preserved"),
   ]
 
   public static func summary() -> String {

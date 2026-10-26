@@ -959,11 +959,10 @@
         throw PDFError(.malformed, "Nested image and page text do not overlap")
       }
       let probe = [Double(overlap.midX), Double(overlap.midY)]
-      guard let refusal = viewer.graphicRefusalProvider?(0, probe),
-        refusal.contains("reusable form"),
-        viewer.graphicTargetProvider?(0, probe) == nil,
+      guard viewer.graphicTargetProvider?(0, probe)?.imagePlacementIndex == 0,
+        viewer.graphicRefusalProvider?(0, probe) == nil,
         viewer.textRunProvider?(0, probe) != nil else {
-        throw PDFError(.malformed, "Nested image overlap did not expose matching text and refusal targets")
+        throw PDFError(.malformed, "Nested image overlap did not expose an editable image and page-text target")
       }
       func findGraphicOverlay(_ root: NSView) -> GraphicSelectionOverlayView? {
         if let overlay = root as? GraphicSelectionOverlayView { return overlay }
@@ -989,6 +988,42 @@
       }
 
       let baseline = try document.editSession.bytesForSave()
+      guard let baselineGraph = document.editSession.currentGraph else {
+        throw PDFError(.malformed, "Nested image workflow has no current graph")
+      }
+      let nestedPageID = document.editSession.pageIDs[0]
+      let baselinePlacements = try ImageInventory.placements(
+        in: baselineGraph, pageID: nestedPageID)
+      guard baselinePlacements.count == 1, baselinePlacements[0].depth == 1 else {
+        throw PDFError(.malformed, "Nested image fixture lost its single nested placement")
+      }
+      let baselineMatrix = baselinePlacements[0].matrix
+      let baselineClip = baselinePlacements[0].clippingBounds
+      var outsideIDs = Set(baselineGraph.objects.keys)
+      outsideIDs.remove(nestedPageID)
+      if case .dictionary(let pageDictionary)? = baselineGraph.objects[nestedPageID] {
+        switch pageDictionary[PDFName("Contents")] {
+        case .reference(let id)?:
+          outsideIDs.remove(id)
+        case .array(let values)?:
+          for value in values {
+            if case .reference(let id) = value { outsideIDs.remove(id) }
+          }
+        default:
+          break
+        }
+        if case .reference(let resourcesID)? = pageDictionary[PDFName("Resources")] {
+          outsideIDs.remove(resourcesID)
+        }
+      }
+      func preservedOutside(_ graph: PDFGraph) -> Bool {
+        outsideIDs.allSatisfy { graph.objects[$0] == baselineGraph.objects[$0] }
+      }
+      func matrixClose(_ first: [Double], _ second: [Double]) -> Bool {
+        first.count == second.count
+          && zip(first, second).allSatisfy { abs($0 - $1) <= 0.01 }
+      }
+
       guard viewer.activateTool(.imageEdit) else {
         throw PDFError(.malformed, "Could not enter Images mode for a nested image")
       }
@@ -996,27 +1031,96 @@
       graphicOverlay.mouseDown(with: try mouse(.leftMouseDown, windowPoint))
       graphicOverlay.mouseUp(with: try mouse(.leftMouseUp, windowPoint))
       try await Task.sleep(for: .milliseconds(100))
-      guard viewer.selectedGraphics.isEmpty,
-        viewer.selectionDetails?.text == refusal,
-        viewer.graphicEditRefusal == refusal,
-        AccessibilityAudit.keyWindowElement(labeled: "Image editing unavailable") != nil,
-        try document.editSession.bytesForSave() == baseline else {
+      guard viewer.selectedGraphics.count == 1,
+        viewer.selectedGraphics.first?.imagePlacementIndex == 0,
+        viewer.graphicEditRefusal == nil,
+        AccessibilityAudit.keyWindowElement(labeled: "Image editing unavailable") == nil,
+        try document.editSession.bytesForSave() == baseline,
+        let selectedTarget = viewer.selectedGraphics.first
+          ?? viewer.graphicTargetProvider?(0, probe)
+      else {
         throw PDFError(.malformed,
-          "Images mode did not show the nested-image refusal or preserve source bytes "
+          "Images mode did not select the nested image as an editable target "
             + "(selected=\(viewer.selectedGraphics.count), details=\(viewer.selectionDetails?.text ?? "nil"), "
-            + "refusal=\(viewer.graphicEditRefusal ?? "nil"), ax=\(AccessibilityAudit.keyWindowElement(labeled: "Image editing unavailable") != nil), "
+            + "refusal=\(viewer.graphicEditRefusal ?? "nil"), "
             + "bytes=\(try document.editSession.bytesForSave() == baseline))")
       }
 
+      // 1) Move the nested instance: copy-on-write forms, unrelated bytes kept,
+      // and one Undo restores the exact source bytes.
+      guard document.moveGraphics([(selectedTarget, 12, 8)]),
+        let movedGraph = document.editSession.currentGraph,
+        let movedPlacements = try? ImageInventory.placements(in: movedGraph, pageID: nestedPageID),
+        movedPlacements.count == 1,
+        matrixClose(movedPlacements[0].matrix, [
+          baselineMatrix[0], baselineMatrix[1], baselineMatrix[2], baselineMatrix[3],
+          baselineMatrix[4] + 12, baselineMatrix[5] + 8,
+        ]),
+        preservedOutside(movedGraph)
+      else {
+        throw PDFError(.malformed, "Nested image move did not isolate the instance or preserve unrelated bytes")
+      }
+      guard document.undoEdit(), try document.editSession.bytesForSave() == baseline else {
+        throw PDFError(.malformed, "One Undo did not restore the nested image move")
+      }
+
+      // 2) Rotate 90° through the enclosing form chain, then Undo.
+      guard let rotateTarget = viewer.graphicTargetProvider?(0, probe),
+        document.rotateGraphic(rotateTarget),
+        let rotatedGraph = document.editSession.currentGraph,
+        let rotatedPlacements = try? ImageInventory.placements(
+          in: rotatedGraph, pageID: nestedPageID),
+        rotatedPlacements.count == 1,
+        matrixClose(rotatedPlacements[0].matrix, [0, 100, -100, 0, 350, 340]),
+        preservedOutside(rotatedGraph)
+      else {
+        throw PDFError(.malformed, "Nested image rotation did not isolate the instance or preserve unrelated bytes")
+      }
+      guard document.undoEdit(), try document.editSession.bytesForSave() == baseline else {
+        throw PDFError(.malformed, "One Undo did not restore the nested image rotation")
+      }
+
+      // 3) Non-destructive crop only the nested instance, then Undo.
+      guard document.cropImage(pageIndex: 0, placementIndex: 0,
+        unitRect: [0.25, 0.25, 0.75, 0.75]),
+        let croppedGraph = document.editSession.currentGraph,
+        let croppedPlacements = try? ImageInventory.placements(
+          in: croppedGraph, pageID: nestedPageID),
+        croppedPlacements.count == 1,
+        croppedPlacements[0].hasSupportedClipping,
+        let croppedClip = croppedPlacements[0].clippingBounds,
+        matrixClose(croppedClip, [275, 365, 325, 415]),
+        preservedOutside(croppedGraph)
+      else {
+        throw PDFError(.malformed, "Nested image crop did not isolate the instance or preserve unrelated bytes")
+      }
+      guard document.undoEdit(),
+        let restoredGraph = document.editSession.currentGraph,
+        try document.editSession.bytesForSave() == baseline,
+        let restoredPlacements = try? ImageInventory.placements(
+          in: restoredGraph, pageID: nestedPageID),
+        restoredPlacements.count == 1,
+        matrixClose(restoredPlacements[0].matrix, baselineMatrix),
+        (baselineClip == nil
+          ? restoredPlacements[0].clippingBounds == nil
+          : restoredPlacements[0].clippingBounds.map {
+            matrixClose($0, baselineClip ?? [])
+          } == true),
+        preservedOutside(restoredGraph)
+      else {
+        throw PDFError(.malformed, "One Undo did not restore the nested image crop")
+      }
+
+      // Page text over the (restored) nested image still selects as text.
       guard viewer.activateTool(.textEdit) else {
         throw PDFError(.malformed, "Could not enter Edit PDF mode over a nested image")
       }
       guard let nestedTextTarget = viewer.textRunProvider?(0, probe) else {
-        throw PDFError(.malformed, "Page text target disappeared after refusing the nested image")
+        throw PDFError(.malformed, "Page text target disappeared after the nested image edits")
       }
       let nestedPreviewAvailable = viewer.onTextBlockPreview?(nestedTextTarget) != nil
       guard let currentTextOverlay = findTextOverlay(content) else {
-        throw PDFError(.malformed, "Edit PDF overlay disappeared after the refusal message")
+        throw PDFError(.malformed, "Edit PDF overlay disappeared after the nested image edits")
       }
       let currentWindowPoint = point(probe[0], probe[1])
       currentTextOverlay.mouseDown(with: try mouse(.leftMouseDown, currentWindowPoint))
@@ -1034,7 +1138,7 @@
         try document.editSession.bytesForSave() == baseline else {
         throw PDFError(.malformed, "Canceling nested-overlap text editing changed the PDF")
       }
-      checkpoint("nested-image refusal and text selection passed")
+      checkpoint("nested-image move/rotate/crop with copy-on-write forms, one-step Undo and text selection passed")
     }
 
     private static func checkReadOnlyExplanation(output: URL) async throws {

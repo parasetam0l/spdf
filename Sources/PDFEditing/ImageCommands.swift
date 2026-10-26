@@ -766,9 +766,16 @@ public struct ReplaceImageDataCommand: PDFEditCommand, Equatable, Sendable {
       throw PDFError(.malformed, "Image resource is missing")
     }
     let imageDictionary = image.dictionary
-    // A soft mask is replaced together with the image samples below. Other
-    // masks change the meaning of the samples (stencil/color-key/decode), so
-    // replacing those still needs an explicit workflow.
+    // IMG-03: a soft mask is replaced together with the image samples only
+    // when replacement alpha is supplied. Dropping it silently would change
+    // alpha semantics; the explicit conversion command can drop it on request.
+    if imageDictionary[PDFName("SMask")] != nil, alpha8 == nil {
+      throw PDFError(
+        .unsupported,
+        "This image carries a soft mask. Provide replacement alpha, or use Replace Image with RGB Conversion with the explicit discard option")
+    }
+    // Other masks change the meaning of the samples (stencil/color-key/decode),
+    // so replacing those still needs an explicit workflow.
     for key in ["ImageMask", "Mask", "Decode"] where imageDictionary[PDFName(key)] != nil {
       throw PDFError(
         .unsupported, "This profile cannot replace stencil, color-key or decoded images")
@@ -938,7 +945,12 @@ public struct ReplaceSharedImageCommand: PDFEditCommand, Equatable, Sendable {
     guard case .stream(let image)? = graph.objects[placement.imageID] else {
       throw PDFError(.malformed, "Image resource is missing")
     }
-    // A soft mask is replaced together with the shared image samples below.
+    // IMG-03: never drop a soft mask silently on the shared object either.
+    if image.dictionary[PDFName("SMask")] != nil, alpha8 == nil {
+      throw PDFError(
+        .unsupported,
+        "This shared image carries a soft mask. Provide replacement alpha, or use Replace Image with RGB Conversion with the explicit discard option")
+    }
     // Stencil, color-key and decode semantics remain outside this profile.
     for key in ["ImageMask", "Mask", "Decode"] where image.dictionary[PDFName(key)] != nil {
       throw PDFError(

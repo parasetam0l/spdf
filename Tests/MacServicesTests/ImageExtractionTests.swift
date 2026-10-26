@@ -170,7 +170,9 @@ struct ImageExtractionTests {
       samplesResource.data.prefix(8)
         == Data([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]))
 
-    // A masked image is reconstructed by rendering.
+    // IMG-03: 8-bit samples with a same-size soft mask wrap into an
+    // alpha-preserving PNG (the rendered path is covered by ImageAdvancedTests
+    // and the new mask/codec export suite).
     let maskedRequest = try #require(requests.first { $0.name == "ImM" })
     let maskedResource = try #require(
       try PDFImageExport.docxResource(for: maskedRequest, pageIDs: pageIDs, in: graph))
@@ -267,20 +269,29 @@ struct ImageExtractionTests {
     }
   }
 
-  @Test func maskedImagesUseRenderedReconstruction() async throws {
+  @Test func softMaskedSamplesExportAlphaPreservingPNG() async throws {
     let graph = fixture(jpeg: try jpegData())
     let pageIDs = try PDFPageTree.pageIDs(in: graph)
     let directory = FileManager.default.temporaryDirectory
       .appendingPathComponent("spdf-images-\(UUID().uuidString)")
     defer { try? FileManager.default.removeItem(at: directory) }
     let exported = try await PDFImageExport.export(
-      pageIDs: pageIDs, in: graph, to: directory, baseName: "doc",
-      options: PDFImageExtractionOptions(renderDPI: 144))
+      pageIDs: pageIDs, in: graph, to: directory, baseName: "doc")
     let masked = try #require(exported.first { $0.name == "ImM" })
-    #expect(masked.provenance == .reconstructed)
-    // The placement is 100x100 points; at 144 dpi that is 200x200 pixels.
-    #expect(masked.pixelWidth == 200 && masked.pixelHeight == 200)
+    // IMG-03: 8-bit samples with a same-size 8-bit soft mask now wrap into an
+    // alpha-preserving PNG instead of a rendered reconstruction.
+    #expect(masked.provenance == .original)
+    #expect(masked.pixelWidth == 2 && masked.pixelHeight == 2)
     #expect(masked.url.lastPathComponent == "doc-page-0001-image-0003.png")
+    #expect(masked.preservationNote.contains("soft mask"))
+    guard let source = CGImageSourceCreateWithURL(masked.url as CFURL, nil),
+      let image = CGImageSourceCreateImageAtIndex(source, 0, nil)
+    else {
+      Issue.record("Alpha-preserving PNG did not reopen")
+      return
+    }
+    #expect(image.width == 2 && image.height == 2)
+    #expect(image.alphaInfo == .last || image.alphaInfo == .premultipliedLast)
   }
 
   @Test func deterministicNamesAndCancellation() async throws {

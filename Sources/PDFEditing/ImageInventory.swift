@@ -16,6 +16,11 @@ public struct PDFImageResource: Sendable, Equatable {
   public let filters: [String]
   public let hasSMask: Bool
   public let isImageMask: Bool
+  /// IMG-03: mask/decode semantics needed to classify extraction honestly.
+  public let softMaskObjectID: PDFObjectID?
+  public let hasColorKeyMask: Bool
+  public let hasExplicitMask: Bool
+  public let decodeArrayPresent: Bool
   /// Placement bounds in unrotated page content space.
   public let bounds: [Double]
   /// The raw encoded stream bytes (as stored, before filters).
@@ -24,7 +29,9 @@ public struct PDFImageResource: Sendable, Equatable {
   public init(
     pageIndex: Int, name: String, objectID: PDFObjectID?, width: Int, height: Int,
     bitsPerComponent: Int, colorSpace: String, filters: [String], hasSMask: Bool,
-    isImageMask: Bool, bounds: [Double], encodedData: Data
+    isImageMask: Bool, bounds: [Double], encodedData: Data,
+    softMaskObjectID: PDFObjectID? = nil, hasColorKeyMask: Bool = false,
+    hasExplicitMask: Bool = false, decodeArrayPresent: Bool = false
   ) {
     self.pageIndex = pageIndex
     self.name = name
@@ -36,6 +43,10 @@ public struct PDFImageResource: Sendable, Equatable {
     self.filters = filters
     self.hasSMask = hasSMask
     self.isImageMask = isImageMask
+    self.softMaskObjectID = softMaskObjectID
+    self.hasColorKeyMask = hasColorKeyMask
+    self.hasExplicitMask = hasExplicitMask
+    self.decodeArrayPresent = decodeArrayPresent
     self.bounds = bounds
     self.encodedData = encodedData
   }
@@ -141,7 +152,11 @@ public enum PDFImageInventory {
             hasSMask: stream.dictionary[PDFName("SMask")] != nil
               || stream.dictionary[PDFName("Mask")] != nil,
             isImageMask: stream.dictionary[PDFName("ImageMask")] == .boolean(true),
-            bounds: placement.bounds, encodedData: stream.bytes))
+            bounds: placement.bounds, encodedData: stream.bytes,
+            softMaskObjectID: softMaskID(stream.dictionary[PDFName("SMask")]),
+            hasColorKeyMask: isColorKeyMask(stream.dictionary[PDFName("Mask")]),
+            hasExplicitMask: isExplicitMask(stream.dictionary[PDFName("Mask")]),
+            decodeArrayPresent: stream.dictionary[PDFName("Decode")] != nil))
       }
     }
     return result
@@ -150,5 +165,20 @@ public enum PDFImageInventory {
   private static func integer(_ value: PDFValue?) -> Int? {
     guard case .integer(let raw)? = value else { return nil }
     return Int(exactly: raw)
+  }
+
+  private static func softMaskID(_ value: PDFValue?) -> PDFObjectID? {
+    guard case .reference(let id)? = value else { return nil }
+    return id
+  }
+
+  private static func isColorKeyMask(_ value: PDFValue?) -> Bool {
+    if case .array? = value { return true }
+    return false
+  }
+
+  private static func isExplicitMask(_ value: PDFValue?) -> Bool {
+    if case .reference? = value { return true }
+    return false
   }
 }

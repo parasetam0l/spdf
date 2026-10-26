@@ -5881,6 +5881,161 @@ final class SPDFDocument: NSDocument {
     return true
   }
 
+  // MARK: - IMG-02/03 image-instance routing (nested Form XObjects + colors)
+
+  private struct ImageEditContext {
+    let pageID: PDFObjectID
+    let placement: ImagePlacement
+    /// Nil when the draw has no safely isolatable local transform.
+    let path: ImageInstancePath?
+  }
+
+  /// IMG-02: resolve a placement and, when it is drawn inside a reusable Form
+  /// XObject, its complete enclosing path. Page-level placements keep the
+  /// established direct commands; depth > 0 uses the copy-on-write instance
+  /// commands so other draws/pages of the same form stay byte-identical.
+  private func imageEditContext(
+    pageIndex: Int, placementIndex: Int, in graph: PDFGraph
+  ) -> ImageEditContext? {
+    guard pageIndex >= 0, pageIndex < editSession.pageIDs.count,
+      let pageID = pageID(at: pageIndex),
+      let placements = try? ImageInventory.placements(in: graph, pageID: pageID),
+      placementIndex >= 0, placementIndex < placements.count
+    else { return nil }
+    let placement = placements[placementIndex]
+    let path = try? ImageInstanceEditingSupport.resolve(
+      pageID: pageID, placementIndex: placementIndex, in: graph)
+    return ImageEditContext(pageID: pageID, placement: placement, path: path)
+  }
+
+  private func imagePlacementIsMenuEditable(_ context: ImageEditContext) -> Bool {
+    if context.placement.isDirectlyEditable { return true }
+    guard context.placement.depth > 0, let path = context.path,
+      path.isDirectlyTransformable
+    else { return false }
+    return true
+  }
+
+  /// IMG-02: canvas handles need an axis-aligned page-space footprint. A nested
+  /// placement is selectable when its composed matrix is axis aligned and the
+  /// resolver can isolate the edit.
+  private func imagePlacementIsCanvasSelectable(_ context: ImageEditContext) -> Bool {
+    let placement = context.placement
+    guard placement.hasSupportedClipping, placement.matrix.count == 6,
+      placement.matrix[0] > 0, placement.matrix[3] > 0,
+      abs(placement.matrix[1]) < 1e-9, abs(placement.matrix[2]) < 1e-9,
+      placement.canvasVisibleBounds != nil
+    else { return false }
+    if placement.isDirectlyEditable { return true }
+    guard placement.depth > 0, let path = context.path,
+      path.isDirectlyTransformable
+    else { return false }
+    return true
+  }
+
+  private func imageMoveCommand(
+    pageIndex: Int, placementIndex: Int, dx: Double, dy: Double, in graph: PDFGraph
+  ) -> (any PDFEditCommand)? {
+    guard dx.isFinite, dy.isFinite,
+      let context = imageEditContext(
+        pageIndex: pageIndex, placementIndex: placementIndex, in: graph)
+    else { return nil }
+    if context.placement.depth > 0 {
+      return TransformImageInstanceCommand(
+        pageID: context.pageID, placementIndex: placementIndex,
+        transform: .move(dx: dx, dy: dy))
+    }
+    return MoveImageCommand(pageID: context.pageID, placementIndex: placementIndex, dx: dx, dy: dy)
+  }
+
+  private func imageScaleCommand(
+    pageIndex: Int, placementIndex: Int, scaleX: Double, scaleY: Double, in graph: PDFGraph
+  ) -> (any PDFEditCommand)? {
+    guard scaleX.isFinite, scaleY.isFinite, scaleX > 0, scaleY > 0,
+      let context = imageEditContext(
+        pageIndex: pageIndex, placementIndex: placementIndex, in: graph)
+    else { return nil }
+    if context.placement.depth > 0 {
+      return TransformImageInstanceCommand(
+        pageID: context.pageID, placementIndex: placementIndex,
+        transform: .scale(scaleX: scaleX, scaleY: scaleY))
+    }
+    return ScaleImageCommand(
+      pageID: context.pageID, placementIndex: placementIndex, scaleX: scaleX, scaleY: scaleY)
+  }
+
+  private func imageRotateCommand(
+    pageIndex: Int, placementIndex: Int, degrees: Int, in graph: PDFGraph
+  ) -> (any PDFEditCommand)? {
+    guard let context = imageEditContext(
+      pageIndex: pageIndex, placementIndex: placementIndex, in: graph)
+    else { return nil }
+    if context.placement.depth > 0 {
+      return TransformImageInstanceCommand(
+        pageID: context.pageID, placementIndex: placementIndex, transform: .rotate(degrees: degrees))
+    }
+    return RotateImageCommand(
+      pageID: context.pageID, placementIndex: placementIndex, degrees: degrees)
+  }
+
+  private func imageFlipCommand(
+    pageIndex: Int, placementIndex: Int, horizontal: Bool, in graph: PDFGraph
+  ) -> (any PDFEditCommand)? {
+    guard let context = imageEditContext(
+      pageIndex: pageIndex, placementIndex: placementIndex, in: graph)
+    else { return nil }
+    if context.placement.depth > 0 {
+      return TransformImageInstanceCommand(
+        pageID: context.pageID, placementIndex: placementIndex,
+        transform: .flip(horizontal: horizontal))
+    }
+    return FlipImageCommand(
+      pageID: context.pageID, placementIndex: placementIndex, horizontal: horizontal)
+  }
+
+  private func imageCropCommand(
+    pageIndex: Int, placementIndex: Int, unitRect: [Double], in graph: PDFGraph
+  ) -> (any PDFEditCommand)? {
+    guard let context = imageEditContext(
+      pageIndex: pageIndex, placementIndex: placementIndex, in: graph)
+    else { return nil }
+    if context.placement.depth > 0 {
+      return CropImageInstanceCommand(
+        pageID: context.pageID, placementIndex: placementIndex, unitRect: unitRect)
+    }
+    return ClipImageDrawCommand(
+      pageID: context.pageID, placementIndex: placementIndex, unitRect: unitRect)
+  }
+
+  /// IMG-03: transparency decisions for the explicitly named RGB conversion.
+  /// Nil means the image is a stencil, which this profile never color-converts.
+  private func imageConversionDecisions(
+    semantics: ImageColorSemantics?, alpha8: Data?
+  ) -> (discardSoftMask: Bool, discardColorKeyMask: Bool)? {
+    guard let semantics, !semantics.isStencil else { return nil }
+    var discardSoftMask = false
+    var discardColorKeyMask = false
+    switch semantics.mask {
+    case .softMask:
+      discardSoftMask = alpha8 == nil
+    case .colorKey, .explicitMask:
+      discardColorKeyMask = true
+    case .none, .stencil:
+      break
+    }
+    return (discardSoftMask, discardColorKeyMask)
+  }
+
+  private func imageReplacementRefusal(semantics: ImageColorSemantics?) -> String {
+    if let semantics, semantics.isStencil {
+      return "This image is a stencil mask: its samples are paint or no-paint, not color data. Crop, rotate or flip it, or pick a different image to replace."
+    }
+    if case .explicitConversion(let reason)? = semantics?.replacementPolicy {
+      return reason + ". Use Replace Image to apply the explicitly named RGB conversion."
+    }
+    return "This image cannot use the shared replacement path. Replace this instance with the explicit RGB conversion instead."
+  }
+
   // MARK: - Image edits (P12-015, P20-008–P20-012)
 
   private struct ImageMenuCommand {
@@ -5902,9 +6057,9 @@ final class SPDFDocument: NSDocument {
     let target: AddedGraphicTarget
   }
 
-  /// P12-015: operation-specific menu, only offered when a directly editable
-  /// image placement is under the clicked point. App-created graphics get
-  /// their own section when no image placement is hit.
+  /// P12-015/IMG-02: operation-specific menu for a page-level or nested image
+  /// placement under the clicked point. App-created graphics get their own
+  /// section when no image placement is hit.
   private func imageContextMenu(pageIndex: Int, pagePoint: [Double]) -> NSMenu? {
     guard canEditContent, pageIndex >= 0, pageIndex < editSession.pageIDs.count,
       let graph = editSession.currentGraph
@@ -5913,7 +6068,10 @@ final class SPDFDocument: NSDocument {
       in: graph, pageID: editSession.pageIDs[pageIndex]),
       let placementIndex = try? ImageInventory.placementIndex(
         at: pagePoint, in: graph, pageID: editSession.pageIDs[pageIndex]),
-      placementIndex < placements.count, placements[placementIndex].isDirectlyEditable
+      placementIndex < placements.count,
+      let context = imageEditContext(
+        pageIndex: pageIndex, placementIndex: placementIndex, in: graph),
+      imagePlacementIsMenuEditable(context)
     {
       return imagePlacementMenu(pageIndex: pageIndex, placementIndex: placementIndex)
     }
@@ -5989,28 +6147,32 @@ final class SPDFDocument: NSDocument {
 
   @discardableResult
   func rotateImage(pageIndex: Int, placementIndex: Int, degrees: Int) -> Bool {
-    guard let pageID = pageID(at: pageIndex) else { return false }
-    return applyImageTransaction([
-      RotateImageCommand(pageID: pageID, placementIndex: placementIndex, degrees: degrees)
-    ])
+    guard requireContentEditing(for: "Image Editing") else { return false }
+    guard let graph = editSession.currentGraph,
+      let command = imageRotateCommand(
+        pageIndex: pageIndex, placementIndex: placementIndex, degrees: degrees, in: graph)
+    else { return false }
+    return applyImageTransaction([command])
   }
 
   @discardableResult
   func flipImage(pageIndex: Int, placementIndex: Int, horizontal: Bool) -> Bool {
-    guard let pageID = pageID(at: pageIndex) else { return false }
-    return applyImageTransaction([
-      FlipImageCommand(
-        pageID: pageID, placementIndex: placementIndex, horizontal: horizontal)
-    ])
+    guard requireContentEditing(for: "Image Editing") else { return false }
+    guard let graph = editSession.currentGraph,
+      let command = imageFlipCommand(
+        pageIndex: pageIndex, placementIndex: placementIndex, horizontal: horizontal, in: graph)
+    else { return false }
+    return applyImageTransaction([command])
   }
 
   @discardableResult
   func cropImage(pageIndex: Int, placementIndex: Int, unitRect: [Double]) -> Bool {
-    guard let pageID = pageID(at: pageIndex) else { return false }
-    return applyImageTransaction([
-      ClipImageDrawCommand(
-        pageID: pageID, placementIndex: placementIndex, unitRect: unitRect)
-    ])
+    guard requireContentEditing(for: "Image Editing") else { return false }
+    guard let graph = editSession.currentGraph,
+      let command = imageCropCommand(
+        pageIndex: pageIndex, placementIndex: placementIndex, unitRect: unitRect, in: graph)
+    else { return false }
+    return applyImageTransaction([command])
   }
 
   /// IMG-01: move and resize one unrotated placement from page-space numbers.
@@ -6020,6 +6182,7 @@ final class SPDFDocument: NSDocument {
     pageIndex: Int, placementIndex: Int, x: Double, y: Double, width: Double,
     height: Double
   ) -> Bool {
+    guard requireContentEditing(for: "Image Editing") else { return false }
     guard let pageID = pageID(at: pageIndex), let graph = editSession.currentGraph,
       width.isFinite, height.isFinite, x.isFinite, y.isFinite,
       width > 0, height > 0,
@@ -6034,16 +6197,20 @@ final class SPDFDocument: NSDocument {
     var commands: [any PDFEditCommand] = []
     let scaleX = width / currentWidth
     let scaleY = height / currentHeight
-    if abs(scaleX - 1) > 1e-9 || abs(scaleY - 1) > 1e-9 {
-      commands.append(
-        ScaleImageCommand(
-          pageID: pageID, placementIndex: placementIndex, scaleX: scaleX, scaleY: scaleY))
+    if abs(scaleX - 1) > 1e-9 || abs(scaleY - 1) > 1e-9,
+      let command = imageScaleCommand(
+        pageIndex: pageIndex, placementIndex: placementIndex, scaleX: scaleX, scaleY: scaleY,
+        in: graph)
+    {
+      commands.append(command)
     }
     let dx = x - bounds[0]
     let dy = y - bounds[1]
-    if abs(dx) > 1e-9 || abs(dy) > 1e-9 {
-      commands.append(
-        MoveImageCommand(pageID: pageID, placementIndex: placementIndex, dx: dx, dy: dy))
+    if abs(dx) > 1e-9 || abs(dy) > 1e-9,
+      let command = imageMoveCommand(
+        pageIndex: pageIndex, placementIndex: placementIndex, dx: dx, dy: dy, in: graph)
+    {
+      commands.append(command)
     }
     guard !commands.isEmpty else { return true }
     return applyImageTransaction(commands)
@@ -6051,35 +6218,91 @@ final class SPDFDocument: NSDocument {
 
   @discardableResult
   func scaleImage(pageIndex: Int, placementIndex: Int, factor: Double) -> Bool {
-    guard let pageID = pageID(at: pageIndex) else { return false }
-    return applyImageTransaction([
-      ScaleImageCommand(pageID: pageID, placementIndex: placementIndex, uniformScale: factor)
-    ])
+    guard requireContentEditing(for: "Image Editing") else { return false }
+    guard let graph = editSession.currentGraph,
+      let command = imageScaleCommand(
+        pageIndex: pageIndex, placementIndex: placementIndex, scaleX: factor, scaleY: factor,
+        in: graph)
+    else { return false }
+    return applyImageTransaction([command])
   }
 
-  /// P20-009/P20-010/P20-011: import raster data through ImageIO and replace
-  /// one instance or every shared instance. Replacing the scan invalidates a
-  /// generated searchable text layer first (P26-023).
+  /// P20-009/P20-010/P20-011/IMG-02/IMG-03: import raster data through
+  /// ImageIO and replace one instance or every shared instance. Nested
+  /// instances and non-RGB/masked sources go through the explicitly named RGB
+  /// conversion; a shared replacement is limited to the directly representable
+  /// RGB8 case. Replacing the scan invalidates a generated searchable text
+  /// layer first (P26-023).
   @discardableResult
   func replaceImage(pageIndex: Int, placementIndex: Int, with data: Data, shared: Bool) -> Bool {
     guard requireContentEditing(for: "Replace Image") else { return false }
-    guard let pageID = pageID(at: pageIndex) else { return false }
+    guard let pageID = pageID(at: pageIndex), let graph = editSession.currentGraph else {
+      return false
+    }
     guard let raster = ImageImport.decode(data) else {
       presentError(PDFError(.unsupported, "This image could not be imported"))
       return false
     }
-    let command: any PDFEditCommand =
-      shared
-      ? ReplaceSharedImageCommand(
+    let context = imageEditContext(
+      pageIndex: pageIndex, placementIndex: placementIndex, in: graph)
+    var semantics: ImageColorSemantics?
+    if let imageID = context?.placement.imageID {
+      semantics = try? ImageSemanticsInspector.describe(imageID: imageID, in: graph)
+    }
+    let command: any PDFEditCommand
+    if shared {
+      guard let semantics,
+        case .directRGB8(let transparencyRequired) = semantics.replacementPolicy,
+        !(transparencyRequired && raster.alpha8 == nil)
+      else {
+        presentError(PDFError(
+          .unsupported,
+          "Replace All Shared Instances is limited to 8-bit DeviceRGB images that can keep their alpha semantics. "
+            + imageReplacementRefusal(semantics: semantics)))
+        return false
+      }
+      command = ReplaceSharedImageCommand(
         pageID: pageID, placementIndex: placementIndex, width: raster.width,
         height: raster.height, rgb8: raster.rgb8, alpha8: raster.alpha8)
-      : ReplaceImageDataCommand(
+    } else if let context, context.placement.depth > 0 {
+      guard let decisions = imageConversionDecisions(
+        semantics: semantics, alpha8: raster.alpha8)
+      else {
+        presentError(PDFError(.unsupported, imageReplacementRefusal(semantics: semantics)))
+        return false
+      }
+      command = ReplaceImageInstanceWithConversionCommand(
         pageID: pageID, placementIndex: placementIndex, width: raster.width,
-        height: raster.height, rgb8: raster.rgb8, alpha8: raster.alpha8)
-    var commands: [any PDFEditCommand] = []
-    if let graph = editSession.currentGraph,
-      OCRLayer.hasGeneratedLayer(in: graph, pageID: pageID)
+        height: raster.height, rgb8: raster.rgb8, alpha8: raster.alpha8,
+        discardSoftMask: decisions.discardSoftMask,
+        discardColorKeyMask: decisions.discardColorKeyMask)
+    } else if let semantics,
+      case .directRGB8(let transparencyRequired) = semantics.replacementPolicy,
+      !(transparencyRequired && raster.alpha8 == nil)
     {
+      command = ReplaceImageDataCommand(
+        pageID: pageID, placementIndex: placementIndex, width: raster.width,
+        height: raster.height, rgb8: raster.rgb8, alpha8: raster.alpha8)
+    } else if let decisions = imageConversionDecisions(
+      semantics: semantics, alpha8: raster.alpha8)
+    {
+      // IMG-03: grayscale/CMYK/ICC/JPEG/JPX or masked page-level sources use
+      // the explicitly named conversion instead of pretending color was kept.
+      command = ReplaceImageInstanceWithConversionCommand(
+        pageID: pageID, placementIndex: placementIndex, width: raster.width,
+        height: raster.height, rgb8: raster.rgb8, alpha8: raster.alpha8,
+        discardSoftMask: decisions.discardSoftMask,
+        discardColorKeyMask: decisions.discardColorKeyMask)
+    } else if semantics == nil {
+      command = ReplaceImageDataCommand(
+        pageID: pageID, placementIndex: placementIndex, width: raster.width,
+        height: raster.height, rgb8: raster.rgb8, alpha8: raster.alpha8)
+    } else {
+      presentError(PDFError(.unsupported, imageReplacementRefusal(semantics: semantics)))
+      return false
+    }
+    var commands: [any PDFEditCommand] = []
+    if OCRLayer.hasGeneratedLayer(in: graph, pageID: pageID) {
       commands.append(RemoveOCRLayerCommand(pageID: pageID))
     }
     commands.append(command)
@@ -6151,12 +6374,13 @@ final class SPDFDocument: NSDocument {
     guard let placements = try? ImageInventory.placements(in: graph, pageID: pageID) else {
       return nil
     }
-    for (index, placement) in placements.enumerated().reversed() {
-      guard placement.isDirectlyEditable, placement.hasSupportedClipping,
-        placement.matrix.count == 6, placement.matrix[0] > 0, placement.matrix[3] > 0,
-        abs(placement.matrix[1]) < 1e-9, abs(placement.matrix[2]) < 1e-9,
-        placement.canvasVisibleBounds != nil, placement.contains(point: pagePoint)
+    for (index, _) in placements.enumerated().reversed() {
+      guard let context = imageEditContext(
+        pageIndex: pageIndex, placementIndex: index, in: graph),
+        imagePlacementIsCanvasSelectable(context),
+        context.placement.contains(point: pagePoint)
       else { continue }
+      let placement = context.placement
       return AddedGraphicTarget(
         pageIndex: pageIndex, streamID: placement.imageID, kind: "Document image",
         rect: placement.bounds, imagePlacementIndex: index,
@@ -6200,12 +6424,13 @@ final class SPDFDocument: NSDocument {
     guard let placements = try? ImageInventory.placements(in: graph, pageID: pageID) else {
       return []
     }
-    return placements.enumerated().compactMap { index, placement in
-      guard placement.isDirectlyEditable, placement.matrix.count == 6,
-        placement.hasSupportedClipping, let hitBounds = placement.canvasVisibleBounds,
-        placement.matrix[0] > 0, placement.matrix[3] > 0,
-        abs(placement.matrix[1]) < 1e-9, abs(placement.matrix[2]) < 1e-9
+    return placements.enumerated().compactMap { index, _ in
+      guard let context = imageEditContext(
+        pageIndex: pageIndex, placementIndex: index, in: graph),
+        imagePlacementIsCanvasSelectable(context),
+        let hitBounds = context.placement.canvasVisibleBounds
       else { return nil }
+      let placement = context.placement
       return AddedGraphicTarget(
         pageIndex: pageIndex, streamID: placement.imageID, kind: "Document image",
         rect: placement.bounds, imagePlacementIndex: index,
@@ -6224,16 +6449,22 @@ final class SPDFDocument: NSDocument {
     guard let placements = try? ImageInventory.placements(in: graph, pageID: pageID) else {
       return nil
     }
-    let placement = placements.reversed().first { candidate in
+    let indexed = Array(placements.enumerated().reversed()).first { _, candidate in
       guard candidate.containsSourcePoint(pagePoint) else { return false }
       return !candidate.hasSupportedClipping || candidate.contains(point: pagePoint)
     }
-    guard let placement else { return nil }
+    guard let (index, placement) = indexed else { return nil }
+    let context = imageEditContext(
+      pageIndex: pageIndex, placementIndex: index, in: graph)
+    if let context, imagePlacementIsCanvasSelectable(context) { return nil }
     if !placement.hasSupportedClipping {
       return "This image uses a clipping path the canvas cannot hit-test exactly. Canvas editing is disabled to avoid selecting hidden parts; use the image context menu for supported actions."
     }
     if placement.depth > 0 {
-      return "This image is drawn inside a reusable form. Canvas movement is disabled because its shared containing transform cannot be rewritten safely."
+      if context?.path?.isDirectlyTransformable == false {
+        return "This image is drawn inside a reusable form whose local transform or clipping is shared with another drawing. This instance cannot be isolated safely; move or duplicate the containing form in the source application."
+      }
+      return "This nested image is rotated or skewed, so canvas handles cannot map it exactly. Use the image context menu to rotate, flip, crop or replace it."
     }
     if !placement.isDirectlyEditable {
       return "This image is not drawn in the supported q…cm…Do…Q pattern. Canvas movement is disabled; use the image context menu for supported rotate, scale or replacement actions."
@@ -6246,14 +6477,17 @@ final class SPDFDocument: NSDocument {
   func moveGraphics(
     _ moves: [(target: AddedGraphicTarget, dx: Double, dy: Double)]
   ) -> Bool {
+    guard let graph = editSession.currentGraph else { return false }
     let commands: [any PDFEditCommand] = moves.compactMap { move in
       guard move.dx.isFinite, move.dy.isFinite,
         hypot(move.dx, move.dy) > 0.001
       else { return nil }
       if let placementIndex = move.target.imagePlacementIndex,
-        let pageID = pageID(at: move.target.pageIndex) {
-        return MoveImageCommand(
-          pageID: pageID, placementIndex: placementIndex, dx: move.dx, dy: move.dy)
+        let command = imageMoveCommand(
+          pageIndex: move.target.pageIndex, placementIndex: placementIndex,
+          dx: move.dx, dy: move.dy, in: graph)
+      {
+        return command
       }
       return MoveAddedGraphicCommand(
         streamID: move.target.streamID, dx: move.dx, dy: move.dy)
@@ -6281,24 +6515,26 @@ final class SPDFDocument: NSDocument {
       target: AddedGraphicTarget, dx: Double, dy: Double, scaleX: Double, scaleY: Double
     )]
   ) -> [any PDFEditCommand] {
+    guard let graph = editSession.currentGraph else { return [] }
     var commands: [any PDFEditCommand] = []
     for resize in resizes {
       guard resize.scaleX.isFinite, resize.scaleY.isFinite,
         resize.scaleX > 0, resize.scaleY > 0
       else { continue }
-      if let placementIndex = resize.target.imagePlacementIndex,
-        let pageID = pageID(at: resize.target.pageIndex) {
-        if hypot(resize.dx, resize.dy) > 0.001 {
-          commands.append(
-            MoveImageCommand(
-              pageID: pageID, placementIndex: placementIndex,
-              dx: resize.dx, dy: resize.dy))
+      if let placementIndex = resize.target.imagePlacementIndex {
+        if hypot(resize.dx, resize.dy) > 0.001,
+          let command = imageMoveCommand(
+            pageIndex: resize.target.pageIndex, placementIndex: placementIndex,
+            dx: resize.dx, dy: resize.dy, in: graph)
+        {
+          commands.append(command)
         }
-        if abs(resize.scaleX - 1) > 0.0001 || abs(resize.scaleY - 1) > 0.0001 {
-          commands.append(
-            ScaleImageCommand(
-              pageID: pageID, placementIndex: placementIndex,
-              scaleX: resize.scaleX, scaleY: resize.scaleY))
+        if abs(resize.scaleX - 1) > 0.0001 || abs(resize.scaleY - 1) > 0.0001,
+          let command = imageScaleCommand(
+            pageIndex: resize.target.pageIndex, placementIndex: placementIndex,
+            scaleX: resize.scaleX, scaleY: resize.scaleY, in: graph)
+        {
+          commands.append(command)
         }
         continue
       }
@@ -6332,10 +6568,11 @@ final class SPDFDocument: NSDocument {
   @discardableResult
   func rotateGraphic(_ target: AddedGraphicTarget) -> Bool {
     if let placementIndex = target.imagePlacementIndex,
-      let pageID = pageID(at: target.pageIndex) {
-      return applyImageTransaction([
-        RotateImageCommand(pageID: pageID, placementIndex: placementIndex, degrees: 90)
-      ])
+      let graph = editSession.currentGraph,
+      let command = imageRotateCommand(
+        pageIndex: target.pageIndex, placementIndex: placementIndex, degrees: 90, in: graph)
+    {
+      return applyImageTransaction([command])
     }
     return applyImageTransaction([
       RotateAddedGraphicCommand(streamID: target.streamID, degrees: 90)
