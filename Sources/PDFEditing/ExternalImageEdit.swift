@@ -397,10 +397,24 @@ public enum ExternalImageEdit {
     warnings.append(
       "Only this placement is replaced; other drawings of the same image resource keep "
         + "their original bytes.")
-    let command = ReplaceImageDataCommand(
-      pageID: target.pageID, placementIndex: target.placementIndex,
-      width: returned.width, height: returned.height, rgb8: returned.rgb8,
-      alpha8: returned.alpha8)
+    // A soft-mask image with no returned alpha can only be replaced through the
+    // explicitly named RGB-conversion command: after IMG-03 the legacy direct-RGB
+    // replacement refuses to drop a mask silently, and only the conversion
+    // command honours the explicit soft-mask discard.
+    let discardSoftMask =
+      target.mask == .softMask && returned.alpha8 == nil && options.discardExistingSoftMask
+    let command: any PDFEditCommand
+    if discardSoftMask {
+      command = ReplaceImageInstanceWithConversionCommand(
+        pageID: target.pageID, placementIndex: target.placementIndex,
+        width: returned.width, height: returned.height, rgb8: returned.rgb8,
+        alpha8: returned.alpha8, discardSoftMask: true)
+    } else {
+      command = ReplaceImageDataCommand(
+        pageID: target.pageID, placementIndex: target.placementIndex,
+        width: returned.width, height: returned.height, rgb8: returned.rgb8,
+        alpha8: returned.alpha8)
+    }
     try command.validate(in: graph)
     return ExternalImageReplacementPlan(
       target: target, commands: [command], warnings: warnings, maskOutcome: maskOutcome,
