@@ -139,6 +139,18 @@ extension SPDFDocument {
 struct LargeDocumentBudgetPanelView: View {
   @ObservedObject var model: LargeDocumentBudgetPanelModel
 
+  /// Split out of the view builder so the type-checker does not have to solve
+  /// the whole concatenation as one expression (CI type-check budget).
+  private func budgetSummary(_ row: LargeDocumentBudgetPanelModel.ClassRow) -> String {
+    let open = format(row.openSeconds)
+    let save = format(row.saveSeconds)
+    let text = format(row.textSecondsPerPage)
+    let cancel = format(row.cancellationSeconds)
+    let memory = format(row.residentMemoryMB)
+    return "Budgets: open ≤ \(open)s, save ≤ \(save)s, text/page ≤ \(text)s, "
+      + "cancel ≤ \(cancel)s, memory ≤ \(memory)MB"
+  }
+
   var body: some View {
     ScrollView {
       VStack(alignment: .leading, spacing: 12) {
@@ -157,11 +169,7 @@ struct LargeDocumentBudgetPanelView: View {
               Button("Measure") { model.run(classID: row.id) }
                 .disabled(model.busy)
             }
-            Text("Budgets: open ≤ " + format(row.openSeconds) + "s, save ≤ "
-              + format(row.saveSeconds) + "s, text/page ≤ "
-              + format(row.textSecondsPerPage) + "s, cancel ≤ "
-              + format(row.cancellationSeconds) + "s, memory ≤ "
-              + format(row.residentMemoryMB) + "MB").font(.caption2)
+            Text(budgetSummary(row)).font(.caption2)
             Text(row.notes).font(.caption2).foregroundStyle(.secondary)
             if let measurement = model.measurements.first(where: { $0.classID == row.id }) {
               Text((measurement.passed ? "Pass: " : "Fail: ") + measurement.summary)

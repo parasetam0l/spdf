@@ -696,6 +696,18 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
   @objc private func showBatchRecipesPanel(_ sender: Any?) {
     currentDocument?.showBatchRecipesPanel()
   }
+  @objc private func showPortfolioPanel(_ sender: Any?) {
+    currentDocument?.presentPortfolioPanel()
+  }
+  @objc private func importRecipe(_ sender: Any?) {
+    currentDocument?.importRecipe()
+  }
+  @objc private func exportRecipe(_ sender: Any?) {
+    currentDocument?.exportRecipe()
+  }
+  @objc private func showRecipePortabilityPanel(_ sender: Any?) {
+    currentDocument?.presentRecipePortability()
+  }
   @objc private func showAccessibleTaggingPanel(_ sender: Any?) {
     currentDocument?.showAccessibleTaggingPanel()
   }
@@ -1008,6 +1020,13 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
       // PAG-07: the batch works on chosen files and needs no open document.
       return true
     }
+    if menuItem.action == #selector(importRecipe)
+      || menuItem.action == #selector(exportRecipe)
+      || menuItem.action == #selector(showRecipePortabilityPanel)
+    {
+      // AUT-07: recipes are app-level declarative data and need no open document.
+      return true
+    }
     if menuItem.action == #selector(documentMetadata) {
       return currentDocument?.canEditContent == true
     }
@@ -1169,6 +1188,11 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
       return document.viewer != nil
     case #selector(showBatchRecipesPanel):
       return true
+    case #selector(showPortfolioPanel):
+      return document.canShowPortfolioPanel
+    case #selector(importRecipe), #selector(exportRecipe),
+      #selector(showRecipePortabilityPanel):
+      return document.canShowRecipePortability
     case #selector(showAccessibleTaggingPanel):
       return document.canShowAccessibleTaggingPanel
     case #selector(showAccessibleRelationshipsPanel):
@@ -1707,8 +1731,14 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
     add(
       "Legacy Compatibility Decisions…", #selector(showCompatibilityDecisions),
       target: self, to: tools)
+    // SPC-01: PDF Portfolio browsing, extraction and transaction-based authoring.
+    add("PDF Portfolio…", #selector(showPortfolioPanel), target: self, to: tools)
     // AUT-03/AUT-04: reusable batch action recipes with resilient execution.
     add("Batch Recipes…", #selector(showBatchRecipesPanel), target: self, to: tools)
+    // AUT-07: declarative recipe portability; import is gated by a compatibility report.
+    add("Import Recipe…", #selector(importRecipe), target: self, to: tools)
+    add("Export Recipe…", #selector(exportRecipe), target: self, to: tools)
+    add("Recipe Portability…", #selector(showRecipePortabilityPanel), target: self, to: tools)
     // EXP-01: per-document-class DOCX reconstruction qualification report.
     add(
       "DOCX Reconstruction Qualification…", #selector(showDOCXQualificationPanel),

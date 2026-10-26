@@ -197,7 +197,8 @@ enum CapabilityContractAudit {
     "manageBookmarks:", "splitDocument:", "combineDocuments:",
     "importFormValues:", "exportFormValues:", "runOCR:",
     "runOCRAllPages:", "reflowParagraph:", "createArchivalCopy:",
-    "exportPresentation:",
+    "exportPresentation:", "showPortfolioPanel:", "importRecipe:", "exportRecipe:",
+    "showRecipePortabilityPanel:",
   ]
 
   private static let specificLimits: [String: String] = [
@@ -253,6 +254,14 @@ enum CapabilityContractAudit {
       "Owned archival derivative profile with explicit PDF/A limitation disclosure; no unsupported identifier is claimed.",
     "exportPresentation:":
       "Owned PresentationML package; only reliably reconstructed text/images/shapes are editable, every other page is a clearly labelled non-editable raster fallback, and the editability report sidecar is always written; the derivative gate never overwrites the open source.",
+    "showPortfolioPanel:":
+      "Read-only browsing/preview/extraction of exact embedded component bytes; add/remove/replace are validated inside one undoable document transaction and preserve every other component byte; folder grouping is a declared name-tree path convention; the portfolio derivative never overwrites the open source.",
+    "importRecipe:":
+      "Declarative JSON only; the validator migrates supported versions and never executes operations, resolves paths or uses the network; the compatibility report is shown before acceptance and any incompatible/unknown operation refuses import.",
+    "exportRecipe:":
+      "Writes deterministic declarative JSON for the current recipe; no code, executable directives, destination resolution or network references are written, and no operation runs.",
+    "showRecipePortabilityPanel:":
+      "Import is gated by the compatibility report; recipes are declarative data only and nothing is executed or fetched from this panel.",
   ]
 
   private static let specificServices: [String: String] = [
@@ -328,6 +337,10 @@ enum CapabilityContractAudit {
     "showFormRichTextEditor:": "SPDFDocument.showFormRichTextFieldEditor()",
     "editVectorObject:": "SPDFDocument.presentVectorObjectEditor()",
     "exportPresentation:": "SPDFDocument.exportPresentation()",
+    "showPortfolioPanel:": "SPDFDocument.presentPortfolioPanel()",
+    "importRecipe:": "SPDFDocument.importRecipe()",
+    "exportRecipe:": "SPDFDocument.exportRecipe()",
+    "showRecipePortabilityPanel:": "SPDFDocument.presentRecipePortability()",
   ]
 
   private static let specificOutputs: [String: String] = [
@@ -358,6 +371,14 @@ enum CapabilityContractAudit {
     "editVectorObject:": "Previewed style/transform change on one ordinary vector path.",
     "exportPresentation:":
       "PPTX presentation plus PresentationEditabilityReport Markdown and JSON sidecars.",
+    "showPortfolioPanel:":
+      "Browsed/extracted components, one undoable portfolio edit transaction and a new portfolio derivative.",
+    "importRecipe:":
+      "Accepted recipe plus compatibility report, or a refusal report; no operation runs.",
+    "exportRecipe:":
+      "Deterministic declarative recipe JSON file.",
+    "showRecipePortabilityPanel:":
+      "Compatibility report and import/export controls; no execution.",
   ]
 
   /// Selectors whose normal document/viewer service entry point is exercised
@@ -426,6 +447,8 @@ enum CapabilityContractAudit {
     "showCompatibilityDecisions:", "showPrintProductionPanel:", "showMeasurements:",
     "showLayers:", "showUXQualificationPanel:", "showToolDiscoveryPanel:",
     "showLargeDocumentBudgetPanel:",
+    "showPortfolioPanel:", "importRecipe:", "exportRecipe:",
+    "showRecipePortabilityPanel:",
   ]
 
   static func run(menu: NSMenu?) -> Report {
