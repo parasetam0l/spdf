@@ -91,11 +91,15 @@ struct TextFormattingInteropTests {
     #expect(shorterPlan.attributedText?.length == (shorter as NSString).length)
     #expect(shorterSpacing.count == shorter.unicodeScalars.count)
     #expect(shorterSpacing.allSatisfy { abs($0 - shorterSpacing[0]) < 1e-12 })
-    #expect(abs(shorterSpacing.reduce(0, +) - spacing.reduce(0, +)) < 1e-9)
+    // Keep the reduction out of the macro: the single expression timed out the
+    // CI type-checker (Xcode 26.6).
+    let shorterTotal = shorterSpacing.reduce(0, +)
+    let spacingTotal = spacing.reduce(0, +)
+    #expect(abs(shorterTotal - spacingTotal) < 1e-9)
     view.insertText(try #require(shorterPlan.attributedText), replacementRange: range)
     #expect(view.string == shorter)
-    #expect(abs(spacingPerCharacter(formatting.fragments()).reduce(0, +)
-      - spacing.reduce(0, +)) < 1e-9)
+    let refragmentedTotal = spacingPerCharacter(formatting.fragments()).reduce(0, +)
+    #expect(abs(refragmentedTotal - spacingTotal) < 1e-9)
   }
 
   @Test @MainActor func mixedEmbeddedSubsetsResolvePerCharacterWithoutSubstitution() throws {
