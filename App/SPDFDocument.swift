@@ -446,6 +446,20 @@ final class SPDFDocument: NSDocument {
     }
   }
 
+  /// Utility panels are added as window controllers so they can be reused. They set a
+  /// descriptive title in their initializer, but NSDocument would replace it with the
+  /// document name and list the panel as another document window. Preserve the panel
+  /// title and keep panels out of the Window menu's duplicate document entries.
+  override func addWindowController(_ windowController: NSWindowController) {
+    let declaredPanelTitle = windowController.window?.title ?? ""
+    super.addWindowController(windowController)
+    guard let window = windowController.window, !declaredPanelTitle.isEmpty,
+      declaredPanelTitle != displayName
+    else { return }
+    window.title = declaredPanelTitle
+    window.isExcludedFromWindowsMenu = true
+  }
+
   override func makeWindowControllers() {
     guard let source = sourceStore.snapshot() else { return }
     undoManager?.removeAllActions()

@@ -434,36 +434,46 @@ struct BatchRecipesPanelView: View {
   }
 
   private var destinationControls: some View {
-    HStack(spacing: 10) {
-      Text("Outputs:").font(.caption).foregroundStyle(.secondary)
-      Picker(
-        "Destination",
-        selection: Binding(
-          get: { model.destinationFolder == nil ? 0 : 1 },
-          set: { newValue in
-            if newValue == 0 {
-              model.destinationFolder = nil
-            } else {
-              model.chooseDestinationFolder()
-            }
-          })
-      ) {
-        Text("Beside inputs").tag(0)
-        Text("Folder…").tag(1)
+    VStack(alignment: .leading, spacing: 6) {
+      HStack(spacing: 10) {
+        Text("Destination").font(.caption).foregroundStyle(.secondary)
+          .frame(width: 74, alignment: .leading)
+        Picker(
+          "Destination",
+          selection: Binding(
+            get: { model.destinationFolder == nil ? 0 : 1 },
+            set: { newValue in
+              if newValue == 0 {
+                model.destinationFolder = nil
+              } else {
+                model.chooseDestinationFolder()
+              }
+            })
+        ) {
+          Text("Beside inputs").tag(0)
+          Text("Folder…").tag(1)
+        }
+        .labelsHidden()
+        .pickerStyle(.segmented)
+        .frame(width: 200)
+        if let folder = model.destinationFolder {
+          Text(folder.lastPathComponent).font(.caption2).lineLimit(1)
+        }
+        TextField("Name template", text: $model.nameTemplate)
+          .textFieldStyle(.roundedBorder)
+          .frame(maxWidth: 240)
+          .help("Output file name template, for example {name}-{recipe}.")
+        Spacer()
       }
-      .pickerStyle(.segmented)
-      .frame(width: 200)
-      if let folder = model.destinationFolder {
-        Text(folder.lastPathComponent).font(.caption2).lineLimit(1)
+      HStack(spacing: 14) {
+        Toggle("Replace existing outputs", isOn: $model.overwriteExistingOutputs)
+          .toggleStyle(.checkbox)
+          .help("Allow writing over outputs that already exist. Inputs are never overwritten.")
+        Toggle("Fail on collision", isOn: $model.failOnCollision)
+          .toggleStyle(.checkbox)
+          .help("Fail instead of adding a unique suffix when an output name already exists.")
+        Spacer()
       }
-      TextField("Name template", text: $model.nameTemplate)
-        .textFieldStyle(.roundedBorder)
-        .frame(maxWidth: 220)
-      Toggle("Replace existing outputs", isOn: $model.overwriteExistingOutputs)
-        .toggleStyle(.checkbox)
-      Toggle("Fail on collision", isOn: $model.failOnCollision)
-        .toggleStyle(.checkbox)
-      Spacer()
     }
     .font(.caption)
   }

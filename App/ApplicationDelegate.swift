@@ -260,9 +260,42 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
     }
   }
 
-  private var currentDocument: SPDFDocument? { documents.currentDocument as? SPDFDocument }
+  /// Document commands validate against the current document. Utility panels are
+  /// document-owned windows, so the key window may be a panel without a document;
+  /// fall back to the document behind the key panel or the most recently used
+  /// visible document window instead of disabling document commands.
+  private var currentDocument: SPDFDocument? {
+    if let document = documents.currentDocument as? SPDFDocument { return document }
+    if let document = (NSApp.keyWindow ?? NSApp.mainWindow)?.windowController?.document
+      as? SPDFDocument
+    {
+      return document
+    }
+    for window in NSApp.windows where window.isVisible {
+      if let document = window.windowController?.document as? SPDFDocument { return document }
+    }
+    return nil
+  }
 
   func dismissWelcome() { welcome?.close() }
+
+  // MARK: - Help menu
+
+  @objc private func showHelpWindow(_ sender: Any?) {
+    HelpWindowController.shared.show()
+  }
+
+  @objc private func openDailyUseGuide(_ sender: Any?) {
+    HelpWindowController.openDocumentation("Daily-Use.md")
+  }
+
+  @objc private func openCompatibilityGuide(_ sender: Any?) {
+    HelpWindowController.openDocumentation("Compatibility.md")
+  }
+
+  @objc private func reportProblem(_ sender: Any?) {
+    HelpWindowController.openIssues()
+  }
 
   @objc private func previousPage(_ sender: Any?) { currentDocument?.viewer?.previousPage() }
   @objc private func nextPage(_ sender: Any?) { currentDocument?.viewer?.nextPage() }
@@ -1708,16 +1741,37 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
     add("Edit Vector Object…", #selector(editVectorObject), target: self, to: objects)
 
     let tools = submenu("Tools", in: bar)
+    // Inspect the current document and compare it with another file.
     add("Manage Attachments…", #selector(manageAttachments), target: self, to: tools)
     add("Compare With…", #selector(compareWithDocument), target: self, to: tools)
+    tools.addItem(.separator())
+    // Repair, optimize and qualify documents and their export profiles.
     add("Optimize Document…", #selector(optimizeDocument), target: self, to: tools)
     add("Repair Document…", #selector(repairDocument), target: self, to: tools)
+    add("Preview DOCX Reconstruction…", #selector(previewDOCX), target: self, to: tools)
+    // EXP-01: per-document-class DOCX reconstruction qualification report.
+    add(
+      "DOCX Reconstruction Qualification…", #selector(showDOCXQualificationPanel),
+      target: self, to: tools)
+    tools.addItem(.separator())
+    // Review exports.
     add("Review Tables…", #selector(reviewTables), target: self, to: tools)
     // REV-04/REV-07: visual review summary / comparison report exports.
     add("Review Reports…", #selector(showReviewReports), target: self, to: tools)
-    add("Preview DOCX Reconstruction…", #selector(previewDOCX), target: self, to: tools)
+    tools.addItem(.separator())
+    // Automation, batch recipes, portfolio and recipe portability.
     // AUT-05/AUT-06: native automation profile, CLI/Shortcuts bridge and watched folders.
     add("Automation…", #selector(showAutomationPanel), target: self, to: tools)
+    // AUT-03/AUT-04: reusable batch action recipes with resilient execution.
+    add("Batch Recipes…", #selector(showBatchRecipesPanel), target: self, to: tools)
+    // AUT-07: declarative recipe portability; import is gated by a compatibility report.
+    add("Import Recipe…", #selector(importRecipe), target: self, to: tools)
+    add("Export Recipe…", #selector(exportRecipe), target: self, to: tools)
+    add("Recipe Portability…", #selector(showRecipePortabilityPanel), target: self, to: tools)
+    // SPC-01: PDF Portfolio browsing, extraction and transaction-based authoring.
+    add("PDF Portfolio…", #selector(showPortfolioPanel), target: self, to: tools)
+    tools.addItem(.separator())
+    // Measurement, layers, discovery and qualification surfaces.
     // SPC-02/SPC-03: calibrated measurements and optional-content layer authoring.
     add("Measurements…", #selector(showMeasurements), target: self, to: tools)
     add("Layers…", #selector(showLayers), target: self, to: tools)
@@ -1731,18 +1785,7 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
     add(
       "Legacy Compatibility Decisions…", #selector(showCompatibilityDecisions),
       target: self, to: tools)
-    // SPC-01: PDF Portfolio browsing, extraction and transaction-based authoring.
-    add("PDF Portfolio…", #selector(showPortfolioPanel), target: self, to: tools)
-    // AUT-03/AUT-04: reusable batch action recipes with resilient execution.
-    add("Batch Recipes…", #selector(showBatchRecipesPanel), target: self, to: tools)
-    // AUT-07: declarative recipe portability; import is gated by a compatibility report.
-    add("Import Recipe…", #selector(importRecipe), target: self, to: tools)
-    add("Export Recipe…", #selector(exportRecipe), target: self, to: tools)
-    add("Recipe Portability…", #selector(showRecipePortabilityPanel), target: self, to: tools)
-    // EXP-01: per-document-class DOCX reconstruction qualification report.
-    add(
-      "DOCX Reconstruction Qualification…", #selector(showDOCXQualificationPanel),
-      target: self, to: tools)
+    tools.addItem(.separator())
     // FNT-05/FNT-06: bounded bidi/Hebrew/Arabic/Indic and CJK horizontal/vertical
     // text insertion.
     let text = submenu("Text", in: tools)
@@ -1855,8 +1898,12 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
     add("Bring All to Front", #selector(NSApplication.arrangeInFront(_:)), to: window)
     let help = submenu("Help", in: bar)
     NSApp.helpMenu = help
-    let item = NSMenuItem(title: "sPDF Editor — PDF editing", action: nil, keyEquivalent: "")
-    help.addItem(item)
+    add("sPDF Editor Help…", #selector(showHelpWindow), key: "?", target: self, to: help)
+    help.addItem(.separator())
+    add("Daily-Use Guide", #selector(openDailyUseGuide), target: self, to: help)
+    add("Compatibility Guide", #selector(openCompatibilityGuide), target: self, to: help)
+    help.addItem(.separator())
+    add("Report a Problem…", #selector(reportProblem), target: self, to: help)
   }
 
   private func submenu(_ title: String, in bar: NSMenu) -> NSMenu {

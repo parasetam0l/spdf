@@ -195,7 +195,6 @@ struct PrintProductionPanel: View {
   var body: some View {
     ScrollView {
       VStack(alignment: .leading, spacing: 12) {
-        Text("Print Production").font(.headline)
         Text(
           "Advanced layouts are planned and drawn by the owned print pipeline. "
             + "Output is appearance-oriented; no PDF/X conformance or overprint simulation "

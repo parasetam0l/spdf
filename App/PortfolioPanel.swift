@@ -317,7 +317,6 @@ struct PortfolioPanel: View {
   var body: some View {
     VStack(alignment: .leading, spacing: 10) {
       HStack {
-        Text("PDF Portfolio").font(.headline)
         Spacer()
         Button("Refresh") { model.reload() }
       }
@@ -334,18 +333,28 @@ struct PortfolioPanel: View {
         TextField("New component folder path (optional, / separated)", text: $model.componentFolderPath)
           .frame(width: 320)
       }
-      HStack {
+      HStack(spacing: 8) {
         Button("Add Files…") { model.chooseAddFiles() }
+          .help("Add local files as portfolio components (bytes are preserved exactly).")
         Button("Extract…") { model.extractSelected() }
           .disabled(!model.canExtract)
-        Button("Replace Bytes…") { model.chooseReplaceBytes() }
+          .help("Write the selected component's exact bytes to a file.")
+        Button("Replace…") { model.chooseReplaceBytes() }
           .disabled(!model.canExtract)
+          .help("Replace the selected component's bytes; the rest of the portfolio is preserved.")
         Button("Stage Remove") { model.stageRemoveSelected() }
           .disabled(!model.canStageRemove)
-        Button("Apply Staged Changes") { model.applyStagedChanges() }
+        Button("Apply Changes") { model.applyStagedChanges() }
           .disabled(!model.canApply)
-        Button("Save Portfolio Derivative…") { model.savePortfolioDerivative() }
-        Button("Create Portfolio from Files…") { model.createPortfolioFromFiles() }
+          .help("Apply all staged add/remove/replace operations as one undoable transaction.")
+        Spacer()
+      }
+      HStack(spacing: 8) {
+        Button("Save Copy…") { model.savePortfolioDerivative() }
+          .help("Write the authored portfolio to a new PDF; the open document is never overwritten.")
+        Button("New Portfolio…") { model.createPortfolioFromFiles() }
+          .help("Create a new portfolio from chosen files without changing the open document.")
+        Spacer()
       }
       if let inventory = model.inventory {
         HStack(spacing: 12) {
@@ -365,25 +374,42 @@ struct PortfolioPanel: View {
         .foregroundStyle(.secondary)
       }
       HSplitView {
-        List(selection: $model.selectedComponentName) {
-          ForEach(model.components, id: \.name) { component in
-            VStack(alignment: .leading, spacing: 2) {
-              HStack {
-                Text(component.fullName).font(.body)
-                Spacer()
-                Text(String(component.byteCount) + " B").font(.caption.monospaced())
-              }
-              HStack(spacing: 8) {
-                if !component.folderPath.isEmpty {
-                  Text("folder: " + component.folderPath.joined(separator: " / "))
-                }
-                if let mime = component.mimeType { Text(mime) }
-                if let description = component.description { Text(description) }
-              }
-              .font(.caption)
-              .foregroundStyle(.secondary)
+        Group {
+          if model.components.isEmpty {
+            VStack(spacing: 8) {
+              Image(systemName: "doc.on.doc").font(.largeTitle).foregroundStyle(.secondary)
+              Text("No portfolio components yet").font(.headline)
+              Text(
+                "Add files to author a portfolio, or open a PDF that already contains "
+                  + "embedded components."
+              )
+              .font(.caption).foregroundStyle(.secondary)
+              .multilineTextAlignment(.center)
             }
-            .tag(component.name)
+            .padding(24)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+          } else {
+            List(selection: $model.selectedComponentName) {
+              ForEach(model.components, id: \.name) { component in
+                VStack(alignment: .leading, spacing: 2) {
+                  HStack {
+                    Text(component.fullName).font(.body)
+                    Spacer()
+                    Text(String(component.byteCount) + " B").font(.caption.monospaced())
+                  }
+                  HStack(spacing: 8) {
+                    if !component.folderPath.isEmpty {
+                      Text("folder: " + component.folderPath.joined(separator: " / "))
+                    }
+                    if let mime = component.mimeType { Text(mime) }
+                    if let description = component.description { Text(description) }
+                  }
+                  .font(.caption)
+                  .foregroundStyle(.secondary)
+                }
+                .tag(component.name)
+              }
+            }
           }
         }
         .frame(minWidth: 420)
