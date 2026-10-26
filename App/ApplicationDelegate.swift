@@ -603,6 +603,33 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
   @objc private func showSignatureDetails(_ sender: Any?) {
     currentDocument?.presentSignatureRevisionDetails()
   }
+  @objc private func certifyDocument(_ sender: Any?) {
+    currentDocument?.presentSignatureCertification()
+  }
+  @objc private func showSignatureCertificationStatus(_ sender: Any?) {
+    currentDocument?.presentSignatureCertificationStatus()
+  }
+  @objc private func showSigningWorkflowGuide(_ sender: Any?) {
+    currentDocument?.presentSigningWorkflowGuide()
+  }
+  @objc private func showOCRMixedPages(_ sender: Any?) {
+    currentDocument?.presentOCRMixedPagesPanel()
+  }
+  @objc private func showFormRoundTripData(_ sender: Any?) {
+    currentDocument?.presentFormRoundTripPanel()
+  }
+  @objc private func showSignaturePresentation(_ sender: Any?) {
+    currentDocument?.showSignaturePresentationPanel()
+  }
+  @objc private func signHiddenCertificate(_ sender: Any?) {
+    currentDocument?.presentHiddenCertificateSigning()
+  }
+  @objc private func showFormResponses(_ sender: Any?) {
+    currentDocument?.showFormResponsesPanel()
+  }
+  @objc private func showFormAccessibleValidation(_ sender: Any?) {
+    currentDocument?.presentFormAccessiblePanel()
+  }
   @objc private func exportText(_ sender: Any?) {
     currentDocument?.exportText()
   }
@@ -980,6 +1007,24 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
       return document.canSignDocument
     case #selector(showSignatureDetails):
       return document.viewer != nil
+    case #selector(certifyDocument):
+      return document.canSignDocument
+    case #selector(showSignatureCertificationStatus):
+      return document.viewer != nil
+    case #selector(showSigningWorkflowGuide):
+      return true
+    case #selector(showOCRMixedPages):
+      return document.canShowOCRMixedPagesPanel
+    case #selector(showFormRoundTripData):
+      return document.viewer != nil
+    case #selector(showSignaturePresentation):
+      return document.canShowSignaturePresentationPanel
+    case #selector(signHiddenCertificate):
+      return document.canShowSignaturePresentationPanel
+    case #selector(showFormResponses):
+      return document.canShowFormResponsesPanel
+    case #selector(showFormAccessibleValidation):
+      return document.canShowFormAccessiblePanel
     case #selector(exportText):
       return document.canExportText
     case #selector(exportPageImages):
@@ -1372,6 +1417,16 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
     // FRM-04/FRM-05: static-value rule portability and rich/complex field editing.
     add("Field Rules and Portability…", #selector(showFormRulesPanel), target: self, to: form)
     add("Rich Text Field Editor…", #selector(showFormRichTextEditor), target: self, to: form)
+    // FRM-06 supporting route: values-only portable form data round trip.
+    add(
+      "Portable Form Data (Round Trip)…", #selector(showFormRoundTripData),
+      target: self, to: form)
+    // FRM-07: read-only collection of completed forms and data files.
+    add("Collect Form Responses…", #selector(showFormResponses), target: self, to: form)
+    // FRM-06: accessible validation, focus/error flow and declared show/hide review.
+    add(
+      "Validate Form / Accessibility…", #selector(showFormAccessibleValidation),
+      target: self, to: form)
     form.addItem(.separator())
     add("Rename Field…", #selector(renameFormField), target: self, to: form)
     add("Delete Field…", #selector(deleteFormField), target: self, to: form)
@@ -1430,6 +1485,8 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
     // OCR-03/OCR-07: suspect-word review and multi-file OCR jobs.
     add("Review OCR Text…", #selector(showOCRReview), target: self, to: annotate)
     add("OCR Files…", #selector(showOCRBatch), target: self, to: annotate)
+    // OCR-06: bounded searchable text on mixed scanned/digital pages.
+    add("Recognize Mixed Pages…", #selector(showOCRMixedPages), target: self, to: annotate)
     // OCR-04/OCR-05: scan cleanup previews and editable scanned-text
     // reconstruction.
     add("Clean Up Scan…", #selector(showScanCleanup), target: self, to: annotate)
@@ -1478,6 +1535,19 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
     add(
       "Sign Existing Field…", #selector(signExistingSignatureField), target: self, to: security)
     add("Signature Details…", #selector(showSignatureDetails), target: self, to: security)
+    // SIG-04/SIG-05: certification/FieldMDP authoring, lock status and the
+    // documented signing workflows.
+    add("Certify Document…", #selector(certifyDocument), target: self, to: security)
+    add(
+      "Certification and Field Locks…", #selector(showSignatureCertificationStatus),
+      target: self, to: security)
+    add(
+      "Signing Workflows and Limits…", #selector(showSigningWorkflowGuide), target: self, to: security)
+    // SIG-07: separate visible signature marks from hidden certificate signing.
+    add(
+      "Signature Presentation…", #selector(showSignaturePresentation), target: self, to: security)
+    add(
+      "Sign Hidden Certificate…", #selector(signHiddenCertificate), target: self, to: security)
     let production = submenu("Print Production", in: tools)
     add("Compatibility Report…", #selector(showCompatibilityReport), target: self, to: production)
     add("Create Archival Copy…", #selector(createArchivalCopy), target: self, to: production)
