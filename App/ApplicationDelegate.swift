@@ -559,6 +559,12 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
   @objc private func showFormDesignPanel(_ sender: Any?) {
     currentDocument?.showFormDesign()
   }
+  @objc private func showFormRulesPanel(_ sender: Any?) {
+    currentDocument?.showFormRulesPanel()
+  }
+  @objc private func showFormRichTextEditor(_ sender: Any?) {
+    currentDocument?.showFormRichTextFieldEditor()
+  }
   @objc private func detectFormFields(_ sender: Any?) {
     guard let document = currentDocument else { return }
     document.showFormDesign()
@@ -940,6 +946,10 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
       return document.canShowFormDesign
     case #selector(detectFormFields):
       return document.canDetectFormFields
+    case #selector(showFormRulesPanel):
+      return document.canShowFormRulesPanel
+    case #selector(showFormRichTextEditor):
+      return document.canShowFormRichTextEditor
     case #selector(toggleArrangeObjects):
       menuItem.state = document.pageObjectSelectionController.isArrangeMode ? .on : .off
       return document.canUsePageObjectArrangement
@@ -1343,6 +1353,10 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
     // FRM-01/FRM-02: detected-field review and direct design canvas.
     add("Form Design…", #selector(showFormDesignPanel), target: self, to: form)
     add("Detect Form Fields…", #selector(detectFormFields), target: self, to: form)
+    form.addItem(.separator())
+    // FRM-04/FRM-05: static-value rule portability and rich/complex field editing.
+    add("Field Rules and Portability…", #selector(showFormRulesPanel), target: self, to: form)
+    add("Rich Text Field Editor…", #selector(showFormRichTextEditor), target: self, to: form)
     form.addItem(.separator())
     add("Rename Field…", #selector(renameFormField), target: self, to: form)
     add("Delete Field…", #selector(deleteFormField), target: self, to: form)

@@ -187,6 +187,7 @@ enum CapabilityContractAudit {
     "signExistingSignatureField:", "showSignatureDetails:",
     "exportComments:", "importComments:", "createPDFFromImages:",
     "editImageExternally:", "editVectorObject:",
+    "showFormRulesPanel:", "showFormRichTextEditor:",
     "createPDFFromText:", "exportAttachments:", "manageAttachments:",
     "manageBookmarks:", "splitDocument:", "combineDocuments:",
     "importFormValues:", "exportFormValues:", "runOCR:",
@@ -206,6 +207,10 @@ enum CapabilityContractAudit {
       "Read-only signed-revision inspection (coverage, signer identity, crypto/trust, changes between signatures); changes no bytes.",
     "showRedactionMarks:":
       "Staged marks are review-only and change no bytes; Apply removes reviewed text/regions in one transaction and the save barrier prevents unapplied marks from reading as secure; hidden/OCR scope is explicit.",
+    "showFormRulesPanel:":
+      "Rules are declarative app-specific sum/number/date keys producing static /V values and appearances; no JavaScript is ever authored or executed; imported actions are preserved and disclosed; Freeze writes values + appearances in one undoable step.",
+    "showFormRichTextEditor:":
+      "Rich runs are bold/italic/size/colour over composed-character ranges with bounded RTF /RV, mixed-run appearances for every widget, inherited /DA /DR /Q /MaxLen /TU resolution and embedded TrueType appearance fonts; unsupported fonts/glyphs refuse; fills are one undoable command.",
     "editImageExternally:":
       "Exports one selected image instance with honest provenance, reimports a chosen file only after preview and explicit mask/aspect/reconstruction acknowledgements, keeps placement geometry and byte-identical sibling instances, and commits one transaction/one Undo.",
     "editVectorObject:":
@@ -265,6 +270,8 @@ enum CapabilityContractAudit {
     "reflowParagraph:": "SPDFDocument.reflowParagraph()",
     "createArchivalCopy:": "SPDFDocument.createArchivalCopy()",
     "editImageExternally:": "SPDFDocument.presentExternalImageEditor()",
+    "showFormRulesPanel:": "SPDFDocument.showFormRulesPanel()",
+    "showFormRichTextEditor:": "SPDFDocument.showFormRichTextFieldEditor()",
     "editVectorObject:": "SPDFDocument.presentVectorObjectEditor()",
   ]
 
@@ -291,6 +298,8 @@ enum CapabilityContractAudit {
     "reflowParagraph:": "Reflowed page text with surrounding content preserved.",
     "createArchivalCopy:": "Archival derivative with its declared profile limits.",
     "editImageExternally:": "Previewed one-instance image replacement with unchanged placement geometry.",
+    "showFormRulesPanel:": "Rule/action inventory, static recalculation and freeze results; imported actions unchanged.",
+    "showFormRichTextEditor:": "Edited rich-text field value with regenerated appearances.",
     "editVectorObject:": "Previewed style/transform change on one ordinary vector path.",
   ]
 
@@ -323,6 +332,7 @@ enum CapabilityContractAudit {
     "showReviewReports:", "exportReviewSummaryPDF:", "exportComparisonReportPDF:",
     "toggleArrangeObjects:", "arrangeSelectedObjects:",
     "editImageExternally:", "editVectorObject:",
+    "showFormRulesPanel:", "showFormRichTextEditor:",
     "showFormDesignPanel:", "detectFormFields:", "showCreatePDFPanel:",
     "showScanCleanup:", "showScannedTextReconstruction:",
     "repairDocument:", "reviewTables:", "previewDOCX:", "convertColors:",
