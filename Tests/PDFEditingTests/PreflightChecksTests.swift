@@ -207,7 +207,7 @@ struct PreflightChecksTests {
     #expect(!PreflightCheckReport.pdfxSupported)
     let text = report.report()
     #expect(text.contains("Read-only"))
-    #expect(text.contains("no PDF/X conformance is claimed"))
+    #expect(text.contains("No ISO PDF/X conformance is claimed"))
     // Nothing was modified: the graph is untouched by running checks.
     let again = try PreflightCheckReport.run(graph, pageIDs: pageIDs)
     #expect(again.findings.count == report.findings.count)

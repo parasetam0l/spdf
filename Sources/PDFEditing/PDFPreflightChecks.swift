@@ -2,7 +2,8 @@ import Foundation
 import PDFCore
 
 /// P37-023/P37-025: read-only preflight checks over the print inventory. The
-/// checks never modify the document and never claim PDF/X conformance.
+/// checks never modify the document and never claim PDF/X conformance; PDF/X
+/// export is a separate declared-subset converter (see PDFXOutput.swift).
 public struct PreflightCheckReport: Sendable, Equatable {
   public struct Finding: Sendable, Equatable {
     public let rule: String
@@ -25,7 +26,9 @@ public struct PreflightCheckReport: Sendable, Equatable {
   public var errorCount: Int { findings.filter { $0.severity == .error }.count }
   public var warningCount: Int { findings.filter { $0.severity == .warning }.count }
 
-  /// P37-025: no PDF/X output is supported and none is claimed.
+  /// P37-025: these read-only checks do not implement PDF/X output. The
+  /// declared-subset PDF/X converter is a separate route; no ISO PDF/X
+  /// certification is claimed by either.
   public static let pdfxSupported = false
 
   /// P37-023: supported checks, computed from the print inventory without
@@ -121,12 +124,13 @@ public struct PreflightCheckReport: Sendable, Equatable {
           detail: "\(sizes.count) distinct MediaBox sizes; mixed page geometry needs review."))
     }
 
-    // P37-025: the honest PDF/X statement.
+    // P37-025: the honest PDF/X statement. PDF/X export lives in the separate
+    // declared-subset converter; these checks certify nothing.
     findings.append(
       Finding(
         rule: "PDF/X", severity: .info,
         detail:
-          "PDF/X output is not supported by this profile; no PDF/X conformance is claimed."))
+          "Read-only checks; PDF/X export is a separate declared-subset route. No ISO PDF/X conformance is claimed by these checks."))
     return PreflightCheckReport(findings: findings)
   }
 

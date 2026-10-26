@@ -1176,7 +1176,7 @@
           firstGraph, pageIDs: first.editSession.pageIDs)
         guard !PreflightCheckReport.pdfxSupported,
           preflightChecks.findings.contains { $0.rule == "PDF/X" },
-          preflightChecks.report().contains("no PDF/X conformance is claimed"),
+          preflightChecks.report().contains("No ISO PDF/X conformance is claimed"),
           try first.data(ofType: "com.adobe.pdf") == original
         else { throw PDFError(.malformed, "Preflight checks failed verification") }
 
