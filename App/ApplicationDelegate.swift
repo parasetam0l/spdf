@@ -541,6 +541,12 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
   @objc private func showReviewReports(_ sender: Any?) {
     currentDocument?.showReviewReports()
   }
+  @objc private func editImageExternally(_ sender: Any?) {
+    currentDocument?.presentExternalImageEditor()
+  }
+  @objc private func editVectorObject(_ sender: Any?) {
+    currentDocument?.presentVectorObjectEditor()
+  }
   @objc private func showCreatePDFPanel(_ sender: Any?) {
     CreatePDFPanelHost.present(document: currentDocument)
   }
@@ -922,6 +928,10 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
       return document.canShowOCRReviewPanel
     case #selector(showReviewReports):
       return document.canShowReviewReports
+    case #selector(editImageExternally):
+      return document.canEditSelectedImageExternally
+    case #selector(editVectorObject):
+      return document.canEditVectorObjects
     case #selector(showScanCleanup):
       return document.canShowScanCleanupPanel
     case #selector(showScannedTextReconstruction):
@@ -1397,6 +1407,13 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
     add(
       "Reconstruct Scanned Text…", #selector(showScannedTextReconstruction),
       target: self, to: annotate)
+
+    // IMG-06/IMG-07: per-instance external image round trip and editable
+    // ordinary vector paths, both previewed before committing.
+    let objects = submenu("Objects", in: bar)
+    add(
+      "Edit Image in External Editor…", #selector(editImageExternally), target: self, to: objects)
+    add("Edit Vector Object…", #selector(editVectorObject), target: self, to: objects)
 
     let tools = submenu("Tools", in: bar)
     add("Manage Attachments…", #selector(manageAttachments), target: self, to: tools)

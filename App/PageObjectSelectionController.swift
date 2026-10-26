@@ -394,8 +394,10 @@ extension SPDFDocument {
   /// reload. This mirrors the App's existing private image-transaction helper
   /// through public/internal session APIs because that helper is file-private.
   @MainActor
-  func applyPageObjectCommands(_ commands: [any PDFEditCommand], pageIndex: Int) -> Bool {
-    guard !commands.isEmpty, requireContentEditing(for: "Arrange Objects") else {
+  func applyPageObjectCommands(
+    _ commands: [any PDFEditCommand], pageIndex: Int, actionName: String = "Arrange Objects"
+  ) -> Bool {
+    guard !commands.isEmpty, requireContentEditing(for: actionName) else {
       return false
     }
     do {
@@ -404,13 +406,13 @@ extension SPDFDocument {
       presentError(error)
       return false
     }
-    registerPageObjectUndo()
+    registerPageObjectUndo(actionName: actionName)
     reloadViewerAfterPageObjectEdit(preservingPage: max(1, pageIndex + 1))
     return true
   }
 
   @MainActor
-  private func registerPageObjectUndo() {
+  private func registerPageObjectUndo(actionName: String = "Arrange Objects") {
     guard let undoManager else {
       updateChangeCount(.changeDone)
       return
@@ -420,7 +422,7 @@ extension SPDFDocument {
     undoManager.registerUndo(withTarget: self) { document in
       document.performPageObjectUndo(registeredRevision: revision)
     }
-    undoManager.setActionName("Arrange Objects")
+    undoManager.setActionName(actionName)
     undoManager.endUndoGrouping()
   }
 

@@ -1294,7 +1294,8 @@ final class SPDFDocument: NSDocument {
     panel.allowsMultipleSelection = false
     guard panel.runModal() == .OK, let url = panel.url else { return }
     do {
-      try openComparisonWindow(with: url)
+      // REV-05/REV-06: scopes, mapping audit and scan/layout qualification.
+      try openComparisonQualificationWindow(with: url)
     } catch {
       presentError(error)
     }

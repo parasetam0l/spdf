@@ -168,7 +168,7 @@ enum CapabilityContractAudit {
   }
 
   private static let documentSubmenus: Set<String> = [
-    "Create PDF", "Export", "Page", "Form", "Annotate", "Tools",
+    "Create PDF", "Export", "Page", "Form", "Annotate", "Objects", "Tools",
   ]
 
   private static let extraDocumentSelectors: Set<String> = [
@@ -186,6 +186,7 @@ enum CapabilityContractAudit {
     "saveSanitizedCopy:", "exportEncryptedCopy:", "redactSelection:", "showRedactionMarks:",
     "signExistingSignatureField:", "showSignatureDetails:",
     "exportComments:", "importComments:", "createPDFFromImages:",
+    "editImageExternally:", "editVectorObject:",
     "createPDFFromText:", "exportAttachments:", "manageAttachments:",
     "manageBookmarks:", "splitDocument:", "combineDocuments:",
     "importFormValues:", "exportFormValues:", "runOCR:",
@@ -205,6 +206,10 @@ enum CapabilityContractAudit {
       "Read-only signed-revision inspection (coverage, signer identity, crypto/trust, changes between signatures); changes no bytes.",
     "showRedactionMarks:":
       "Staged marks are review-only and change no bytes; Apply removes reviewed text/regions in one transaction and the save barrier prevents unapplied marks from reading as secure; hidden/OCR scope is explicit.",
+    "editImageExternally:":
+      "Exports one selected image instance with honest provenance, reimports a chosen file only after preview and explicit mask/aspect/reconstruction acknowledgements, keeps placement geometry and byte-identical sibling instances, and commits one transaction/one Undo.",
+    "editVectorObject:":
+      "Edits one page-level ordinary vector path's fill/stroke or applies a verified coordinate rewrite after preview; gradient shadings, tiling patterns, form XObjects/images, inline images and stale selections refuse without changing content.",
     "exportComments:":
       "XFDF carries supported note/markup/drawing comments with identity/thread/state; FileAttachment bytes are not carried.",
     "importComments:":
@@ -259,6 +264,8 @@ enum CapabilityContractAudit {
     "runOCRAllPages:": "SPDFDocument.runOCRAllPages()",
     "reflowParagraph:": "SPDFDocument.reflowParagraph()",
     "createArchivalCopy:": "SPDFDocument.createArchivalCopy()",
+    "editImageExternally:": "SPDFDocument.presentExternalImageEditor()",
+    "editVectorObject:": "SPDFDocument.presentVectorObjectEditor()",
   ]
 
   private static let specificOutputs: [String: String] = [
@@ -283,6 +290,8 @@ enum CapabilityContractAudit {
     "runOCRAllPages:": "Searchable text layers on all OCR candidates.",
     "reflowParagraph:": "Reflowed page text with surrounding content preserved.",
     "createArchivalCopy:": "Archival derivative with its declared profile limits.",
+    "editImageExternally:": "Previewed one-instance image replacement with unchanged placement geometry.",
+    "editVectorObject:": "Previewed style/transform change on one ordinary vector path.",
   ]
 
   /// Selectors whose normal document/viewer service entry point is exercised
@@ -313,6 +322,7 @@ enum CapabilityContractAudit {
     "signExistingSignatureField:", "showSignatureDetails:",
     "showReviewReports:", "exportReviewSummaryPDF:", "exportComparisonReportPDF:",
     "toggleArrangeObjects:", "arrangeSelectedObjects:",
+    "editImageExternally:", "editVectorObject:",
     "showFormDesignPanel:", "detectFormFields:", "showCreatePDFPanel:",
     "showScanCleanup:", "showScannedTextReconstruction:",
     "repairDocument:", "reviewTables:", "previewDOCX:", "convertColors:",
