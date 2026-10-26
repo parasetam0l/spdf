@@ -197,6 +197,7 @@ enum CapabilityContractAudit {
     "manageBookmarks:", "splitDocument:", "combineDocuments:",
     "importFormValues:", "exportFormValues:", "runOCR:",
     "runOCRAllPages:", "reflowParagraph:", "createArchivalCopy:",
+    "exportPresentation:",
   ]
 
   private static let specificLimits: [String: String] = [
@@ -250,6 +251,8 @@ enum CapabilityContractAudit {
       "Supported fonts/runs and bounded spacing; unsupported advance mappings refuse instead of emitting garbled text.",
     "createArchivalCopy:":
       "Owned archival derivative profile with explicit PDF/A limitation disclosure; no unsupported identifier is claimed.",
+    "exportPresentation:":
+      "Owned PresentationML package; only reliably reconstructed text/images/shapes are editable, every other page is a clearly labelled non-editable raster fallback, and the editability report sidecar is always written; the derivative gate never overwrites the open source.",
   ]
 
   private static let specificServices: [String: String] = [
@@ -305,6 +308,7 @@ enum CapabilityContractAudit {
     "showCJKTextInsertion:": "SPDFDocument.showCJKTextInsertion()",
     "showFormRichTextEditor:": "SPDFDocument.showFormRichTextFieldEditor()",
     "editVectorObject:": "SPDFDocument.presentVectorObjectEditor()",
+    "exportPresentation:": "SPDFDocument.exportPresentation()",
   ]
 
   private static let specificOutputs: [String: String] = [
@@ -333,6 +337,8 @@ enum CapabilityContractAudit {
     "showFormRulesPanel:": "Rule/action inventory, static recalculation and freeze results; imported actions unchanged.",
     "showFormRichTextEditor:": "Edited rich-text field value with regenerated appearances.",
     "editVectorObject:": "Previewed style/transform change on one ordinary vector path.",
+    "exportPresentation:":
+      "PPTX presentation plus PresentationEditabilityReport Markdown and JSON sidecars.",
   ]
 
   /// Selectors whose normal document/viewer service entry point is exercised
@@ -381,7 +387,7 @@ enum CapabilityContractAudit {
     "showSignatureEvidence:", "showSignatureNetworkPreferences:",
     "showStructureReadingOrderPanel:", "showLongTermValidation:",
     "showBidirectionalTextInsertion:", "showCJKTextInsertion:",
-    "showRedactionSanitization:",
+    "showRedactionSanitization:", "exportPresentation:",
     "certifyDocument:", "showSignatureCertificationStatus:", "showSigningWorkflowGuide:",
     "showSignaturePresentation:", "signHiddenCertificate:",
     "showOCRMixedPages:", "showFormRoundTripData:",

@@ -687,6 +687,9 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
   @objc private func exportDOCX(_ sender: Any?) {
     currentDocument?.exportDOCX()
   }
+  @objc private func exportPresentation(_ sender: Any?) {
+    currentDocument?.exportPresentation()
+  }
   @objc private func previewDOCX(_ sender: Any?) {
     currentDocument?.previewDOCX()
   }
@@ -1108,6 +1111,8 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
       return document.canExportPageImages
     case #selector(exportHTML):
       return document.canExportHTML
+    case #selector(exportPresentation):
+      return document.canExportPresentation
     case #selector(exportOutline):
       return document.canExportOutline
     case #selector(exportAttachments):
@@ -1290,6 +1295,9 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
     add("Export Page Images…", #selector(exportPageImages), target: self, to: exports)
     add("Export HTML…", #selector(exportHTML), target: self, to: exports)
     add("Export DOCX…", #selector(exportDOCX), target: self, to: exports)
+    add(
+      "PowerPoint Presentation (PPTX)…", #selector(exportPresentation), target: self,
+      to: exports)
     add("Export Tables…", #selector(exportTables), target: self, to: exports)
     exports.addItem(.separator())
     add("Export Outline…", #selector(exportOutline), target: self, to: exports)
