@@ -58,3 +58,65 @@ public enum SignatureNetworkService {
     return try client.fetch(url: url, body: certificateDER)
   }
 }
+
+extension SignatureNetworkService {
+  /// SIG-02: send a complete RFC 3161 TimeStampReq. Refuses before touching
+  /// the client unless the policy explicitly enables the endpoint.
+  public static func fetchTimestampRequest(
+    requestDER: Data, endpoint: String, policy: SignatureNetworkPolicy,
+    client: any SignatureNetworkClient
+  ) throws -> Data {
+    try policy.requireEnabled(endpoint: endpoint)
+    guard let url = URL(string: endpoint), url.scheme == "https" else {
+      throw PDFError(.malformed, "Timestamp endpoint must be an https URL")
+    }
+    return try client.fetch(url: url, body: requestDER)
+  }
+
+  /// SIG-03: send an OCSP request. Offline is the default; the caller must
+  /// explicitly enable the endpoint and supply the request bytes.
+  public static func fetchOCSP(
+    requestDER: Data, endpoint: String, policy: SignatureNetworkPolicy,
+    client: any SignatureNetworkClient
+  ) throws -> Data {
+    try policy.requireEnabled(endpoint: endpoint)
+    guard let url = URL(string: endpoint), url.scheme == "https" else {
+      throw PDFError(.malformed, "OCSP endpoint must be an https URL")
+    }
+    return try client.fetch(url: url, body: requestDER)
+  }
+
+  /// SIG-03: fetch a CRL by URL. Offline is the default; the caller must
+  /// explicitly enable the endpoint.
+  public static func fetchCRL(
+    endpoint: String, policy: SignatureNetworkPolicy, client: any SignatureNetworkClient
+  ) throws -> Data {
+    try policy.requireEnabled(endpoint: endpoint)
+    guard let url = URL(string: endpoint), url.scheme == "https" else {
+      throw PDFError(.malformed, "CRL endpoint must be an https URL")
+    }
+    return try client.fetch(url: url, body: Data())
+  }
+}
+
+/// SIG-02: a TimestampAuthority backed by the explicitly enabled network
+/// policy. It refuses locally (before any URL is constructed) when the policy
+/// is disabled or the endpoint is not allow-listed.
+public struct NetworkTimestampAuthority: TimestampAuthority {
+  public let endpoint: String
+  public let policy: SignatureNetworkPolicy
+  public let client: any SignatureNetworkClient
+
+  public init(
+    endpoint: String, policy: SignatureNetworkPolicy, client: any SignatureNetworkClient
+  ) {
+    self.endpoint = endpoint
+    self.policy = policy
+    self.client = client
+  }
+
+  public func timestampResponse(for requestDER: Data) throws -> Data {
+    try SignatureNetworkService.fetchTimestampRequest(
+      requestDER: requestDER, endpoint: endpoint, policy: policy, client: client)
+  }
+}

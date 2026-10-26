@@ -124,6 +124,9 @@ struct SignatureFieldList: View {
 /// signed it, and what changed between consecutive signatures.
 struct SignatureRevisionInspectorView: View {
   let snapshot: SignatureMultiSignerSnapshot
+  /// Optional host override; otherwise each revision presents the evidence
+  /// panel through the shared presentation controller.
+  var onShowEvidence: ((PDFSignatureValidation) -> Void)? = nil
   var onShowPage: @MainActor (Int) -> Void
 
   var body: some View {
@@ -193,6 +196,19 @@ struct SignatureRevisionInspectorView: View {
       Text(statusText(revision.validation))
         .font(.caption2)
         .foregroundStyle(statusColor(revision.validation))
+      Text(SignatureEvidencePresentation.summaryLine(revision.validation))
+        .font(.caption2)
+        .foregroundStyle(.secondary)
+      Button("Evidence…") {
+        if let onShowEvidence {
+          onShowEvidence(revision.validation)
+        } else {
+          SignatureEvidencePresentation.present(revision.validation)
+        }
+      }
+      .buttonStyle(.link)
+      .font(.caption2)
+      .accessibilityLabel("Show signature evidence")
       if !revision.changesSincePrevious.isEmpty {
         Text("Changed since the previous signature:")
           .font(.caption2.weight(.semibold))

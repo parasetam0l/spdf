@@ -161,7 +161,10 @@ struct CMSSignedData {
     let signature: Data
     let messageDigest: Data?
     let signingTime: Date?
-    let hasTimestampToken: Bool
+    /// SIG-02: complete RFC 3161 timestamp-token ContentInfo from the
+    /// SignerInfo unsigned attributes, when present.
+    let timestampToken: Data?
+    var hasTimestampToken: Bool { timestampToken != nil }
     /// SIG-01: the SignerInfo certificate identifier (issuerAndSerialNumber).
     let issuerDER: Data?
     let serialDER: Data?
@@ -172,6 +175,9 @@ struct CMSSignedData {
   let certificates: [[UInt8]]
   let signers: [Signer]
   let detached: Bool
+  /// Encapsulated content bytes (TSTInfo for a timestamp token); nil for a
+  /// detached PDF signature.
+  let eContent: Data?
 
   static func parse(_ data: Data, limits: PDFLimits = PDFLimits()) throws -> CMSSignedData {
     let bytes = [UInt8](data)
@@ -205,8 +211,18 @@ struct CMSSignedData {
       bytes: bytes, offset: encap.content.startIndex, end: encap.content.endIndex)
     let contentType = try encapReader.readElement(limits: limits)
     try DERReader.expect(contentType, tag: 0x06, "Encapsulated content type is missing")
-    let detached = encapReader.isAtEnd
-      || DERReader.oid(contentType.content) == "1.2.840.113549.1.7.1"
+    var eContent: Data?
+    if !encapReader.isAtEnd {
+      let explicit = try encapReader.readElement(limits: limits)
+      if explicit.tag == 0xA0 {
+        var explicitReader = DERReader(
+          bytes: bytes, offset: explicit.content.startIndex, end: explicit.content.endIndex)
+        if let octets = try? explicitReader.readElement(limits: limits), octets.tag == 0x04 {
+          eContent = Data(bytes[octets.content.startIndex..<octets.content.endIndex])
+        }
+      }
+    }
+    let detached = eContent == nil
 
     var certificates: [[UInt8]] = []
     var signerInfos: DERReader.Element?
@@ -244,7 +260,8 @@ struct CMSSignedData {
     guard !signers.isEmpty else {
       throw PDFError(.malformed, "SignedData has no signers")
     }
-    return CMSSignedData(certificates: certificates, signers: signers, detached: detached)
+    return CMSSignedData(
+      certificates: certificates, signers: signers, detached: detached, eContent: eContent)
   }
 
   private static func parseSigner(bytes: [UInt8], element: DERReader.Element, limits: PDFLimits)
@@ -284,7 +301,7 @@ struct CMSSignedData {
     var signedAttributesDER: [UInt8]?
     var messageDigest: Data?
     var signingTime: Date?
-    var hasTimestampToken = false
+    var timestampToken: Data?
 
     var next = try reader.readElement(limits: limits)
     if next.tag == 0xA0 {
@@ -317,7 +334,8 @@ struct CMSSignedData {
     if !reader.isAtEnd {
       let unsigned = try reader.readElement(limits: limits)
       if unsigned.tag == 0xA1 {
-        hasTimestampToken = try containsTimestampToken(bytes: bytes, element: unsigned, limits: limits)
+        timestampToken = try timestampTokenDER(
+          bytes: bytes, element: unsigned, limits: limits)
       }
     }
     return Signer(
@@ -325,7 +343,7 @@ struct CMSSignedData {
       signatureOID: DERReader.oid(signatureOID.content),
       signedAttributesDER: signedAttributesDER, signature: signature,
       messageDigest: messageDigest, signingTime: signingTime,
-      hasTimestampToken: hasTimestampToken, issuerDER: sidIssuerDER,
+      timestampToken: timestampToken, issuerDER: sidIssuerDER,
       serialDER: sidSerialDER, subjectKeyIdentifier: sidKeyIdentifier)
   }
 
@@ -365,9 +383,11 @@ struct CMSSignedData {
     return (messageDigest, signingTime)
   }
 
-  private static func containsTimestampToken(
+  /// Returns the complete ContentInfo DER of the id-aa-timeStampToken
+  /// unsigned attribute value, or nil when no timestamp is present.
+  private static func timestampTokenDER(
     bytes: [UInt8], element: DERReader.Element, limits: PDFLimits
-  ) throws -> Bool {
+  ) throws -> Data? {
     var reader = DERReader(
       bytes: bytes, offset: element.content.startIndex, end: element.content.endIndex)
     while !reader.isAtEnd {
@@ -377,11 +397,18 @@ struct CMSSignedData {
         bytes: bytes, offset: attribute.content.startIndex, end: attribute.content.endIndex)
       let type = try attributeReader.readElement(limits: limits)
       guard type.tag == 0x06 else { continue }
-      if DERReader.oid(type.content) == "1.2.840.113549.1.9.16.2.14" {
-        return true
+      guard DERReader.oid(type.content) == TimestampConstants.timestampTokenAttributeOID else {
+        continue
       }
+      guard !attributeReader.isAtEnd else { continue }
+      let values = try attributeReader.readElement(limits: limits)
+      guard values.tag == 0x31, !values.content.isEmpty else { continue }
+      var valuesReader = DERReader(
+        bytes: bytes, offset: values.content.startIndex, end: values.content.endIndex)
+      let token = try valuesReader.readElement(limits: limits)
+      return Data(bytes[token.start..<token.content.endIndex])
     }
-    return false
+    return nil
   }
 }
 
@@ -425,6 +452,16 @@ public struct PDFSignatureValidation: Sendable, Equatable {
   public var uncoveredTrailingBytes: Int = 0
   /// SIG-01: true when the signed ranges reach the end of the file.
   public var signatureCoversWholeFile: Bool = true
+  /// SIG-02: RFC 3161 timestamp evidence embedded in the SignerInfo unsigned
+  /// attributes. Defaults to absent (no timestamp requested/present).
+  public var timestamp: PDFTimestampEvidence = .absent
+  /// SIG-03: revocation evidence supplied by an explicit OCSP/CRL check.
+  /// Defaults to notChecked, preserving the offline default.
+  public var revocation: PDFRevocationEvidence = .notChecked
+  /// SIG-03: signer certificate validity window and the validation clock, so
+  /// expired/boundary evidence is visible without re-parsing the certificate.
+  public var signerNotBefore: Date? = nil
+  public var validationTime: Date? = nil
 }
 
 /// P30-004–P30-014: validation of one signature against the source bytes and
@@ -432,10 +469,17 @@ public struct PDFSignatureValidation: Sendable, Equatable {
 public enum PDFSignatureValidator {
   public static func validate(
     _ signature: PDFSignature, source: Data, finalGraph: PDFGraph,
-    trustedAnchors: [SecCertificate] = [], limits: PDFLimits = PDFLimits()
+    trustedAnchors: [SecCertificate] = [],
+    timestampTrustedAnchors: [SecCertificate] = [],
+    revocationEvidence: PDFRevocationEvidence? = nil,
+    validationTime: Date = Date(),
+    limits: PDFLimits = PDFLimits()
   ) -> PDFSignatureValidation {
     var details: [String] = []
     let bytes = [UInt8](source)
+    // SIG-03: expired/boundary evidence is reported relative to this clock.
+    let effectiveTimestampAnchors = timestampTrustedAnchors.isEmpty
+      ? trustedAnchors : timestampTrustedAnchors
 
     // SIG-01: this profile supports exactly one contents gap (the standard
     // 4-integer ByteRange). Multiple gaps are structurally different; report
@@ -509,8 +553,19 @@ public enum PDFSignatureValidator {
         signerName: nil, signerNotAfter: nil, revocationChecked: false,
         unsignedChanges: unsignedChanges, changedObjectCount: changedCount, details: details)
     }
-    if signer.hasTimestampToken {
-      details.append("A timestamp token is present but its validation is not implemented")
+    // SIG-02: verify the optional RFC 3161 signature timestamp. The append-only
+    // unsigned attribute does not affect the document signature itself; its
+    // evidence is reported separately and never turns invalid into valid.
+    var timestampEvidence = PDFTimestampEvidence.absent
+    if let timestampToken = signer.timestampToken {
+      timestampEvidence = TimestampValidator.validate(
+        tokenDER: timestampToken, over: signer.signature,
+        trustedAnchors: effectiveTimestampAnchors, validationTime: validationTime,
+        limits: limits)
+      details.append(
+        "RFC 3161 timestamp evidence: \(timestampEvidence.status.rawValue)"
+          + (timestampEvidence.details.isEmpty
+            ? "" : " — " + timestampEvidence.details.joined(separator: "; ")))
     }
 
     // P30-011: supported algorithms only.
@@ -520,7 +575,7 @@ public enum PDFSignatureValidator {
         crypto: .indeterminate, trust: .unknown, digestAlgorithm: signer.digestOID,
         signatureAlgorithm: signer.signatureOID, signerName: nil, signerNotAfter: nil,
         revocationChecked: false, unsignedChanges: unsignedChanges, changedObjectCount: changedCount,
-        details: details)
+        details: details, timestamp: timestampEvidence)
     }
     guard let keyAlgorithm = keyAlgorithm(for: signer.signatureOID, digest: digest) else {
       details.append("Unsupported signature algorithm \(signer.signatureOID)")
@@ -528,7 +583,7 @@ public enum PDFSignatureValidator {
         crypto: .indeterminate, trust: .unknown, digestAlgorithm: digest.name,
         signatureAlgorithm: signer.signatureOID, signerName: nil, signerNotAfter: nil,
         revocationChecked: false, unsignedChanges: unsignedChanges, changedObjectCount: changedCount,
-        details: details)
+        details: details, timestamp: timestampEvidence)
     }
 
     // SIG-01: the SignerInfo certificate identifier must name the
@@ -559,7 +614,7 @@ public enum PDFSignatureValidator {
         crypto: .indeterminate, trust: .unknown, digestAlgorithm: digest.name,
         signatureAlgorithm: keyAlgorithm.name, signerName: nil, signerNotAfter: nil,
         revocationChecked: false, unsignedChanges: unsignedChanges,
-        changedObjectCount: changedCount, details: details)
+        changedObjectCount: changedCount, details: details, timestamp: timestampEvidence)
     }
 
     // Signed bytes: every ByteRange pair concatenated.
@@ -589,7 +644,7 @@ public enum PDFSignatureValidator {
           signerNotAfter: matchedIdentity.notAfter, revocationChecked: false,
           unsignedChanges: unsignedChanges, changedObjectCount: changedCount, details: details,
           signerIdentity: matchedIdentity, uncoveredTrailingBytes: uncoveredTrailingBytes,
-          signatureCoversWholeFile: signatureCoversWholeFile)
+          signatureCoversWholeFile: signatureCoversWholeFile, timestamp: timestampEvidence)
       }
     } else {
       details.append("The signature has no signed attributes; the digest is implicit")
@@ -617,23 +672,50 @@ public enum PDFSignatureValidator {
         signerNotAfter: matchedIdentity.notAfter, revocationChecked: false,
         unsignedChanges: unsignedChanges, changedObjectCount: changedCount, details: details,
         signerIdentity: matchedIdentity, uncoveredTrailingBytes: uncoveredTrailingBytes,
-        signatureCoversWholeFile: signatureCoversWholeFile)
+        signatureCoversWholeFile: signatureCoversWholeFile, timestamp: timestampEvidence)
     }
 
-    // P30-010/P30-011: chain evaluation with an explicit offline policy.
-    let (trust, notAfter) = evaluateTrust(
+    // P30-010/P30-011: chain evaluation with an explicit offline policy and
+    // the caller's validation clock, so expired/boundary evidence is explicit.
+    let (trust, notBefore, notAfter) = evaluateTrust(
       signer: certificate, embedded: cms.certificates, anchors: trustedAnchors,
-      details: &details)
-    details.append("Offline evaluation: certificate revocation was not checked")
+      verificationTime: validationTime, details: &details)
+
+    // SIG-03: revocation evidence is caller-supplied (explicit OCSP/CRL check).
+    // Offline stays the default and is reported as not checked; a network
+    // failure is unavailable and never counts as checked-good.
+    let revocation = revocationEvidence ?? .notChecked
+    let revocationChecked =
+      revocation.status != .notChecked && revocation.status != .unavailable
+    if revocationEvidence == nil {
+      details.append("Offline evaluation: certificate revocation was not checked")
+    } else {
+      details.append(
+        "Revocation evidence (" + (revocation.source?.rawValue ?? "none") + "): "
+          + revocation.status.rawValue
+          + (revocation.details.isEmpty
+            ? "" : " — " + revocation.details.joined(separator: "; ")))
+      if revocation.status == .revoked {
+        details.append("The signer certificate is reported revoked")
+      }
+      if revocation.status == .stale {
+        details.append("The revocation response is stale and is not current evidence")
+      }
+      if revocation.status == .unavailable {
+        details.append("Revocation network check was unavailable; it is not valid evidence")
+      }
+    }
 
     return PDFSignatureValidation(
       crypto: .valid, trust: trust, digestAlgorithm: digest.name,
       signatureAlgorithm: keyAlgorithm.name,
       signerName: matchedIdentity.displayName,
-      signerNotAfter: notAfter, revocationChecked: false, unsignedChanges: unsignedChanges,
+      signerNotAfter: notAfter, revocationChecked: revocationChecked,
+      unsignedChanges: unsignedChanges,
       changedObjectCount: changedCount, details: details,
       signerIdentity: matchedIdentity, uncoveredTrailingBytes: uncoveredTrailingBytes,
-      signatureCoversWholeFile: signatureCoversWholeFile)
+      signatureCoversWholeFile: signatureCoversWholeFile, timestamp: timestampEvidence,
+      revocation: revocation, signerNotBefore: notBefore, validationTime: validationTime)
   }
 
   // MARK: ByteRange (P30-004)
@@ -816,8 +898,8 @@ public enum PDFSignatureValidator {
 
   static func evaluateTrust(
     signer: SecCertificate, embedded: [[UInt8]], anchors: [SecCertificate],
-    details: inout [String]
-  ) -> (PDFSignatureValidation.Trust, Date?) {
+    verificationTime: Date, details: inout [String]
+  ) -> (PDFSignatureValidation.Trust, Date?, Date?) {
     var chain: [SecCertificate] = [signer]
     for der in embedded {
       guard let certificate = SecCertificateCreateWithData(nil, Data(der) as CFData) else {
@@ -831,45 +913,71 @@ public enum PDFSignatureValidator {
       let trust
     else {
       details.append("The certificate chain could not be constructed")
-      return (.untrusted, nil)
+      return (.untrusted, nil, nil)
     }
     SecTrustSetNetworkFetchAllowed(trust, false)
     if !anchors.isEmpty {
       SecTrustSetAnchorCertificates(trust, anchors as CFArray)
       SecTrustSetAnchorCertificatesOnly(trust, true)
     }
+    // SIG-03: evaluate at the caller's validation time rather than the wall
+    // clock so boundary and expired states are explicit and reproducible.
+    SecTrustSetVerifyDate(trust, verificationTime as CFDate)
     var error: CFError?
     let trusted = SecTrustEvaluateWithError(trust, &error)
-    let notAfter = certificateNotAfter(signer)
+    let (notBefore, notAfter) = certificateValidity(signer)
+    if let notBefore, let notAfter {
+      details.append(
+        "Signer certificate validity: " + notBefore.formatted() + " – "
+          + notAfter.formatted() + "; validation time: " + verificationTime.formatted())
+    }
     if trusted {
       details.append("The certificate chain is trusted under the supplied policy")
-      return (.trusted, notAfter)
+      return (.trusted, notBefore, notAfter)
+    }
+    // SIG-03: evaluate the signer's own validity window first so a
+    // not-yet-valid certificate is reported as such even when SecTrust maps
+    // the historical evaluation to a generic expiry/path error.
+    if let notBefore, verificationTime < notBefore {
+      details.append("The signer certificate is not valid yet at the validation time")
+      return (.expired, notBefore, notAfter)
+    }
+    if let notAfter, verificationTime > notAfter {
+      details.append("The signer certificate is expired at the validation time")
+      return (.expired, notBefore, notAfter)
     }
     let code = error.map { CFErrorGetCode($0) } ?? -1
     if code == errSecCertificateExpired {
-      details.append("The signer certificate is expired")
-      return (.expired, notAfter)
+      details.append("The signer certificate chain is expired at the validation time")
+      return (.expired, notBefore, notAfter)
+    }
+    if code == errSecCertificateNotValidYet {
+      details.append("The signer certificate is not valid yet at the validation time")
+      return (.expired, notBefore, notAfter)
     }
     if anchors.isEmpty {
       details.append("The chain is not anchored by a trusted root in this offline policy")
-      return (.unknown, notAfter)
+      return (.unknown, notBefore, notAfter)
     }
     details.append("The chain is not anchored by the supplied trusted roots")
-    return (.missingAnchor, notAfter)
+    return (.missingAnchor, notBefore, notAfter)
   }
 
-  static func certificateNotAfter(_ certificate: SecCertificate) -> Date? {
-    guard
-      let values = SecCertificateCopyValues(
-        certificate, [kSecOIDX509V1ValidityNotAfter] as CFArray, nil) as? [CFString: Any],
-      let entry = values[kSecOIDX509V1ValidityNotAfter] as? [CFString: Any],
-      let value = entry[kSecPropertyKeyValue]
-    else { return nil }
-    if let date = value as? Date { return date }
-    if let number = value as? NSNumber {
-      // Absolute time (2001 epoch) when a number is returned.
-      return Date(timeIntervalSinceReferenceDate: number.doubleValue)
+  static func certificateValidity(_ certificate: SecCertificate) -> (Date?, Date?) {
+    let values = SecCertificateCopyValues(
+      certificate,
+      [kSecOIDX509V1ValidityNotBefore, kSecOIDX509V1ValidityNotAfter] as CFArray, nil)
+      as? [CFString: Any]
+    func date(_ key: CFString) -> Date? {
+      guard let entry = values?[key] as? [CFString: Any],
+        let value = entry[kSecPropertyKeyValue]
+      else { return nil }
+      if let date = value as? Date { return date }
+      if let number = value as? NSNumber {
+        return Date(timeIntervalSinceReferenceDate: number.doubleValue)
+      }
+      return nil
     }
-    return nil
+    return (date(kSecOIDX509V1ValidityNotBefore), date(kSecOIDX509V1ValidityNotAfter))
   }
 }

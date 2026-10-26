@@ -120,9 +120,13 @@ enum SignatureSigningFlow {
       try document.signDocument(to: url, identity: identity.identity, options: options)
       document.refreshSignatures()
       document.refreshSignatureMultiSignerState()
+      // SIG-02/SIG-03: report the evidence actually found in the written file
+      // instead of a fixed revocation/timestamp sentence.
+      let evidence = document.signatureEvidenceSummary(forSignedFile: url)
       presentAlert(
         "Signed", "The signed copy was written to \(url.lastPathComponent). "
-          + "Signature fields and revisions were refreshed.")
+          + (evidence.map { "Evidence: " + $0 } ?? "Evidence: unavailable for the written file.")
+          + " Open Signature Evidence… for timestamp and revocation details.")
     } catch {
       presentAlert("Signing Failed", error.localizedDescription)
     }
@@ -135,19 +139,28 @@ enum SignatureSigningFlow {
       presentAlert("Signature Details Unavailable", "This document has no readable PDF graph.")
       return
     }
-    let view = SignatureRevisionInspectorView(snapshot: snapshot) { pageIndex in
+    let view = SignatureRevisionInspectorView(
+      snapshot: snapshot,
+      onShowEvidence: { validation in
+        SignatureEvidencePresentation.present(validation)
+      }
+    ) { pageIndex in
       document.navigate(toSignatureAt: pageIndex)
     }
     let hosting = NSHostingView(rootView: view)
-    hosting.frame = NSRect(x: 0, y: 0, width: 560, height: 360)
+    hosting.frame = NSRect(x: 0, y: 0, width: 560, height: 380)
     let alert = NSAlert()
     alert.messageText = "Signed Revisions"
     alert.alertStyle = .informational
+    let latestEvidence = snapshot.report.revisions.last.map {
+      SignatureEvidencePresentation.summaryLine($0.validation)
+    }
     alert.informativeText =
       snapshot.report.revisions.isEmpty
       ? "No signatures."
-      : "\(snapshot.report.revisions.count) signature(s). Cryptographic validity and "
-        + "certificate trust are shown separately; revocation was not checked offline."
+      : "\(snapshot.report.revisions.count) signature(s). "
+        + (latestEvidence ?? "No evidence available for the latest revision.")
+        + " Select Evidence… on a revision for the full offline trust model."
     alert.accessoryView = hosting
     alert.addButton(withTitle: "Done")
     alert.runModal()

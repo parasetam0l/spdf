@@ -35,10 +35,22 @@ public struct PDFSigningOptions: Sendable, Equatable {
   }
 }
 
+/// SIG-02: the signed PDF plus the timestamp evidence produced while signing.
+public struct PDFSigningOutcome: Sendable {
+  public let data: Data
+  public let timestamp: PDFTimestampEvidence
+
+  public init(data: Data, timestamp: PDFTimestampEvidence = .absent) {
+    self.data = data
+    self.timestamp = timestamp
+  }
+}
+
 /// P30-016–P30-022/P30-025: signature generation. Signatures are produced by
 /// the Security framework from keychain identities; the signed bytes never
 /// change after signing, and insufficient reservations fail before any output
-/// is produced.
+/// is produced. SIG-02 adds an optional RFC 3161 signature timestamp through
+/// an explicitly supplied authority; signing itself never needs one.
 public enum PDFSigningWriter {
   /// Sentinel numbers keep the /ByteRange fields fixed-width so the final
   /// values can be patched without shifting any offsets (P30-018).
@@ -51,11 +63,21 @@ public enum PDFSigningWriter {
     var changedIDs: [PDFObjectID]
   }
 
-  /// P30-016–P30-019: sign a graph as a full rewrite.
+  /// P30-016–P30-019: sign a graph as a full rewrite without a timestamp.
   public static func sign(
     _ graph: PDFGraph, identity: SecIdentity, options: PDFSigningOptions,
     limits: PDFLimits = PDFLimits()
   ) throws -> Data {
+    try sign(
+      graph, identity: identity, options: options, timestamp: nil, limits: limits
+    ).data
+  }
+
+  /// SIG-02: sign a graph and optionally embed an RFC 3161 signature timestamp.
+  public static func sign(
+    _ graph: PDFGraph, identity: SecIdentity, options: PDFSigningOptions,
+    timestamp: PDFTimestampSigningOptions?, limits: PDFLimits = PDFLimits()
+  ) throws -> PDFSigningOutcome {
     // SIG-06: a full rewrite cannot preserve earlier signatures. Adding a
     // signature to a signed document must be an incremental update.
     if (try? PDFSignatureInventory.signatures(in: graph, limits: limits)).map({ !$0.isEmpty })
@@ -69,16 +91,28 @@ public enum PDFSigningWriter {
       graph, identity: identity, options: options, limits: limits)
     let data = try PDFWriter.serialize(plan.graph, limits: limits)
     return try embed(
-      data, signatureID: plan.signatureID, identity: identity, options: options, limits: limits)
+      data, signatureID: plan.signatureID, identity: identity, options: options,
+      timestamp: timestamp, limits: limits)
   }
 
-  /// P30-020/P30-022: append a signed revision to an existing file. The
-  /// original bytes are preserved exactly; signing an already-signed document
-  /// adds another revision whose signature covers only that revision.
+  /// P30-020/P30-022: append a signed revision without a timestamp.
   public static func signIncremental(
     _ source: ParsedPDF, identity: SecIdentity, options: PDFSigningOptions,
     limits: PDFLimits = PDFLimits()
   ) throws -> Data {
+    try signIncremental(
+      source, identity: identity, options: options, timestamp: nil, limits: limits
+    ).data
+  }
+
+  /// P30-020/P30-022/SIG-02: append a signed revision to an existing file. The
+  /// original bytes are preserved exactly; signing an already-signed document
+  /// adds another revision whose signature covers only that revision. An
+  /// optional RFC 3161 timestamp is embedded as an unsigned attribute.
+  public static func signIncremental(
+    _ source: ParsedPDF, identity: SecIdentity, options: PDFSigningOptions,
+    timestamp: PDFTimestampSigningOptions?, limits: PDFLimits = PDFLimits()
+  ) throws -> PDFSigningOutcome {
     guard source.graph.trailer[PDFName("Encrypt")] == nil else {
       throw PDFError(.unsupported, "Signing encrypted documents is not supported")
     }
@@ -129,7 +163,8 @@ public enum PDFSigningWriter {
     output.append(trailerData)
     output.append(Data("\nstartxref\n\(xrefOffset)\n%%EOF\n".utf8))
     return try embed(
-      output, signatureID: plan.signatureID, identity: identity, options: options, limits: limits)
+      output, signatureID: plan.signatureID, identity: identity, options: options,
+      timestamp: timestamp, limits: limits)
   }
 
   // MARK: - Preparation (P30-017)
@@ -411,10 +446,22 @@ public enum PDFSigningWriter {
 
   // MARK: - Embedding (P30-018/P30-019/P30-021)
 
+  /// Compatibility seam for the SIG-05 certification writer (and any existing
+  /// in-tree caller): sign without a timestamp and return the PDF bytes.
   static func embed(
     _ data: Data, signatureID: PDFObjectID, identity: SecIdentity, options: PDFSigningOptions,
     limits: PDFLimits
   ) throws -> Data {
+    try embed(
+      data, signatureID: signatureID, identity: identity, options: options,
+      timestamp: nil, limits: limits
+    ).data
+  }
+
+  static func embed(
+    _ data: Data, signatureID: PDFObjectID, identity: SecIdentity, options: PDFSigningOptions,
+    timestamp: PDFTimestampSigningOptions?, limits: PDFLimits
+  ) throws -> PDFSigningOutcome {
     var output = data
     let sentinelPattern = Data("1000000000 1000000000 1000000000".utf8)
     guard let sentinelRange = output.range(of: sentinelPattern) else {
@@ -442,8 +489,46 @@ public enum PDFSigningWriter {
 
     var signedBytes = Data(output[0..<lt])
     signedBytes.append(output[(gt + 1)...])
-    let cms = try CMSSigner.detachedSignature(
+    let prepared = try CMSSigner.prepareDetachedSignature(
       signedBytes: signedBytes, identity: identity, signingTime: options.signingTime, limits: limits)
+
+    // SIG-02: request an RFC 3161 signature timestamp over the signature
+    // octets. Signing without a timestamp service stays the default; a
+    // required timestamp refuses before writing rather than silently omitting
+    // the evidence, while an optional one records unavailable/invalid evidence.
+    var timestampEvidence = PDFTimestampEvidence.absent
+    var timestampToken: Data?
+    if let timestamp {
+      let request = TimestampRequest(
+        hash: .sha256, imprint: TimestampHash.sha256.digest(prepared.signature),
+        nonce: TimestampRequest.randomNonce())
+      do {
+        let requestDER = TimestampRequestBuilder.build(request)
+        let response = try timestamp.authority.timestampResponse(for: requestDER)
+        let validation = TimestampValidator.validateResponse(
+          response, request: request, trustedAnchors: timestamp.trustedAnchors,
+          clockSkew: timestamp.clockSkew, limits: limits)
+        timestampEvidence = validation.evidence
+        if let token = validation.tokenDER, validation.evidence.isEmbeddable {
+          timestampToken = token
+        } else if timestamp.requirement == .required {
+          throw PDFError(
+            .unsupported,
+            "The timestamp service returned no verifiable token: "
+              + validation.evidence.details.joined(separator: "; "))
+        }
+      } catch {
+        timestampEvidence = PDFTimestampEvidence(
+          status: .unavailable,
+          details: ["The timestamp service could not be used: \(error.localizedDescription)"])
+        if timestamp.requirement == .required {
+          throw PDFError(
+            .unsupported,
+            "A required RFC 3161 timestamp could not be obtained: \(error.localizedDescription)")
+        }
+      }
+    }
+    let cms = prepared.cms(timestampToken: timestampToken)
     guard cms.count <= options.reservationBytes else {
       // P30-021: never write a corrupted output for an undersized reservation.
       throw PDFError(
@@ -470,7 +555,13 @@ public enum PDFSigningWriter {
       throw PDFError(
         .malformed, "The generated signature failed self-verification: \(validation.details)")
     }
-    return output
+    if timestampToken != nil, validation.timestamp.status == .invalid {
+      throw PDFError(
+        .malformed,
+        "The generated timestamp token failed self-verification: "
+          + validation.timestamp.details.joined(separator: "; "))
+    }
+    return PDFSigningOutcome(data: output, timestamp: timestampEvidence)
   }
 
   // MARK: - Helpers

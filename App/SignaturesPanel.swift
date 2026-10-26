@@ -1,12 +1,16 @@
 import PDFEditing
 import SwiftUI
 
-/// P30-015: the signatures panel. Cryptographic validity, certificate trust,
-/// and revision-change status are shown separately; offline runs state that
-/// revocation was not checked.
+/// P30-015/SIG-02/SIG-03: the signatures panel. Cryptographic validity,
+/// certificate trust, revision-change status, RFC 3161 timestamp evidence and
+/// revocation evidence are shown separately; the default offline state is
+/// "revocation not checked", never "valid".
 struct SignaturesPanel: View {
   let entries: [SignaturesModel.Entry]
   var onSelect: (Int) -> Void
+  /// Optional host override; otherwise the row presents the evidence panel
+  /// itself via the shared presentation controller.
+  var onShowEvidence: ((PDFSignatureValidation) -> Void)? = nil
 
   var body: some View {
     VStack(alignment: .leading, spacing: 0) {
@@ -35,6 +39,15 @@ struct SignaturesPanel: View {
             if let algorithm = entry.validation.signatureAlgorithm {
               Text(algorithm).font(.caption2).foregroundStyle(.secondary)
             }
+            Text(SignatureEvidencePresentation.summaryLine(entry.validation))
+              .font(.caption2)
+              .foregroundStyle(.secondary)
+            Button("Evidence…") {
+              presentEvidence(entry.validation)
+            }
+            .buttonStyle(.link)
+            .font(.caption)
+            .accessibilityLabel("Show signature evidence")
             if entry.validation.unsignedChanges {
               Text(
                 "The document changed after signing (\(entry.validation.changedObjectCount) objects)"
@@ -60,6 +73,14 @@ struct SignaturesPanel: View {
     .frame(minWidth: 240, idealWidth: 280, maxWidth: 420)
     .accessibilityElement(children: .contain)
     .accessibilityLabel("Signatures")
+  }
+
+  private func presentEvidence(_ validation: PDFSignatureValidation) {
+    if let onShowEvidence {
+      onShowEvidence(validation)
+    } else {
+      SignatureEvidencePresentation.present(validation)
+    }
   }
 
   private func statusIcon(_ validation: PDFSignatureValidation) -> some View {

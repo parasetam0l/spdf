@@ -85,6 +85,54 @@ enum DER {
     element(tag: 0xA0 | tag, content)
   }
 
+  /// INTEGER from pre-encoded contents (e.g. a request nonce), ensuring the
+  /// result is positive.
+  static func integerBytes(_ bytes: Data) -> Data {
+    var content = bytes
+    if let first = content.first, first & 0x80 != 0 {
+      content.insert(0, at: content.startIndex)
+    }
+    return element(tag: 0x02, content)
+  }
+
+  /// GeneralizedTime in the DER form (Zulu seconds precision), used by
+  /// RFC 3161 TSTInfo and OCSP/CRL freshness fields.
+  static func generalizedTime(_ date: Date) -> Data {
+    let formatter = DateFormatter()
+    formatter.locale = Locale(identifier: "en_US_POSIX")
+    formatter.timeZone = TimeZone(secondsFromGMT: 0)
+    formatter.dateFormat = "yyyyMMddHHmmss'Z'"
+    return element(tag: 0x18, Data(formatter.string(from: date).utf8))
+  }
+
+  /// DER BIT STRING with zero unused bits.
+  static func bitString(_ data: Data) -> Data {
+    var content = Data([0])
+    content.append(data)
+    return element(tag: 0x03, content)
+  }
+
+  static func enumerated(_ value: Int) -> Data {
+    var bytes: [UInt8] = []
+    var remaining = value
+    repeat {
+      bytes.insert(UInt8(remaining & 0xFF), at: 0)
+      remaining >>= 8
+    } while remaining > 0
+    if bytes[0] & 0x80 != 0 { bytes.insert(0, at: 0) }
+    return element(tag: 0x0A, Data(bytes))
+  }
+
+  static func null() -> Data {
+    element(tag: 0x05, Data())
+  }
+
+  /// Explicit context-specific wrapper around a complete element, e.g. the
+  /// [0] EXPLICIT certificates field in a timestamp token/OCSP response.
+  static func explicitContext(_ tag: UInt8, _ wrapped: Data) -> Data {
+    element(tag: 0xA0 | tag, wrapped)
+  }
+
   static func concatenated(_ parts: [Data]) -> Data {
     var data = Data()
     for part in parts { data.append(part) }

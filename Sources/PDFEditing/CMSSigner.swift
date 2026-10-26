@@ -55,13 +55,74 @@ enum CMSSigner {
   static let rsaEncryptionOID = "1.2.840.113549.1.1.1"
   static let ecdsaWithSHA256OID = "1.2.840.10045.4.3.2"
 
+  /// SIG-02: signature material prepared before an optional RFC 3161 token is
+  /// requested. The signature covers the signed attributes, so a token can be
+  /// requested over the signature octets and embedded without re-signing.
+  struct PreparedDetachedSignature {
+    let identifierIssuerDER: Data
+    let identifierSerialDER: Data
+    let signedAttributeContent: Data
+    let signature: Data
+    let signatureOID: String
+    let digestOID: String
+    let signatureAlgorithm: Data
+    let certificates: [SecCertificate]
+
+    func cms(timestampToken: Data?) -> Data {
+      var signerParts: [Data] = [
+        DER.integer(1),
+        DER.sequence([identifierIssuerDER, identifierSerialDER]),
+        DER.sequence([DER.oid(digestOID), DER.null()]),
+        DER.element(tag: 0xA0, signedAttributeContent),
+        signatureAlgorithm,
+        DER.octetString(signature),
+      ]
+      if let timestampToken {
+        // RFC 3161 signature timestamp attribute (id-aa-timeStampToken) as an
+        // unsigned attribute on the SignerInfo. Its value is the complete
+        // timestamp-token ContentInfo; unsigned attributes do not change the
+        // signed-attribute signature.
+        let attribute = DER.sequence([
+          DER.oid(TimestampConstants.timestampTokenAttributeOID),
+          DER.set([timestampToken]),
+        ])
+        signerParts.append(DER.element(tag: 0xA1, attribute))
+      }
+      let signerInfo = DER.sequence(signerParts)
+      let certificateSet = DER.element(
+        tag: 0xA0,
+        DER.concatenated(
+          certificates.map { Data(SecCertificateCopyData($0) as Data) }
+            .sorted { $0.lexicographicallyPrecedes($1) }))
+      let signedData = DER.sequence([
+        DER.integer(1),
+        DER.set([DER.sequence([DER.oid(digestOID), DER.null()])]),
+        DER.sequence([DER.oid(dataOID)]),
+        certificateSet,
+        DER.set([signerInfo]),
+      ])
+      return DER.sequence([DER.oid(signedDataOID), DER.element(tag: 0xA0, signedData)])
+    }
+  }
+
   /// - Parameter signerIdentifierCertificate: test-only seam: name a
   ///   different certificate in the SignerInfo identifier while signing with
   ///   the identity's key, to prove validation rejects mismatched identities.
   static func detachedSignature(
     signedBytes: Data, identity: SecIdentity, signingTime: Date,
-    signerIdentifierCertificate: SecCertificate? = nil, limits: PDFLimits = PDFLimits()
+    signerIdentifierCertificate: SecCertificate? = nil, timestampToken: Data? = nil,
+    limits: PDFLimits = PDFLimits()
   ) throws -> Data {
+    let prepared = try prepareDetachedSignature(
+      signedBytes: signedBytes, identity: identity, signingTime: signingTime,
+      signerIdentifierCertificate: signerIdentifierCertificate, limits: limits)
+    return prepared.cms(timestampToken: timestampToken)
+  }
+
+  static func prepareDetachedSignature(
+    signedBytes: Data, identity: SecIdentity, signingTime: Date,
+    signerIdentifierCertificate: SecCertificate? = nil, limits: PDFLimits = PDFLimits()
+  ) throws -> PreparedDetachedSignature {
     guard let certificate = PDFSigningIdentity.certificate(of: identity) else {
       throw PDFError(.unsupported, "The signing identity has no certificate")
     }
@@ -131,15 +192,6 @@ enum CMSSigner {
     } else {
       signatureAlgorithm = DER.sequence([DER.oid(signatureOID)])
     }
-    let signerInfo = DER.sequence([
-      DER.integer(1),
-      DER.sequence([issuerDER, serialDER]),
-      DER.sequence([DER.oid(sha256OID), DER.element(tag: 0x05, Data())]),
-      DER.element(tag: 0xA0, attributeContent),
-      signatureAlgorithm,
-      DER.octetString(signature as Data),
-    ])
-
     // Embedded certificates: the signer plus whatever chain the system built.
     var chain: [SecCertificate] = [certificate]
     if let trust = makeTrust(for: certificate),
@@ -148,20 +200,11 @@ enum CMSSigner {
     {
       chain = certificates
     }
-    let certificateSet = DER.element(
-      tag: 0xA0,
-      DER.concatenated(
-        chain.map { Data(SecCertificateCopyData($0) as Data) }
-          .sorted { $0.lexicographicallyPrecedes($1) }))
-
-    let signedData = DER.sequence([
-      DER.integer(1),
-      DER.set([DER.sequence([DER.oid(sha256OID), DER.element(tag: 0x05, Data())])]),
-      DER.sequence([DER.oid(dataOID)]),
-      certificateSet,
-      DER.set([signerInfo]),
-    ])
-    return DER.sequence([DER.oid(signedDataOID), DER.element(tag: 0xA0, signedData)])
+    return PreparedDetachedSignature(
+      identifierIssuerDER: issuerDER, identifierSerialDER: serialDER,
+      signedAttributeContent: attributeContent, signature: signature as Data,
+      signatureOID: signatureOID, digestOID: sha256OID,
+      signatureAlgorithm: signatureAlgorithm, certificates: chain)
   }
 
   static func makeTrust(for certificate: SecCertificate) -> SecTrust? {

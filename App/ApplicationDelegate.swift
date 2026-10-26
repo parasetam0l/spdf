@@ -630,6 +630,18 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
   @objc private func showFormAccessibleValidation(_ sender: Any?) {
     currentDocument?.presentFormAccessiblePanel()
   }
+  @objc private func showFormLifecycleCoverage(_ sender: Any?) {
+    currentDocument?.showFormLifecycleCoverage()
+  }
+  @objc private func showFormValidationPanel(_ sender: Any?) {
+    currentDocument?.showFormValidationPanel()
+  }
+  @objc private func showSignatureEvidence(_ sender: Any?) {
+    currentDocument?.presentSignatureEvidence()
+  }
+  @objc private func showSignatureNetworkPreferences(_ sender: Any?) {
+    currentDocument?.presentSignatureNetworkPreferences()
+  }
   @objc private func exportText(_ sender: Any?) {
     currentDocument?.exportText()
   }
@@ -885,7 +897,9 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
     if menuItem.action == #selector(showUpdateSettings) {
       return true
     }
-    if menuItem.action == #selector(showCreatePDFPanel) {
+    if menuItem.action == #selector(showCreatePDFPanel)
+      || menuItem.action == #selector(showSignatureNetworkPreferences)
+    {
       return true
     }
     if menuItem.action == #selector(createPDFFromImages) {
@@ -1025,6 +1039,12 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
       return document.canShowFormResponsesPanel
     case #selector(showFormAccessibleValidation):
       return document.canShowFormAccessiblePanel
+    case #selector(showFormLifecycleCoverage):
+      return document.viewer != nil
+    case #selector(showFormValidationPanel):
+      return document.viewer != nil
+    case #selector(showSignatureEvidence):
+      return document.canShowSignatureEvidence
     case #selector(exportText):
       return document.canExportText
     case #selector(exportPageImages):
@@ -1423,6 +1443,9 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
       target: self, to: form)
     // FRM-07: read-only collection of completed forms and data files.
     add("Collect Form Responses…", #selector(showFormResponses), target: self, to: form)
+    // FRM-08: form lifecycle qualification and save-time validation.
+    add("Qualify Lifecycle…", #selector(showFormLifecycleCoverage), target: self, to: form)
+    add("Form Save Validation…", #selector(showFormValidationPanel), target: self, to: form)
     // FRM-06: accessible validation, focus/error flow and declared show/hide review.
     add(
       "Validate Form / Accessibility…", #selector(showFormAccessibleValidation),
@@ -1543,6 +1566,11 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
       target: self, to: security)
     add(
       "Signing Workflows and Limits…", #selector(showSigningWorkflowGuide), target: self, to: security)
+    // SIG-02/SIG-03: read-only evidence view and offline-default network policy.
+    add("Signature Evidence…", #selector(showSignatureEvidence), target: self, to: security)
+    add(
+      "Signature Network Preferences…", #selector(showSignatureNetworkPreferences),
+      target: self, to: security)
     // SIG-07: separate visible signature marks from hidden certificate signing.
     add(
       "Signature Presentation…", #selector(showSignaturePresentation), target: self, to: security)
