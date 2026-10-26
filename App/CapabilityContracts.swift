@@ -168,7 +168,7 @@ enum CapabilityContractAudit {
   }
 
   private static let documentSubmenus: Set<String> = [
-    "Create PDF", "Export", "Page", "Form", "Annotate", "Objects", "Tools",
+    "Create PDF", "Export", "Page", "Form", "Annotate", "Objects", "Accessibility", "Tools",
   ]
 
   private static let extraDocumentSelectors: Set<String> = [
@@ -177,7 +177,7 @@ enum CapabilityContractAudit {
     "showRedactionMarks:", "signExistingSignatureField:", "showSignatureDetails:",
     "showRedactionSanitization:", "certifyDocument:", "showSignatureCertificationStatus:",
     "showSigningWorkflowGuide:", "showSignaturePresentation:", "signHiddenCertificate:",
-    "showSignatureEvidence:", "showSignatureNetworkPreferences:",
+    "showSignatureEvidence:", "showSignatureNetworkPreferences:", "showLongTermValidation:",
     "showFormResponses:", "showFormAccessibleValidation:",
     "showFormLifecycleCoverage:", "showFormValidationPanel:",
     "showFind:", "findNext:", "findPrevious:",
@@ -287,6 +287,18 @@ enum CapabilityContractAudit {
     "showFormValidationPanel:": "SPDFDocument.showFormValidationPanel()",
     "showSignatureEvidence:": "SPDFDocument.presentSignatureEvidence()",
     "showSignatureNetworkPreferences:": "SPDFDocument.presentSignatureNetworkPreferences()",
+    "showStructureReadingOrderPanel:": "SPDFDocument.showStructureReadingOrder()",
+    "showLongTermValidation:": "SPDFDocument.showSignatureLongTermValidationPanel()",
+    "showSecurityPresets:": "SPDFDocument.presentSecurityPresets()",
+    "showSecurityPolicyReport:": "SPDFDocument.presentSecurityPolicyReport()",
+    "showChangeDocumentProtection:": "SPDFDocument.presentChangeDocumentProtection()",
+    "showRemoveDocumentProtection:": "SPDFDocument.presentRemoveDocumentProtection()",
+    "showAccessibleReadingPanel:": "SPDFDocument.showAccessibleReadingPanel()",
+    "showDOCXQualificationPanel:": "SPDFDocument.showDOCXQualificationPanel()",
+    "showSigningIdentities:": "SPDFDocument.presentSignatureIdentitySources()",
+    "showAccessibilityReport:": "SPDFDocument.presentAccessibilityReport()",
+    "showAccessibleTaggingPanel:": "SPDFDocument.showAccessibleTaggingPanel()",
+    "showAccessibleRelationshipsPanel:": "SPDFDocument.showAccessibleRelationshipsPanel()",
     "showOCRMixedPages:": "SPDFDocument.presentOCRMixedPagesPanel()",
     "showFormRoundTripData:": "SPDFDocument.presentFormRoundTripPanel()",
     "showBidirectionalTextInsertion:": "SPDFDocument.showBidirectionalTextInsertion()",
@@ -347,7 +359,18 @@ enum CapabilityContractAudit {
     "documentMetadata:", "addTextField:", "addCheckbox:", "addRadioGroup:",
     "addChoiceField:", "addPushButton:", "addSignatureField:", "editFormFieldProperties:",
     "recalculateForm:", "distributeFormFields:", "cropPages:", "removePageMark:",
-    "batesNumberingBatch:", "showRedactionMarks:", "showOCRReview:", "showOCRBatch:",
+    "batesNumberingBatch:",
+    "repairDocument:", "reviewTables:", "previewDOCX:", "convertColors:",
+    "createArchivalCopy:", "exportComments:", "importComments:", "printDocument:",
+  ]
+
+  /// Selectors whose operation is covered only by an owned-core suite.
+  private static let coreSelectors: Set<String> = []
+
+  private static let menuSelectors: Set<String> = [
+    // App-UI-only routes: the menu/window route exists and is validated, but no
+    // native smoke or direct service test drives the operation end-to-end.
+    "showRedactionMarks:", "showOCRReview:", "showOCRBatch:",
     "signExistingSignatureField:", "showSignatureDetails:",
     "showReviewReports:", "exportReviewSummaryPDF:", "exportComparisonReportPDF:",
     "toggleArrangeObjects:", "arrangeSelectedObjects:",
@@ -356,21 +379,20 @@ enum CapabilityContractAudit {
     "showFormResponses:", "showFormAccessibleValidation:",
     "showFormLifecycleCoverage:", "showFormValidationPanel:",
     "showSignatureEvidence:", "showSignatureNetworkPreferences:",
+    "showStructureReadingOrderPanel:", "showLongTermValidation:",
     "showBidirectionalTextInsertion:", "showCJKTextInsertion:",
     "showRedactionSanitization:",
     "certifyDocument:", "showSignatureCertificationStatus:", "showSigningWorkflowGuide:",
-    "showSignaturePresentation:", "signHiddenCertificate:", "showFormResponses:",
+    "showSignaturePresentation:", "signHiddenCertificate:",
     "showOCRMixedPages:", "showFormRoundTripData:",
     "showFormDesignPanel:", "detectFormFields:", "showCreatePDFPanel:",
     "showScanCleanup:", "showScannedTextReconstruction:",
-    "repairDocument:", "reviewTables:", "previewDOCX:", "convertColors:",
-    "createArchivalCopy:", "exportComments:", "importComments:", "printDocument:",
+    "showSecurityPresets:", "showSecurityPolicyReport:",
+    "showChangeDocumentProtection:", "showRemoveDocumentProtection:",
+    "showAccessibleReadingPanel:", "showDOCXQualificationPanel:",
+    "showSigningIdentities:", "showAccessibilityReport:",
+    "showAccessibleTaggingPanel:", "showAccessibleRelationshipsPanel:",
   ]
-
-  /// Selectors whose operation is covered only by an owned-core suite.
-  private static let coreSelectors: Set<String> = []
-
-  private static let menuSelectors: Set<String> = []
 
   static func run(menu: NSMenu?) -> Report {
     var contracts: [CapabilityContract] = []

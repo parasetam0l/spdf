@@ -15,7 +15,7 @@ concurrency:
 jobs:
   macos:
     runs-on: macos-26
-    timeout-minutes: 25
+    timeout-minutes: 35
     env:
       DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
     steps:
@@ -29,8 +29,10 @@ jobs:
       - name: Install project generator
         run: brew install xcodegen
       - name: Swift tests
-        # Keep timing assertions isolated from unrelated test-suite load.
-        timeout-minutes: 8
+        # Keep timing assertions isolated from unrelated test-suite load. The
+        # suite grew past 1,500 tests, so allow the serialized run more time
+        # than the original eight minutes.
+        timeout-minutes: 14
         env:
           NSUnbufferedIO: "YES"
         run: |

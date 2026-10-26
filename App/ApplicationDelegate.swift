@@ -642,6 +642,42 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
   @objc private func showSignatureNetworkPreferences(_ sender: Any?) {
     currentDocument?.presentSignatureNetworkPreferences()
   }
+  @objc private func showStructureReadingOrderPanel(_ sender: Any?) {
+    currentDocument?.showStructureReadingOrder()
+  }
+  @objc private func showLongTermValidation(_ sender: Any?) {
+    currentDocument?.showSignatureLongTermValidationPanel()
+  }
+  @objc private func showSecurityPresets(_ sender: Any?) {
+    currentDocument?.presentSecurityPresets()
+  }
+  @objc private func showSecurityPolicyReport(_ sender: Any?) {
+    currentDocument?.presentSecurityPolicyReport()
+  }
+  @objc private func showChangeDocumentProtection(_ sender: Any?) {
+    currentDocument?.presentChangeDocumentProtection()
+  }
+  @objc private func showRemoveDocumentProtection(_ sender: Any?) {
+    currentDocument?.presentRemoveDocumentProtection()
+  }
+  @objc private func showAccessibleReadingPanel(_ sender: Any?) {
+    currentDocument?.showAccessibleReadingPanel()
+  }
+  @objc private func showDOCXQualificationPanel(_ sender: Any?) {
+    currentDocument?.showDOCXQualificationPanel()
+  }
+  @objc private func showSigningIdentities(_ sender: Any?) {
+    currentDocument?.presentSignatureIdentitySources()
+  }
+  @objc private func showAccessibilityReport(_ sender: Any?) {
+    currentDocument?.presentAccessibilityReport()
+  }
+  @objc private func showAccessibleTaggingPanel(_ sender: Any?) {
+    currentDocument?.showAccessibleTaggingPanel()
+  }
+  @objc private func showAccessibleRelationshipsPanel(_ sender: Any?) {
+    currentDocument?.showAccessibleRelationshipsPanel()
+  }
   @objc private func exportText(_ sender: Any?) {
     currentDocument?.exportText()
   }
@@ -1045,6 +1081,27 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
       return document.viewer != nil
     case #selector(showSignatureEvidence):
       return document.canShowSignatureEvidence
+    case #selector(showStructureReadingOrderPanel):
+      return document.viewer != nil
+    case #selector(showLongTermValidation):
+      return document.canShowSignatureLongTermValidationPanel
+    case #selector(showSecurityPresets), #selector(showChangeDocumentProtection),
+      #selector(showRemoveDocumentProtection):
+      return document.canSignDocument
+    case #selector(showSecurityPolicyReport):
+      return document.viewer != nil
+    case #selector(showAccessibleReadingPanel):
+      return document.canShowAccessibleReadingPanel
+    case #selector(showDOCXQualificationPanel):
+      return document.canShowDOCXQualificationPanel
+    case #selector(showSigningIdentities):
+      return document.canShowSignatureIdentitySources
+    case #selector(showAccessibilityReport):
+      return document.canShowAccessibilityReport
+    case #selector(showAccessibleTaggingPanel):
+      return document.canShowAccessibleTaggingPanel
+    case #selector(showAccessibleRelationshipsPanel):
+      return document.canShowAccessibleRelationshipsPanel
     case #selector(exportText):
       return document.canExportText
     case #selector(exportPageImages):
@@ -1533,6 +1590,10 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
     // REV-04/REV-07: visual review summary / comparison report exports.
     add("Review Reports…", #selector(showReviewReports), target: self, to: tools)
     add("Preview DOCX Reconstruction…", #selector(previewDOCX), target: self, to: tools)
+    // EXP-01: per-document-class DOCX reconstruction qualification report.
+    add(
+      "DOCX Reconstruction Qualification…", #selector(showDOCXQualificationPanel),
+      target: self, to: tools)
     // FNT-05/FNT-06: bounded bidi/Hebrew/Arabic/Indic and CJK horizontal/vertical
     // text insertion.
     let text = submenu("Text", in: tools)
@@ -1544,6 +1605,15 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
     add("Unlock Document…", #selector(unlockDocument), target: self, to: security)
     add("Lock Document", #selector(lockDocument), target: self, to: security)
     security.addItem(.separator())
+    // SIG-08: reusable security presets and policy-aware protection changes.
+    add("Security Presets…", #selector(showSecurityPresets), target: self, to: security)
+    add("Document Security Policy…", #selector(showSecurityPolicyReport), target: self, to: security)
+    add(
+      "Change Password / Permissions…", #selector(showChangeDocumentProtection),
+      target: self, to: security)
+    add(
+      "Remove Protection…", #selector(showRemoveDocumentProtection),
+      target: self, to: security)
     // RED-01/RED-02: pending-mark review panel and search-based redaction.
     add(
       "Redaction Marks…", #selector(showRedactionMarks), key: "r",
@@ -1566,6 +1636,12 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
       target: self, to: security)
     add(
       "Signing Workflows and Limits…", #selector(showSigningWorkflowGuide), target: self, to: security)
+    // SIG-07: explicit Keychain / Secure Enclave / token / PKCS#12 identity sources.
+    add("Signing Identities…", #selector(showSigningIdentities), target: self, to: security)
+    // SIG-04: offline PAdES/DSS long-term validation evidence.
+    add(
+      "Long-Term Validation Evidence…", #selector(showLongTermValidation),
+      target: self, to: security)
     // SIG-02/SIG-03: read-only evidence view and offline-default network policy.
     add("Signature Evidence…", #selector(showSignatureEvidence), target: self, to: security)
     add(
@@ -1580,6 +1656,24 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
     add("Compatibility Report…", #selector(showCompatibilityReport), target: self, to: production)
     add("Create Archival Copy…", #selector(createArchivalCopy), target: self, to: production)
     add("Convert Colors…", #selector(convertColors), target: self, to: production)
+
+    // A11Y-01/A11Y-02: tag-tree editing and independent visual reading order.
+    let accessibility = submenu("Accessibility", in: bar)
+    add(
+      "Structure and Reading Order…", #selector(showStructureReadingOrderPanel),
+      target: self, to: accessibility)
+    add(
+      "Accessible Reading…", #selector(showAccessibleReadingPanel),
+      target: self, to: accessibility)
+    add(
+      "Accessibility Report…", #selector(showAccessibilityReport),
+      target: self, to: accessibility)
+    add(
+      "Assisted Tagging…", #selector(showAccessibleTaggingPanel),
+      target: self, to: accessibility)
+    add(
+      "Accessible Tables and Forms…", #selector(showAccessibleRelationshipsPanel),
+      target: self, to: accessibility)
 
     let window = submenu("Window", in: bar)
     NSApp.windowsMenu = window
