@@ -315,6 +315,12 @@ enum CapabilityContractAudit {
     "showConversionJobCenter:": "SPDFDocument.showConversionJobCenter()",
     "createPDFFromSourceDocument:": "SPDFDocument.showSourcePDFCreationPanel()",
     "showCompatibilityDecisions:": "SPDFDocument.presentCompatibilityDecisions()",
+    "showPrintProductionPanel:": "SPDFDocument.presentPrintProductionPanel()",
+    "showMeasurements:": "SPDFDocument.presentMeasurementsPanel()",
+    "showLayers:": "SPDFDocument.presentLayersPanel()",
+    "showUXQualificationPanel:": "SPDFDocument.showUXQualificationPanel()",
+    "showToolDiscoveryPanel:": "SPDFDocument.showToolDiscoveryPanel()",
+    "showLargeDocumentBudgetPanel:": "SPDFDocument.showLargeDocumentBudgetPanel()",
     "showOCRMixedPages:": "SPDFDocument.presentOCRMixedPagesPanel()",
     "showFormRoundTripData:": "SPDFDocument.presentFormRoundTripPanel()",
     "showBidirectionalTextInsertion:": "SPDFDocument.showBidirectionalTextInsertion()",
@@ -417,7 +423,9 @@ enum CapabilityContractAudit {
     "showColorManagedConversion:", "showSeparationPreview:", "showQualityOptimization:",
     "showAdvancedSearch:", "showLocalSearchIndex:",
     "showSelectionExportPanel:", "showConversionJobCenter:", "createPDFFromSourceDocument:",
-    "showCompatibilityDecisions:",
+    "showCompatibilityDecisions:", "showPrintProductionPanel:", "showMeasurements:",
+    "showLayers:", "showUXQualificationPanel:", "showToolDiscoveryPanel:",
+    "showLargeDocumentBudgetPanel:",
   ]
 
   static func run(menu: NSMenu?) -> Report {

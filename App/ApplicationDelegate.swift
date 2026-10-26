@@ -705,6 +705,24 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
   @objc private func showQualityOptimization(_ sender: Any?) {
     currentDocument?.showQualityOptimization()
   }
+  @objc private func showPrintProductionPanel(_ sender: Any?) {
+    currentDocument?.presentPrintProductionPanel()
+  }
+  @objc private func showMeasurements(_ sender: Any?) {
+    currentDocument?.presentMeasurementsPanel()
+  }
+  @objc private func showLayers(_ sender: Any?) {
+    currentDocument?.presentLayersPanel()
+  }
+  @objc private func showUXQualificationPanel(_ sender: Any?) {
+    currentDocument?.showUXQualificationPanel()
+  }
+  @objc private func showToolDiscoveryPanel(_ sender: Any?) {
+    currentDocument?.showToolDiscoveryPanel()
+  }
+  @objc private func showLargeDocumentBudgetPanel(_ sender: Any?) {
+    currentDocument?.showLargeDocumentBudgetPanel()
+  }
   @objc private func showSelectionExportPanel(_ sender: Any?) {
     currentDocument?.showSelectionExportPanel()
   }
@@ -1156,6 +1174,10 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
     case #selector(showAccessibleRelationshipsPanel):
       return document.canShowAccessibleRelationshipsPanel
     case #selector(showQualityOptimization):
+      return document.viewer != nil
+    case #selector(showPrintProductionPanel), #selector(showMeasurements),
+      #selector(showLayers), #selector(showUXQualificationPanel),
+      #selector(showToolDiscoveryPanel), #selector(showLargeDocumentBudgetPanel):
       return document.viewer != nil
     case #selector(showSelectionExportPanel):
       return document.canShowSelectionExportPanel
@@ -1672,6 +1694,15 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
     add("Preview DOCX Reconstruction…", #selector(previewDOCX), target: self, to: tools)
     // AUT-05/AUT-06: native automation profile, CLI/Shortcuts bridge and watched folders.
     add("Automation…", #selector(showAutomationPanel), target: self, to: tools)
+    // SPC-02/SPC-03: calibrated measurements and optional-content layer authoring.
+    add("Measurements…", #selector(showMeasurements), target: self, to: tools)
+    add("Layers…", #selector(showLayers), target: self, to: tools)
+    // UX-01..UX-04: qualification reports and discovery surfaces.
+    add("UX Qualification…", #selector(showUXQualificationPanel), target: self, to: tools)
+    add("Find a Tool…", #selector(showToolDiscoveryPanel), target: self, to: tools)
+    add(
+      "Large Document Budget…", #selector(showLargeDocumentBudgetPanel),
+      target: self, to: tools)
     // SPC-06/SPC-07: legacy JavaScript and XFA compatibility decisions.
     add(
       "Legacy Compatibility Decisions…", #selector(showCompatibilityDecisions),
@@ -1761,6 +1792,10 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
     // PRE-09: quality-aware image optimization with preservation verification.
     add(
       "Quality Optimization…", #selector(showQualityOptimization),
+      target: self, to: production)
+    // PRE-07/PRE-08: prepress inspection, spot/ink tools and advanced print plans.
+    add(
+      "Print Production Workspace…", #selector(showPrintProductionPanel),
       target: self, to: production)
     add("Convert Colors…", #selector(convertColors), target: self, to: production)
 

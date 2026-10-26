@@ -163,6 +163,9 @@ do {
     let manifest = try CorpusManifest.load(data: manifestData)
     print(CorpusMatrix.build(from: manifest).report())
 
+  case "candidate-gate", "candidate-verify", "candidate-plan", "required-checks":
+    exit(try CandidateGateCLI.run(command, arguments: Array(arguments.dropFirst())))
+
   default:
     fail("unknown command \(command)")
   }
