@@ -12,6 +12,7 @@ let package = Package(
     .library(name: "ReleaseTools", targets: ["ReleaseTools"]),
     .executable(name: "spdf-fixtures", targets: ["FixtureTool"]),
     .executable(name: "release-tools", targets: ["ReleaseToolsCLI"]),
+    .executable(name: "spdf-automation", targets: ["AutomationCLI"]),
   ],
   targets: [
     .target(name: "PDFCore"),
@@ -24,6 +25,8 @@ let package = Package(
     .target(name: "ReleaseTools", path: "Tools/ReleaseTools"),
     .executableTarget(
       name: "ReleaseToolsCLI", dependencies: ["ReleaseTools"], path: "Tools/ReleaseToolsCLI"),
+    .executableTarget(
+      name: "AutomationCLI", dependencies: ["PDFEditing"], path: "Tools/AutomationCLI"),
     .testTarget(name: "PDFCoreTests", dependencies: ["PDFCore", "PDFFixtures"]),
     .testTarget(name: "ReleaseToolsTests", dependencies: ["ReleaseTools"]),
     .testTarget(name: "PDFEditingTests", dependencies: ["PDFEditing", "PDFCore", "PDFFixtures"]),

@@ -2583,7 +2583,7 @@
           .init(title: "Paste", modifiers: [.command]),
         ]).missing.isEmpty,
         let file = NSApp.mainMenu?.item(withTitle: "File")?.submenu,
-        file.items.filter({ !$0.isSeparatorItem }).count <= 10,
+        file.items.filter({ !$0.isSeparatorItem }).count <= 14,
         KeyboardAudit.find("Check for Updates…") != nil
       else { throw PDFError(.malformed, "Settings/menu structure regression") }
       let capabilityAudit = CapabilityContractAudit.run(menu: NSApp.mainMenu)

@@ -672,11 +672,50 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
   @objc private func showAccessibilityReport(_ sender: Any?) {
     currentDocument?.presentAccessibilityReport()
   }
+  @objc private func showArchivalConversionPanel(_ sender: Any?) {
+    currentDocument?.showArchivalConversionPanel()
+  }
+  @objc private func showPrintProductionStudio(_ sender: Any?) {
+    currentDocument?.showPrintProductionStudio()
+  }
+  @objc private func showAutomationPanel(_ sender: Any?) {
+    currentDocument?.showAutomationPanel()
+  }
+  @objc private func showColorManagedConversion(_ sender: Any?) {
+    currentDocument?.presentColorManagedConversion()
+  }
+  @objc private func showSeparationPreview(_ sender: Any?) {
+    currentDocument?.presentSeparationPreview()
+  }
+  @objc private func showAdvancedSearch(_ sender: Any?) {
+    currentDocument?.presentAdvancedSearch()
+  }
+  @objc private func showLocalSearchIndex(_ sender: Any?) {
+    currentDocument?.presentLocalSearchIndex()
+  }
+  @objc private func showBatchRecipesPanel(_ sender: Any?) {
+    currentDocument?.showBatchRecipesPanel()
+  }
   @objc private func showAccessibleTaggingPanel(_ sender: Any?) {
     currentDocument?.showAccessibleTaggingPanel()
   }
   @objc private func showAccessibleRelationshipsPanel(_ sender: Any?) {
     currentDocument?.showAccessibleRelationshipsPanel()
+  }
+  @objc private func showQualityOptimization(_ sender: Any?) {
+    currentDocument?.showQualityOptimization()
+  }
+  @objc private func showSelectionExportPanel(_ sender: Any?) {
+    currentDocument?.showSelectionExportPanel()
+  }
+  @objc private func showConversionJobCenter(_ sender: Any?) {
+    currentDocument?.showConversionJobCenter()
+  }
+  @objc private func createPDFFromSourceDocument(_ sender: Any?) {
+    currentDocument?.showSourcePDFCreationPanel()
+  }
+  @objc private func showCompatibilityDecisions(_ sender: Any?) {
+    currentDocument?.presentCompatibilityDecisions()
   }
   @objc private func exportText(_ sender: Any?) {
     currentDocument?.exportText()
@@ -1101,10 +1140,31 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
       return document.canShowSignatureIdentitySources
     case #selector(showAccessibilityReport):
       return document.canShowAccessibilityReport
+    case #selector(showArchivalConversionPanel):
+      return document.canShowArchivalConversionPanel
+    case #selector(showPrintProductionStudio):
+      return document.viewer != nil
+    case #selector(showAutomationPanel):
+      return document.canShowAutomationPanel
+    case #selector(showColorManagedConversion), #selector(showSeparationPreview),
+      #selector(showAdvancedSearch), #selector(showLocalSearchIndex):
+      return document.viewer != nil
+    case #selector(showBatchRecipesPanel):
+      return true
     case #selector(showAccessibleTaggingPanel):
       return document.canShowAccessibleTaggingPanel
     case #selector(showAccessibleRelationshipsPanel):
       return document.canShowAccessibleRelationshipsPanel
+    case #selector(showQualityOptimization):
+      return document.viewer != nil
+    case #selector(showSelectionExportPanel):
+      return document.canShowSelectionExportPanel
+    case #selector(showConversionJobCenter):
+      return document.canShowConversionJobCenter
+    case #selector(createPDFFromSourceDocument):
+      return document.canShowSourcePDFCreationPanel
+    case #selector(showCompatibilityDecisions):
+      return document.viewer != nil
     case #selector(exportText):
       return document.canExportText
     case #selector(exportPageImages):
@@ -1275,6 +1335,10 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
     add(
       "From Clipboard, Scanner or Images…", #selector(showCreatePDFPanel), target: self, to: create)
     add("Document Metadata…", #selector(documentMetadata), target: self, to: file)
+    // EXP-04/EXP-05: approved local handoff routes for Office/HTML sources.
+    add(
+      "Create PDF from Source Document…", #selector(createPDFFromSourceDocument),
+      target: self, to: file)
     add(
       "Open…", #selector(NSDocumentController.openDocument(_:)), key: "o", target: documents,
       to: file)
@@ -1295,6 +1359,10 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
     add("Export Page Images…", #selector(exportPageImages), target: self, to: exports)
     add("Export HTML…", #selector(exportHTML), target: self, to: exports)
     add("Export DOCX…", #selector(exportDOCX), target: self, to: exports)
+    // EXP-06/EXP-07: selection/range export and the conversion job center.
+    add(
+      "Export Selection / Range…", #selector(showSelectionExportPanel), target: self, to: exports)
+    add("Conversion Job Center…", #selector(showConversionJobCenter), target: self, to: file)
     add(
       "PowerPoint Presentation (PPTX)…", #selector(exportPresentation), target: self,
       to: exports)
@@ -1395,6 +1463,10 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
     add(
       "Redact Selection…", #selector(redactSelection), key: "r",
       modifiers: [.command, .option], target: self, to: edit)
+
+    // AUT-01/AUT-02: scoped live search and a local full-text index.
+    add("Advanced Search…", #selector(showAdvancedSearch), target: self, to: edit)
+    add("Search Index…", #selector(showLocalSearchIndex), target: self, to: edit)
 
     let view = submenu("View", in: bar)
     add("Previous Page", #selector(previousPage), key: "[", target: self, to: view)
@@ -1598,6 +1670,14 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
     // REV-04/REV-07: visual review summary / comparison report exports.
     add("Review Reports…", #selector(showReviewReports), target: self, to: tools)
     add("Preview DOCX Reconstruction…", #selector(previewDOCX), target: self, to: tools)
+    // AUT-05/AUT-06: native automation profile, CLI/Shortcuts bridge and watched folders.
+    add("Automation…", #selector(showAutomationPanel), target: self, to: tools)
+    // SPC-06/SPC-07: legacy JavaScript and XFA compatibility decisions.
+    add(
+      "Legacy Compatibility Decisions…", #selector(showCompatibilityDecisions),
+      target: self, to: tools)
+    // AUT-03/AUT-04: reusable batch action recipes with resilient execution.
+    add("Batch Recipes…", #selector(showBatchRecipesPanel), target: self, to: tools)
     // EXP-01: per-document-class DOCX reconstruction qualification report.
     add(
       "DOCX Reconstruction Qualification…", #selector(showDOCXQualificationPanel),
@@ -1663,6 +1743,25 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuItemVali
     let production = submenu("Print Production", in: tools)
     add("Compatibility Report…", #selector(showCompatibilityReport), target: self, to: production)
     add("Create Archival Copy…", #selector(createArchivalCopy), target: self, to: production)
+    // PRE-01/PRE-02: declared-conformance PDF/A conversion.
+    add(
+      "Archival Conversion (PDF/A)…", #selector(showArchivalConversionPanel),
+      target: self, to: production)
+    // PRE-03/PRE-04: PDF/X export and configurable preflight/fixups.
+    add(
+      "Preflight and PDF/X Export…", #selector(showPrintProductionStudio),
+      target: self, to: production)
+    // PRE-05/PRE-06: colour-managed conversion and separation/overprint preview.
+    add(
+      "Color-Managed Conversion…", #selector(showColorManagedConversion),
+      target: self, to: production)
+    add(
+      "Separation & Overprint Preview…", #selector(showSeparationPreview),
+      target: self, to: production)
+    // PRE-09: quality-aware image optimization with preservation verification.
+    add(
+      "Quality Optimization…", #selector(showQualityOptimization),
+      target: self, to: production)
     add("Convert Colors…", #selector(convertColors), target: self, to: production)
 
     // A11Y-01/A11Y-02: tag-tree editing and independent visual reading order.
